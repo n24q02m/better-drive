@@ -3,6 +3,7 @@ package cli
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
@@ -28,13 +29,17 @@ func setupCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			e := engine.New()
 			defer e.Close()
-			ok, err := e.RemoteExists(remote)
-			if err != nil {
-				return err
-			}
-			if ok {
-				fmt.Fprintf(cmd.OutOrStdout(), "remote %q already exists\n", remote)
+			// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
+			// the remote's config stanza to disk BEFORE OAuth completes, so an
+			// interrupted `setup` leaves behind a remote that "exists" by name but has
+			// no token. Treat that as broken and self-heal instead of silently skipping.
+			configured, _ := e.RemoteConfigured(remote)
+			if configured {
+				fmt.Fprintf(cmd.OutOrStdout(), "remote %q already set up\n", remote)
 				return nil
+			}
+			if exists, _ := e.RemoteExists(remote); exists {
+				_ = e.DeleteRemote(remote) // clear broken, token-less stanza before recreating
 			}
 			// PLAN-TIME VERIFY (spec §3): config/create với backend drive tự mở browser OAuth
 			// qua librclone in-process. Nếu librclone không trigger browser → fallback delegate
@@ -63,8 +68,12 @@ func runCmd() *cobra.Command {
 				return err
 			}
 			p := cfg.Pairs[0]
+			remoteName, _, _ := strings.Cut(p.Remote, ":")
 			e := engine.New()
 			defer e.Close()
+			if configured, _ := e.RemoteConfigured(remoteName); !configured {
+				return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
+			}
 			loop := syncloop.New(e, p.Local, p.Remote, paths.Workdir(),
 				func() ([]string, error) { return config.TranslateDriveIgnore(p.Local) })
 			ctx, cancel := context.WithCancel(context.Background())

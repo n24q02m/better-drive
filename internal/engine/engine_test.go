@@ -72,3 +72,59 @@ func TestRemoteExists(t *testing.T) {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
 }
+
+func TestRemoteConfiguredWithToken(t *testing.T) {
+	e := newTestEngine(func(method, input string) (string, int) {
+		if method != "config/get" {
+			t.Fatalf("method = %q, want config/get", method)
+		}
+		return `{"type":"drive","skip_gdocs":"true","token":"{\"access_token\":\"x\"}"}`, 200
+	})
+	ok, err := e.RemoteConfigured("gdrive")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want true, nil", ok, err)
+	}
+}
+
+func TestRemoteConfiguredTokenless(t *testing.T) {
+	// Rclone rc config/get on a remote whose config/create hasn't finished OAuth
+	// yet returns the stanza without a "token" key at all (verified empirically).
+	e := newTestEngine(func(method, input string) (string, int) {
+		return `{"type":"drive","skip_gdocs":"true"}`, 200
+	})
+	ok, err := e.RemoteConfigured("gdrive")
+	if err != nil || ok {
+		t.Fatalf("ok=%v err=%v, want false, nil", ok, err)
+	}
+}
+
+func TestRemoteConfiguredErrorTreatedAsMissing(t *testing.T) {
+	e := newTestEngine(func(method, input string) (string, int) {
+		return `{"error":"didn't find section in config file"}`, 500
+	})
+	ok, err := e.RemoteConfigured("gdrive")
+	if err != nil || ok {
+		t.Fatalf("ok=%v err=%v, want false, nil", ok, err)
+	}
+}
+
+func TestDeleteRemote(t *testing.T) {
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{}`, 200
+	})
+	if err := e.DeleteRemote("bdfixtest"); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "config/delete" {
+		t.Fatalf("method = %q, want config/delete", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["name"] != "bdfixtest" {
+		t.Errorf("name = %v, want bdfixtest", m["name"])
+	}
+}

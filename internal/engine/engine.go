@@ -54,6 +54,28 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	return false, nil
 }
 
+// RemoteConfigured reports whether name is a remote with a valid OAuth token,
+// as opposed to a broken, token-less stanza left behind by an interrupted
+// config/create (see CreateDriveRemote doc). Verified empirically: rc
+// config/get returns status=200 for a missing remote too (empty {} body,
+// no "error" field) - so a non-200/err response is treated the same as
+// "not configured" rather than being distinguished as a separate case.
+func (e *Engine) RemoteConfigured(name string) (bool, error) {
+	res, err := e.call("config/get", map[string]any{"name": name})
+	if err != nil {
+		return false, nil
+	}
+	token, _ := res["token"].(string)
+	return token != "", nil
+}
+
+// DeleteRemote removes a remote's config stanza (used to clear a broken,
+// token-less remote before recreating it).
+func (e *Engine) DeleteRemote(name string) error {
+	_, err := e.call("config/delete", map[string]any{"name": name})
+	return err
+}
+
 func (e *Engine) CreateDriveRemote(name string, params map[string]string) error {
 	p := map[string]any{
 		"name":       name,
