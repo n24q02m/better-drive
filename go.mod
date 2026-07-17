@@ -2,7 +2,10 @@ module github.com/n24q02m/better-drive
 
 go 1.26.4
 
-require github.com/rclone/rclone v1.74.4
+require (
+	github.com/BurntSushi/toml v1.6.0
+	github.com/rclone/rclone v1.74.4
+)
 
 require (
 	cloud.google.com/go/auth v0.20.0 // indirect
