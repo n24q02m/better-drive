@@ -2,6 +2,8 @@ version: 2
 
 release:
   replace_existing_artifacts: true
+  # Mark -beta/-rc tags as GitHub pre-releases so they don't take the "Latest" slot.
+  prerelease: auto
 
 builds:
   - id: better-drive
