@@ -14,14 +14,26 @@ func newTestEngine(fn func(method, input string) (string, int)) *Engine {
 	return &Engine{rpc: fn}
 }
 
+// recordedCall captures one fake-rpc invocation (method + raw JSON input),
+// used by tests that need to assert call order/count instead of just the
+// last call.
+type recordedCall struct {
+	method string
+	input  string
+}
+
 func TestBisyncBuildsParams(t *testing.T) {
+	// path1 must be a real (but disposable) directory: Resync:true makes
+	// Bisync os.MkdirAll(p.Path1), and a hard-coded "C:/x" would leak that
+	// dir onto the real disk every time the unit suite runs.
+	path1 := t.TempDir()
 	var gotMethod, gotInput string
 	e := newTestEngine(func(method, input string) (string, int) {
 		gotMethod, gotInput = method, input
 		return `{}`, 200
 	})
 	_, err := e.Bisync(BisyncParams{
-		Path1: "C:/x", Path2: "gdrive:x", Workdir: t.TempDir(),
+		Path1: path1, Path2: "gdrive:x", Workdir: t.TempDir(),
 		Resync: true, Filters: []string{"- **/*.tmp"},
 	})
 	if err != nil {
@@ -35,8 +47,10 @@ func TestBisyncBuildsParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k, want := range map[string]any{
-		"path1": "C:/x", "path2": "gdrive:x", "resync": true,
+		"path1": path1, "path2": "gdrive:x", "resync": true,
 		"conflictResolve": "newer", "conflictLoser": "num", "resilient": true,
+		// JSON numbers unmarshal into map[string]any as float64.
+		"maxDelete": float64(50),
 	} {
 		if m[k] != want {
 			t.Errorf("param %s = %v, want %v", k, m[k], want)
@@ -51,6 +65,74 @@ func TestBisyncBuildsParams(t *testing.T) {
 	}
 	if string(data) != "- **/*.tmp\n" {
 		t.Errorf("filters file content = %q, want %q", string(data), "- **/*.tmp\n")
+	}
+}
+
+// TestBisyncEnsuresRemoteDirOnResync verifies ensureRemoteDir's split: on a
+// --resync run, Bisync must call operations/mkdir on path2's remote root
+// (fs="gdrive:", remote="sub") before it calls sync/bisync itself - rclone
+// bisync --resync aborts when path2's root doesn't exist yet.
+func TestBisyncEnsuresRemoteDirOnResync(t *testing.T) {
+	var calls []recordedCall
+	e := newTestEngine(func(method, input string) (string, int) {
+		calls = append(calls, recordedCall{method: method, input: input})
+		return `{}`, 200
+	})
+	_, err := e.Bisync(BisyncParams{
+		Path1: t.TempDir(), Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mkdirIdx, bisyncIdx := -1, -1
+	for i, c := range calls {
+		if c.method == "operations/mkdir" && mkdirIdx == -1 {
+			mkdirIdx = i
+			var m map[string]any
+			if err := json.Unmarshal([]byte(c.input), &m); err != nil {
+				t.Fatal(err)
+			}
+			if m["fs"] != "gdrive:" {
+				t.Errorf("mkdir fs = %v, want %q", m["fs"], "gdrive:")
+			}
+			if m["remote"] != "sub" {
+				t.Errorf("mkdir remote = %v, want %q", m["remote"], "sub")
+			}
+		}
+		if c.method == "sync/bisync" && bisyncIdx == -1 {
+			bisyncIdx = i
+		}
+	}
+	if mkdirIdx == -1 {
+		t.Fatal("no operations/mkdir call recorded")
+	}
+	if bisyncIdx == -1 {
+		t.Fatal("no sync/bisync call recorded")
+	}
+	if mkdirIdx >= bisyncIdx {
+		t.Fatalf("operations/mkdir (call %d) must happen before sync/bisync (call %d)", mkdirIdx, bisyncIdx)
+	}
+}
+
+// TestBisyncSkipsMkdirWhenNotResync verifies ensureRemoteDir is only invoked
+// on --resync runs: a normal (non-resync) bisync must not touch path2's root,
+// since it may legitimately not exist as a subfolder yet on later runs.
+func TestBisyncSkipsMkdirWhenNotResync(t *testing.T) {
+	var calls []recordedCall
+	e := newTestEngine(func(method, input string) (string, int) {
+		calls = append(calls, recordedCall{method: method, input: input})
+		return `{}`, 200
+	})
+	_, err := e.Bisync(BisyncParams{
+		Path1: t.TempDir(), Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range calls {
+		if c.method == "operations/mkdir" {
+			t.Fatalf("unexpected operations/mkdir call on non-resync run: %s", c.input)
+		}
 	}
 }
 

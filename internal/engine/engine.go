@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	_ "github.com/rclone/rclone/backend/drive"
+	_ "github.com/rclone/rclone/backend/drive"    // register the Drive backend (path2)
+	_ "github.com/rclone/rclone/backend/local"     // register the local filesystem backend (path1)
+	_ "github.com/rclone/rclone/cmd/bisync"        // register the sync/bisync rc method (its init calls addRC)
 	"github.com/rclone/rclone/librclone/librclone"
 )
 
@@ -129,10 +131,32 @@ type BisyncParams struct {
 
 type BisyncResult struct{ Output string }
 
+// ensureRemoteDir creates a remote path (e.g. "gdrive:Backup") if it does not
+// exist yet. rclone bisync --resync aborts when path2's root is missing, so the
+// first run must create it. mkdir is idempotent, so an existing dir is a no-op.
+func (e *Engine) ensureRemoteDir(path string) error {
+	fsName, remote, found := strings.Cut(path, ":")
+	if !found || remote == "" {
+		return nil // not a remote path, or the remote root (always exists)
+	}
+	_, err := e.call("operations/mkdir", map[string]any{"fs": fsName + ":", "remote": remote})
+	return err
+}
+
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	filtersFile := filepath.Join(p.Workdir, "filters.txt")
 	if err := os.MkdirAll(p.Workdir, 0o755); err != nil {
 		return BisyncResult{}, err
+	}
+	// First run (resync): ensure both sides exist. path1 is always a local folder
+	// for better-drive; path2 is the Drive remote.
+	if p.Resync {
+		if err := os.MkdirAll(p.Path1, 0o755); err != nil {
+			return BisyncResult{}, err
+		}
+		if err := e.ensureRemoteDir(p.Path2); err != nil {
+			return BisyncResult{}, err
+		}
 	}
 	if err := os.WriteFile(filtersFile, []byte(strings.Join(p.Filters, "\n")+"\n"), 0o600); err != nil {
 		return BisyncResult{}, err
@@ -145,6 +169,7 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		"resync":             p.Resync,
 		"resilient":          true,
 		"recover":            true,
+		"maxDelete":          50, // percent; rc omits the CLI's 50% default, and 0 aborts on ANY delete (breaks 2-way delete propagation)
 		"createEmptySrcDirs": true,
 		"conflictResolve":    "newer",
 		"conflictLoser":      "num",
