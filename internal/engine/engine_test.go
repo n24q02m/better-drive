@@ -3,6 +3,7 @@ package engine
 import (
 	"encoding/json"
 	"errors"
+	"os"
 	"strings"
 	"testing"
 )
@@ -42,6 +43,13 @@ func TestBisyncBuildsParams(t *testing.T) {
 	}
 	if !strings.HasSuffix(m["filtersFile"].(string), "filters.txt") {
 		t.Errorf("filtersFile = %v", m["filtersFile"])
+	}
+	data, err := os.ReadFile(m["filtersFile"].(string))
+	if err != nil {
+		t.Fatalf("read filters file: %v", err)
+	}
+	if string(data) != "- **/*.tmp\n" {
+		t.Errorf("filters file content = %q, want %q", string(data), "- **/*.tmp\n")
 	}
 }
 
