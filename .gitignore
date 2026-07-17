@@ -1,0 +1,5 @@
+/better-drive
+/better-drive.exe
+/cmd/spike/spike*
+*.test
+/dist/
