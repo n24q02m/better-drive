@@ -80,3 +80,23 @@ func TestPauseSkipsRun(t *testing.T) {
 		t.Fatalf("state=%v", l.State())
 	}
 }
+
+func TestPauseDuringInFlightSync(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan struct{})
+	f := &fakeSyncer{inFlight: func() {
+		close(entered)
+		<-release
+	}}
+	l := newLoop(f)
+	l.hasBaseline = true
+	go func() { l.runOnce(); close(done) }()
+	<-entered      // sync is in-flight
+	l.Pause()      // pause requested mid-flight
+	close(release) // allow the in-flight sync to finish
+	<-done         // runOnce returned
+	if l.State() != StatePaused {
+		t.Fatalf("state after pause-during-sync = %v, want StatePaused", l.State())
+	}
+}

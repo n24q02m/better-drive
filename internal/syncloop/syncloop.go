@@ -65,7 +65,11 @@ func (l *Loop) State() State {
 	return l.state
 }
 
-func (l *Loop) OnChange(fn func(State)) { l.onChange = fn }
+func (l *Loop) OnChange(fn func(State)) {
+	l.mu.Lock()
+	l.onChange = fn
+	l.mu.Unlock()
+}
 
 func (l *Loop) setState(st State) {
 	l.mu.Lock()
@@ -111,6 +115,9 @@ func (l *Loop) runOnce() {
 		l.state = StateNeedsResync
 	default:
 		l.state = StateError
+	}
+	if l.paused {
+		l.state = StatePaused
 	}
 	st := l.state
 	fn := l.onChange
