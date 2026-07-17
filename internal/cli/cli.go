@@ -70,16 +70,24 @@ func runCmd() *cobra.Command {
 			p := cfg.Pairs[0]
 			remoteName, _, _ := strings.Cut(p.Remote, ":")
 			e := engine.New()
-			defer e.Close()
 			if configured, _ := e.RemoteConfigured(remoteName); !configured {
+				e.Close()
 				return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
 			}
 			loop := syncloop.New(e, p.Local, p.Remote, paths.Workdir(),
 				func() ([]string, error) { return config.TranslateDriveIgnore(p.Local) })
 			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
-			go loop.Start(ctx, p.Interval)
-			return tray.Run(loop, p) // block trên systray event loop
+			done := make(chan struct{})
+			go func() { loop.Start(ctx, p.Interval); close(done) }()
+			err = tray.Run(loop, p) // blocks on the systray event loop until Quit
+			cancel()
+			<-done    // wait for the sync loop goroutine to finish its current cycle
+			e.Close() // safe to Finalize the engine now that no goroutine can touch it
+			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
+			// right before Quit races with cancel()/<-done above (SyncNow spawns its own
+			// goroutine, not tracked by `done`), so it can still be mid-Bisync when e.Close
+			// runs. Narrow window, no known data loss; revisit if it proves to matter.
+			return err
 		},
 	}
 }

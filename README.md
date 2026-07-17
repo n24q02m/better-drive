@@ -65,4 +65,8 @@ Rules are evaluated top-to-bottom; negation patterns (`!`) override earlier igno
 
 ## Engine
 
-**Engine**: rclone (MIT), embedded in-process via librclone. Single binary — no separate rclone installation needed. All sync logic runs in-memory; no background daemon required (v1 uses periodic bisync via rclone's internal scheduler).
+**Engine**: rclone (MIT), embedded in-process via librclone. Single binary — no separate rclone installation needed. All sync logic runs in-memory. `better-drive run` is a long-lived foreground process with a system tray icon; a Go ticker in the `syncloop` package triggers a bisync at the configured interval for as long as the process keeps running.
+
+## Notes
+
+`better-drive setup` runs rclone's interactive config flow in-process to create the Drive remote (this may prompt on stdin for a few fields), then opens your browser for the Google OAuth consent screen. Complete the consent flow in the browser to finish setup.

@@ -35,20 +35,28 @@ func TranslateDriveIgnore(localRoot string) ([]string, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
+	// gitignore: last-match-wins. rclone filter: first-match-wins. Reverse so
+	// later negations (which must win) are checked before the rules they negate.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
 	return out, nil
 }
 
 func toRclonePattern(pat string) string {
-	anchored := strings.HasPrefix(pat, "/")
 	dir := strings.HasSuffix(pat, "/")
-	pat = strings.TrimPrefix(pat, "/")
-	pat = strings.TrimSuffix(pat, "/")
+	trimmed := strings.TrimSuffix(pat, "/")
+	// gitignore: a "/" at the start or middle anchors the pattern to root; a
+	// slash-less pattern (or one with only a trailing "/") matches at any depth.
+	// rclone uses the same leading-"/" = "^" convention and auto-prefixes "(^|/)"
+	// for un-anchored patterns, so DO NOT add "**/".
+	anchored := strings.Contains(trimmed, "/")
+	body := strings.TrimPrefix(trimmed, "/")
 	if dir {
-		pat += "/**"
+		body += "/**"
 	}
-	// gitignore: pattern without "/" matches at any level; rooted patterns don't get **/
-	if !anchored && !strings.Contains(strings.TrimSuffix(pat, "/**"), "/") {
-		pat = "**/" + pat
+	if anchored {
+		body = "/" + body
 	}
-	return pat
+	return body
 }

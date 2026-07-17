@@ -154,6 +154,60 @@ func TestListRemoteEmpty(t *testing.T) {
 	}
 }
 
+func TestCreateDriveRemoteInjectsSkipGdocs(t *testing.T) {
+	var gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotInput = input
+		return `{}`, 200
+	})
+	if err := e.CreateDriveRemote("gdrive", nil); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	params, ok := m["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters = %#v, want map", m["parameters"])
+	}
+	if params["skip_gdocs"] != "true" {
+		t.Errorf("skip_gdocs = %v, want %q", params["skip_gdocs"], "true")
+	}
+
+	// caller-supplied skip_gdocs overrides the default.
+	e2 := newTestEngine(func(method, input string) (string, int) {
+		gotInput = input
+		return `{}`, 200
+	})
+	if err := e2.CreateDriveRemote("gdrive", map[string]string{"skip_gdocs": "false"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	params, ok = m["parameters"].(map[string]any)
+	if !ok {
+		t.Fatalf("parameters = %#v, want map", m["parameters"])
+	}
+	if params["skip_gdocs"] != "false" {
+		t.Errorf("skip_gdocs = %v, want caller override %q", params["skip_gdocs"], "false")
+	}
+}
+
+func TestCallGenericErrorNotResync(t *testing.T) {
+	e := newTestEngine(func(method, input string) (string, int) {
+		return `{"error":"permission denied"}`, 500
+	})
+	_, err := e.Bisync(BisyncParams{Path1: "a", Path2: "b", Workdir: t.TempDir()})
+	if err == nil {
+		t.Fatal("want non-nil error")
+	}
+	if errors.Is(err, ErrNeedsResync) {
+		t.Fatalf("generic error must NOT be classified as ErrNeedsResync, got %v", err)
+	}
+}
+
 func TestDeleteRemote(t *testing.T) {
 	var gotMethod, gotInput string
 	e := newTestEngine(func(method, input string) (string, int) {

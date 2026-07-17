@@ -3,6 +3,7 @@ package syncloop
 import (
 	"context"
 	"errors"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -56,7 +57,20 @@ type Loop struct {
 }
 
 func New(s Syncer, path1, path2, workdir string, ignore IgnoreFunc) *Loop {
-	return &Loop{s: s, path1: path1, path2: path2, workdir: workdir, ignore: ignore, state: StateIdle}
+	return &Loop{
+		s: s, path1: path1, path2: path2, workdir: workdir, ignore: ignore, state: StateIdle,
+		hasBaseline: baselineExists(workdir),
+	}
+}
+
+// baselineExists reports whether a prior bisync run already left listing
+// files (*.lst) in workdir. Without this, every process restart would leave
+// hasBaseline false, forcing a --resync on the next run; rclone bisync
+// --resync does not propagate deletions, so a file deleted locally while the
+// daemon was off would get resurrected from Drive.
+func baselineExists(workdir string) bool {
+	matches, _ := filepath.Glob(filepath.Join(workdir, "*.lst"))
+	return len(matches) > 0
 }
 
 func (l *Loop) State() State {
@@ -95,6 +109,21 @@ func (l *Loop) runOnce() {
 	l.running = true
 	resync := !l.hasBaseline
 	l.mu.Unlock()
+
+	// A panicking Syncer must not leave l.running stuck at true (which would
+	// wedge the no-overlap guard for the rest of the process's life).
+	defer func() {
+		if r := recover(); r != nil {
+			l.mu.Lock()
+			l.running = false
+			l.state = StateError
+			fn := l.onChange
+			l.mu.Unlock()
+			if fn != nil {
+				fn(StateError)
+			}
+		}
+	}()
 
 	l.setState(StateSyncing)
 	filters, err := l.ignore()

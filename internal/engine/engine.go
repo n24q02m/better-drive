@@ -144,9 +144,11 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		"filtersFile":        filtersFile,
 		"resync":             p.Resync,
 		"resilient":          true,
+		"recover":            true,
 		"createEmptySrcDirs": true,
 		"conflictResolve":    "newer",
 		"conflictLoser":      "num",
+		"compare":            "size,modtime,checksum",
 	}
 	res, err := e.call("sync/bisync", params)
 	out, _ := json.Marshal(res)
