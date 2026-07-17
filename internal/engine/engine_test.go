@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -105,6 +106,51 @@ func TestRemoteConfiguredErrorTreatedAsMissing(t *testing.T) {
 	ok, err := e.RemoteConfigured("gdrive")
 	if err != nil || ok {
 		t.Fatalf("ok=%v err=%v, want false, nil", ok, err)
+	}
+}
+
+func TestListRemote(t *testing.T) {
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{"list":[
+			{"Path":"keep.txt","Name":"keep.txt","Size":2,"IsDir":false},
+			{"Path":"sub","Name":"sub","Size":0,"IsDir":true}
+		]}`, 200
+	})
+	names, err := e.ListRemote("gdrive:better-drive-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "operations/list" {
+		t.Fatalf("method = %q, want operations/list", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["fs"] != "gdrive:better-drive-e2e" {
+		t.Errorf("fs = %v, want gdrive:better-drive-e2e", m["fs"])
+	}
+	if m["remote"] != "" {
+		t.Errorf("remote = %v, want empty string", m["remote"])
+	}
+	want := []string{"keep.txt", "sub"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("names = %#v, want %#v", names, want)
+	}
+}
+
+func TestListRemoteEmpty(t *testing.T) {
+	e := newTestEngine(func(method, input string) (string, int) {
+		return `{"list":[]}`, 200
+	})
+	names, err := e.ListRemote("gdrive:better-drive-e2e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(names) != 0 {
+		t.Fatalf("names = %#v, want empty", names)
 	}
 }
 

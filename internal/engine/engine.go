@@ -94,6 +94,33 @@ func mergeDefaults(in map[string]string) map[string]string {
 	return out
 }
 
+// ListRemote lists the top-level entries under remotePath (e.g.
+// "gdrive:better-drive-e2e") via rc operations/list and returns their names.
+// remotePath is passed as-is for the "fs" param (rclone builds the fs.Fs from
+// the "remote:path" string directly), with "remote" left empty so the
+// listing is rooted at remotePath itself.
+func (e *Engine) ListRemote(remotePath string) ([]string, error) {
+	res, err := e.call("operations/list", map[string]any{
+		"fs":     remotePath,
+		"remote": "",
+	})
+	if err != nil {
+		return nil, err
+	}
+	items, _ := res["list"].([]any)
+	names := make([]string, 0, len(items))
+	for _, it := range items {
+		m, ok := it.(map[string]any)
+		if !ok {
+			continue
+		}
+		if name, _ := m["Name"].(string); name != "" {
+			names = append(names, name)
+		}
+	}
+	return names, nil
+}
+
 type BisyncParams struct {
 	Path1, Path2, Workdir string
 	Resync                bool
