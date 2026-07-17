@@ -14,4 +14,4 @@ func base() string {
 }
 
 func ConfigFile() string { return filepath.Join(base(), "config.toml") }
-func Workdir() string     { return filepath.Join(base(), "bisync") }
+func Workdir() string    { return filepath.Join(base(), "bisync") }
