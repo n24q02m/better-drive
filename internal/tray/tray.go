@@ -1,6 +1,7 @@
 package tray
 
 import (
+	_ "embed"
 	"os/exec"
 	"runtime"
 
@@ -9,12 +10,16 @@ import (
 	"github.com/n24q02m/better-drive/internal/syncloop"
 )
 
+//go:embed icon.ico
+var iconData []byte
+
 func Run(loop *syncloop.Loop, pair config.Pair) error {
 	systray.Run(func() { onReady(loop, pair) }, func() {})
 	return nil
 }
 
 func onReady(loop *syncloop.Loop, pair config.Pair) {
+	systray.SetIcon(iconData)
 	systray.SetTitle("better-drive")
 	systray.SetTooltip("better-drive")
 	mStatus := systray.AddMenuItem("Status: idle", "")
