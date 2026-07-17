@@ -78,22 +78,40 @@ func (e *Engine) DeleteRemote(name string) error {
 	return err
 }
 
+// CreateDriveRemote creates a Drive remote via rc config/create. skip_gdocs is
+// NOT set here: it is applied at runtime through a connection string on the
+// bisync path (see withSkipGdocs). config/create cannot persist a stored
+// skip_gdocs anyway - the drive backend's OAuth state-machine rebuilds the
+// stored config from its interactive answers and drops extra "parameters"
+// (verified: after setup, `rclone config dump` showed only scope/team_drive/
+// token/type), and rc config/update pauses on the token-refresh question
+// without saving. The runtime connection string sidesteps both.
 func (e *Engine) CreateDriveRemote(name string, params map[string]string) error {
+	if params == nil {
+		params = map[string]string{}
+	}
 	p := map[string]any{
 		"name":       name,
 		"type":       "drive",
-		"parameters": mergeDefaults(params),
+		"parameters": params,
 	}
 	_, err := e.call("config/create", p)
 	return err
 }
 
-func mergeDefaults(in map[string]string) map[string]string {
-	out := map[string]string{"skip_gdocs": "true"} // Google Docs không tải dạng file
-	for k, v := range in {
-		out[k] = v
+// withSkipGdocs adds the skip_gdocs backend option to a remote path via an
+// rclone connection string, e.g. "gdrive:Backup" -> "gdrive,skip_gdocs=true:Backup".
+// Google Docs cannot be downloaded as files, so bisync must skip them or it
+// aborts. Applied at runtime (not stored in config) because config/create
+// drops the param during OAuth and config/update pauses without saving on an
+// already-token'd remote. Verified working: `rclone lsf "gdrive,skip_gdocs=true:..."`.
+// A local path (no remote before the ":") or a bare path is returned unchanged.
+func withSkipGdocs(remotePath string) string {
+	name, path, found := strings.Cut(remotePath, ":")
+	if !found {
+		return remotePath // local path / no remote to annotate
 	}
-	return out
+	return name + ",skip_gdocs=true:" + path
 }
 
 // ListRemote lists the top-level entries under remotePath (e.g.
@@ -163,7 +181,7 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	}
 	params := map[string]any{
 		"path1":              p.Path1,
-		"path2":              p.Path2,
+		"path2":              withSkipGdocs(p.Path2), // skip Google Docs on the Drive side (can't be downloaded)
 		"workdir":            p.Workdir,
 		"filtersFile":        filtersFile,
 		"resync":             p.Resync,

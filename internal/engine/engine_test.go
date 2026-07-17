@@ -47,7 +47,8 @@ func TestBisyncBuildsParams(t *testing.T) {
 		t.Fatal(err)
 	}
 	for k, want := range map[string]any{
-		"path1": path1, "path2": "gdrive:x", "resync": true,
+		// path2 carries the runtime skip_gdocs connection string (see withSkipGdocs).
+		"path1": path1, "path2": "gdrive,skip_gdocs=true:x", "resync": true,
 		"conflictResolve": "newer", "conflictLoser": "num", "resilient": true,
 		// JSON numbers unmarshal into map[string]any as float64.
 		"maxDelete": float64(50),
@@ -236,44 +237,50 @@ func TestListRemoteEmpty(t *testing.T) {
 	}
 }
 
-func TestCreateDriveRemoteInjectsSkipGdocs(t *testing.T) {
-	var gotInput string
+// TestCreateDriveRemote verifies CreateDriveRemote issues a single config/create
+// for a plain "drive" remote. skip_gdocs is NOT stored here - it is applied at
+// runtime via withSkipGdocs on the bisync path (see CreateDriveRemote's doc).
+func TestCreateDriveRemote(t *testing.T) {
+	var calls []recordedCall
 	e := newTestEngine(func(method, input string) (string, int) {
-		gotInput = input
+		calls = append(calls, recordedCall{method: method, input: input})
 		return `{}`, 200
 	})
 	if err := e.CreateDriveRemote("gdrive", nil); err != nil {
 		t.Fatal(err)
 	}
+	if len(calls) != 1 {
+		t.Fatalf("calls = %#v, want 1 (config/create only)", calls)
+	}
+	if calls[0].method != "config/create" {
+		t.Fatalf("method = %q, want config/create", calls[0].method)
+	}
 	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+	if err := json.Unmarshal([]byte(calls[0].input), &m); err != nil {
 		t.Fatal(err)
 	}
-	params, ok := m["parameters"].(map[string]any)
-	if !ok {
-		t.Fatalf("parameters = %#v, want map", m["parameters"])
+	if m["type"] != "drive" {
+		t.Errorf("type = %v, want %q", m["type"], "drive")
 	}
-	if params["skip_gdocs"] != "true" {
-		t.Errorf("skip_gdocs = %v, want %q", params["skip_gdocs"], "true")
+	if m["name"] != "gdrive" {
+		t.Errorf("name = %v, want %q", m["name"], "gdrive")
 	}
+}
 
-	// caller-supplied skip_gdocs overrides the default.
-	e2 := newTestEngine(func(method, input string) (string, int) {
-		gotInput = input
-		return `{}`, 200
-	})
-	if err := e2.CreateDriveRemote("gdrive", map[string]string{"skip_gdocs": "false"}); err != nil {
-		t.Fatal(err)
+// TestWithSkipGdocs verifies the runtime connection-string transform: a Drive
+// remote path gains ",skip_gdocs=true" before the ":"; a local/plain path with
+// no remote is returned unchanged.
+func TestWithSkipGdocs(t *testing.T) {
+	cases := map[string]string{
+		"gdrive:Backup":     "gdrive,skip_gdocs=true:Backup",
+		"gdrive:":           "gdrive,skip_gdocs=true:",
+		"gdrive:a/b/c":      "gdrive,skip_gdocs=true:a/b/c",
+		"/home/user/folder": "/home/user/folder",
 	}
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	params, ok = m["parameters"].(map[string]any)
-	if !ok {
-		t.Fatalf("parameters = %#v, want map", m["parameters"])
-	}
-	if params["skip_gdocs"] != "false" {
-		t.Errorf("skip_gdocs = %v, want caller override %q", params["skip_gdocs"], "false")
+	for in, want := range cases {
+		if got := withSkipGdocs(in); got != want {
+			t.Errorf("withSkipGdocs(%q) = %q, want %q", in, got, want)
+		}
 	}
 }
 
