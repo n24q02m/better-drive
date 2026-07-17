@@ -10,13 +10,14 @@ import (
 	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
+	"github.com/n24q02m/better-drive/internal/version"
 	"github.com/spf13/cobra"
 )
 
 func Execute() error { return newRootCmd().Execute() }
 
 func newRootCmd() *cobra.Command {
-	root := &cobra.Command{Use: "better-drive", Short: "2-way Google Drive sync with .driveignore"}
+	root := &cobra.Command{Use: "better-drive", Short: "2-way Google Drive sync with .driveignore", Version: version.Version}
 	root.AddCommand(setupCmd(), runCmd(), statusCmd())
 	return root
 }

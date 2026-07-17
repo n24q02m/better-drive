@@ -1,0 +1,66 @@
+version: 2
+
+release:
+  replace_existing_artifacts: true
+
+builds:
+  - id: better-drive
+    main: .
+    binary: better-drive
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
+      - amd64
+    ldflags:
+      - -s -w
+      - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+      - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+      - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "better-drive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+scoops:
+  - repository:
+      owner: n24q02m
+      name: scoop-bucket
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: bucket
+    homepage: "https://github.com/n24q02m/better-drive"
+    description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
+    license: MIT
+    commit_author:
+      name: goreleaser-bot
+      email: bot@goreleaser.com
+    commit_msg_template: "feat: bump better-drive to {{ .Tag }}"
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    env:
+      - COSIGN_EXPERIMENTAL=1
+    signature: "${artifact}.bundle"
+    args:
+      - sign-blob
+      - "--bundle=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge"
