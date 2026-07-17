@@ -21,8 +21,9 @@ jobs:
       - run: go test ./...
 
   codeql:
-    # NOTE: CodeQL requires the repository to be public or have GitHub Advanced Security enabled.
-    # For private repositories without GHAS, remove this job or skip it.
+    # CodeQL requires the repo to be public (or have GitHub Advanced Security).
+    # Skipped while the repo is private; activates automatically when made public at release.
+    if: github.event.repository.visibility == 'public'
     runs-on: ubuntu-latest
     permissions:
       security-events: write
