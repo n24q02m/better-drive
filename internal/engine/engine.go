@@ -29,6 +29,13 @@ type Engine struct {
 }
 
 func New() *Engine {
+	// Back up live directories: log files (e.g. ~/.claude/**/instinct.log) are
+	// appended to during the copy, which otherwise aborts a file with "can't
+	// copy - source file is being updated (size changed ...)" and fails the
+	// whole pair. no_check_updated tells the local backend to transfer such a
+	// file at the size it first saw, no abort. Set before Initialize so every
+	// local fs the engine creates inherits it.
+	os.Setenv("RCLONE_LOCAL_NO_CHECK_UPDATED", "true")
 	librclone.Initialize()
 	return &Engine{rpc: librclone.RPC}
 }
@@ -133,11 +140,6 @@ func perfConfig() map[string]any {
 		"Transfers": 8,
 		"Checkers":  16,
 		"TPSLimit":  10.0,
-		// A single file that is locked or being written mid-copy (common in a
-		// live ~/.claude during an active session) yields "corrupted on transfer"
-		// (empty src md5); without this it fails the WHOLE pair. Best-effort
-		// backup: log the file, back up the rest, retry it next run.
-		"IgnoreErrors": true,
 	}
 }
 
