@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
@@ -428,6 +429,121 @@ func TestDeleteRemote(t *testing.T) {
 	}
 	if m["name"] != "bdfixtest" {
 		t.Errorf("name = %v, want bdfixtest", m["name"])
+	}
+}
+
+// TestCopyWithFileLocalCallsOperationsCopyFile verifies a pair whose Local is
+// a single file (e.g. ~/.claude.json) dispatches to rc operations/copyfile
+// with srcFs split to the file's parent directory + srcRemote as its base
+// name, dstFs the destination directory (with skip_gdocs) + dstRemote the
+// same base name, and no "_filter" (filters do not apply to a single-file
+// copy). Param shape verified empirically against a real Drive remote - see
+// engine package doc history / the throwaway check run during implementation.
+func TestCopyWithFileLocalCallsOperationsCopyFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{}`, 200
+	})
+	err := e.Copy(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude", Filters: []string{"- **/*.tmp"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "operations/copyfile" {
+		t.Fatalf("method = %q, want operations/copyfile", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["srcFs"] != dir {
+		t.Errorf("srcFs = %v, want %v", m["srcFs"], dir)
+	}
+	if m["srcRemote"] != "claude.json" {
+		t.Errorf("srcRemote = %v, want claude.json", m["srcRemote"])
+	}
+	if m["dstFs"] != "gdrive,skip_gdocs=true:Backups/claude" {
+		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Backups/claude", m["dstFs"])
+	}
+	if m["dstRemote"] != "claude.json" {
+		t.Errorf("dstRemote = %v, want claude.json", m["dstRemote"])
+	}
+	if _, ok := m["_filter"]; ok {
+		t.Errorf("_filter present = %v, want omitted for single-file copy", m["_filter"])
+	}
+}
+
+// TestSyncWithFileLocalCallsOperationsCopyFile mirrors the Copy file-local
+// test for Sync: a single-file Local has no "extra content" on the dst side
+// to mirror away, so Sync collapses to the same operations/copyfile call.
+func TestSyncWithFileLocalCallsOperationsCopyFile(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{}`, 200
+	})
+	if err := e.Sync(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "operations/copyfile" {
+		t.Fatalf("method = %q, want operations/copyfile", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["srcFs"] != dir || m["srcRemote"] != "claude.json" {
+		t.Errorf("src = %v/%v, want %v/claude.json", m["srcFs"], m["srcRemote"], dir)
+	}
+}
+
+// TestCopyWithDirLocalStillCallsSyncCopy is a regression guard: a directory
+// Local (the pre-existing, common case) must keep using rc sync/copy, not the
+// new single-file operations/copyfile path. TestCopyBuildsParams already
+// covers this (its path1 is a t.TempDir() directory) - this test names the
+// guarantee explicitly for the file-local feature's benefit.
+func TestCopyWithDirLocalStillCallsSyncCopy(t *testing.T) {
+	dir := t.TempDir()
+	var gotMethod string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod = method
+		return `{}`, 200
+	})
+	if err := e.Copy(CopyParams{Local: dir, Remote: "gdrive:Backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "sync/copy" {
+		t.Fatalf("method = %q, want sync/copy for a directory Local", gotMethod)
+	}
+}
+
+// TestCopyWithNonexistentLocalFallsBackToSyncCopy locks in the fallback
+// decision for isFileLocal: a Local that does not exist (os.Stat fails) is
+// NOT treated as a single file - it keeps the pre-existing directory sync/copy
+// behavior and lets rclone report its own error, rather than silently
+// changing dispatch based on a stat failure.
+func TestCopyWithNonexistentLocalFallsBackToSyncCopy(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "does-not-exist")
+	var gotMethod string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod = method
+		return `{}`, 200
+	})
+	if err := e.Copy(CopyParams{Local: missing, Remote: "gdrive:Backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "sync/copy" {
+		t.Fatalf("method = %q, want sync/copy for a nonexistent Local", gotMethod)
 	}
 }
 

@@ -236,14 +236,51 @@ func filterRC(filters []string) map[string]any {
 	return map[string]any{"FilterRule": filters}
 }
 
+// isFileLocal reports whether local is an existing regular file (not a
+// directory). A pair whose Local is a single file (e.g. ~/.claude.json,
+// alongside the usual directory pairs) needs file-to-file copy semantics
+// instead of directory sync/copy or sync/sync. A local that does not exist,
+// or that stat fails on, is treated as a directory path (the pre-existing
+// behavior) and left to rclone's own error reporting.
+func isFileLocal(local string) bool {
+	info, err := os.Stat(local)
+	return err == nil && !info.IsDir()
+}
+
+// copyLocalFile copies a single local file to a remote directory via rc
+// operations/copyfile. Verified empirically against rclone v1.74.4's
+// fs/operations/rc.go (rcMoveOrCopyFile) and fs/rc/cache.go
+// (GetFsAndRemoteNamed -> GetFsNamed -> cache.Get(srcFs), then
+// fsrc.NewObject(ctx, srcRemote) in moveOrCopyFile): srcFs/dstFs are each
+// resolved as an fs.Fs ROOT, and srcRemote/dstRemote are paths WITHIN that
+// root - so srcFs must be the file's PARENT DIRECTORY (not the file path
+// itself) and srcRemote its base name; dstFs is the destination directory
+// and dstRemote the name to give the file there. Filters are not applied:
+// there is nothing else under a single source file to include/exclude.
+func (e *Engine) copyLocalFile(local, remoteDir string) error {
+	base := filepath.Base(local)
+	_, err := e.call("operations/copyfile", map[string]any{
+		"srcFs":     filepath.Dir(local),
+		"srcRemote": base,
+		"dstFs":     withSkipGdocs(remoteDir),
+		"dstRemote": base,
+	})
+	return err
+}
+
 // Copy performs a 1-way backup copy: files are copied from Local to Remote,
 // but nothing already on Remote is ever deleted (rc sync/copy - verified
 // empirically that a pre-existing extra file on dst survives a copy run).
 // Workdir is accepted for interface parity with Bisync/Sync but unused: copy
-// keeps no baseline/listings on disk.
+// keeps no baseline/listings on disk. When Local is a single file (not a
+// directory), it is copied file-to-file via rc operations/copyfile instead
+// (see copyLocalFile) - e.g. for a pair backing up ~/.claude.json.
 func (e *Engine) Copy(p CopyParams) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
+	if isFileLocal(p.Local) {
+		return e.copyLocalFile(p.Local, p.Remote)
+	}
 	params := map[string]any{
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
@@ -258,10 +295,17 @@ func (e *Engine) Copy(p CopyParams) error {
 
 // Sync performs a 1-way mirror: Remote is made to exactly match Local,
 // including deleting anything on Remote that is not present on Local (rc
-// sync/sync - verified empirically that a dst-only file is removed).
+// sync/sync - verified empirically that a dst-only file is removed). When
+// Local is a single file, it is copied file-to-file via rc operations/copyfile
+// instead (see Copy's file-local handling) - there is no "extra content" on a
+// single destination file to mirror away, so the copy/sync distinction
+// collapses to the same operation for a file-local pair.
 func (e *Engine) Sync(p CopyParams) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
+	if isFileLocal(p.Local) {
+		return e.copyLocalFile(p.Local, p.Remote)
+	}
 	params := map[string]any{
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
