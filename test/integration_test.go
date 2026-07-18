@@ -27,7 +27,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 	local := t.TempDir()
 	workdir := t.TempDir()
-	e := engine.New()
+	e := engine.New("")
 	defer e.Close()
 
 	// The .driveignore and files exist BEFORE the first sync, exactly as in real

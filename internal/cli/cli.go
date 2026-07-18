@@ -35,7 +35,7 @@ func setupCmd() *cobra.Command {
 		Use:   "setup",
 		Short: "Create the rclone Google Drive remote (opens browser for OAuth)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			e := engine.New()
+			e := engine.New("")
 			defer e.Close()
 			// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
 			// the remote's config stanza to disk BEFORE OAuth completes, so an
@@ -76,7 +76,7 @@ func runCmd() *cobra.Command {
 				return err
 			}
 
-			e := engine.New()
+			e := engine.New("")
 			for _, p := range cfg.Pairs {
 				remoteName, _, _ := strings.Cut(p.Remote, ":")
 				if configured, _ := e.RemoteConfigured(remoteName); !configured {
@@ -158,7 +158,7 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 
-			e := engine.New()
+			e := engine.New("")
 			defer e.Close()
 			return runSyncOnce(cmd, e, cfg)
 		},

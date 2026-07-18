@@ -34,7 +34,10 @@ type Engine struct {
 	syncMu sync.Mutex
 }
 
-func New() *Engine {
+// New initializes the librclone engine. rcloneConfigPath, when non-empty,
+// points librclone at a specific rclone.conf (e.g. a scoop portable install);
+// an empty value falls back to the RCLONE_CONFIG env var for back-compat.
+func New(rcloneConfigPath string) *Engine {
 	// Back up live directories: log files (e.g. ~/.claude/**/instinct.log) are
 	// appended to during the copy, which otherwise aborts a file with "can't
 	// copy - source file is being updated (size changed ...)" and fails the
@@ -44,12 +47,16 @@ func New() *Engine {
 	os.Setenv("RCLONE_LOCAL_NO_CHECK_UPDATED", "true")
 	// librclone.Initialize() loads the config via configfile.Install() from
 	// rclone's default path (%APPDATA%\rclone\rclone.conf on Windows). It does
-	// NOT run flag parsing, so the RCLONE_CONFIG env var (which rclone normally
-	// binds to --config) is ignored. Honor it ourselves before Initialize so a
-	// machine whose gdrive remote lives in a non-default config (e.g. a scoop
-	// portable rclone.conf) can point better-drive at it.
-	if p := os.Getenv("RCLONE_CONFIG"); p != "" {
-		_ = config.SetConfigPath(p)
+	// NOT run flag parsing, so neither an explicit path nor the RCLONE_CONFIG
+	// env var (which rclone normally binds to --config) is honored on its own.
+	// Apply the resolved path (or the env fallback) ourselves before
+	// Initialize so a machine whose gdrive remote lives in a non-default
+	// config (e.g. a scoop portable rclone.conf) can point better-drive at it.
+	if rcloneConfigPath == "" {
+		rcloneConfigPath = os.Getenv("RCLONE_CONFIG") // back-compat fallback
+	}
+	if rcloneConfigPath != "" {
+		_ = config.SetConfigPath(rcloneConfigPath)
 	}
 	librclone.Initialize()
 	return &Engine{rpc: librclone.RPC}
