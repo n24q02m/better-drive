@@ -11,6 +11,7 @@ type Pair struct {
 	Local    string
 	Remote   string
 	Interval time.Duration
+	Mode     string
 }
 
 type Config struct {
@@ -22,6 +23,7 @@ type tomlPair struct {
 	Local    string `toml:"local"`
 	Remote   string `toml:"remote"`
 	Interval string `toml:"interval"`
+	Mode     string `toml:"mode"`
 }
 
 type tomlConfig struct {
@@ -39,7 +41,11 @@ func Load(path string) (*Config, error) {
 		if err != nil {
 			return nil, fmt.Errorf("pair %q: bad interval %q: %w", p.Local, p.Interval, err)
 		}
-		c.Pairs = append(c.Pairs, Pair{Local: p.Local, Remote: p.Remote, Interval: d})
+		mode := p.Mode
+		if mode == "" {
+			mode = "bisync"
+		}
+		c.Pairs = append(c.Pairs, Pair{Local: p.Local, Remote: p.Remote, Interval: d, Mode: mode})
 	}
 	return c, nil
 }
@@ -54,6 +60,11 @@ func (c *Config) Validate() error {
 	}
 	if p.Interval <= 0 {
 		return fmt.Errorf("pair: interval must be > 0")
+	}
+	switch p.Mode {
+	case "bisync", "copy", "sync":
+	default:
+		return fmt.Errorf("pair: mode must be one of bisync|copy|sync, got %q", p.Mode)
 	}
 	return nil
 }
