@@ -6,7 +6,9 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // newTestEngine inject fake rpc, không gọi librclone thật.
@@ -297,6 +299,117 @@ func TestCallGenericErrorNotResync(t *testing.T) {
 	}
 }
 
+// TestCopyBuildsParams verifies Copy calls rc "sync/copy" with srcFs=local,
+// dstFs carrying the runtime skip_gdocs connection string, createEmptySrcDirs
+// set, and filters passed through the "_filter.FilterRule" mechanism (the
+// same "+ "/"- " prefixed rule syntax as bisync's filters file - verified
+// empirically against rclone v1.74.4's fs/sync/rc.go + fs/rc/jobs/job.go
+// getFilter, which Reshapes "_filter" via encoding/json using the Go field
+// name FilterRule, not the RulesOpt "filter" config-tag name).
+func TestCopyBuildsParams(t *testing.T) {
+	path1 := t.TempDir()
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{}`, 200
+	})
+	err := e.Copy(CopyParams{
+		Local: path1, Remote: "gdrive:Backup", Workdir: t.TempDir(),
+		Filters: []string{"- **/*.tmp"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "sync/copy" {
+		t.Fatalf("method = %q, want sync/copy", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["srcFs"] != path1 {
+		t.Errorf("srcFs = %v, want %v", m["srcFs"], path1)
+	}
+	if m["dstFs"] != "gdrive,skip_gdocs=true:Backup" {
+		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Backup", m["dstFs"])
+	}
+	if m["createEmptySrcDirs"] != true {
+		t.Errorf("createEmptySrcDirs = %v, want true", m["createEmptySrcDirs"])
+	}
+	filter, ok := m["_filter"].(map[string]any)
+	if !ok {
+		t.Fatalf("_filter = %v (%T), want map", m["_filter"], m["_filter"])
+	}
+	rules, ok := filter["FilterRule"].([]any)
+	if !ok || len(rules) != 1 || rules[0] != "- **/*.tmp" {
+		t.Errorf("_filter.FilterRule = %v, want [\"- **/*.tmp\"]", filter["FilterRule"])
+	}
+}
+
+// TestCopyOmitsFilterWhenEmpty verifies Copy does not send an empty "_filter"
+// object when there are no filters (harmless either way, but keeps the rc
+// payload minimal and matches what a .driveignore-less pair sends today).
+func TestCopyOmitsFilterWhenEmpty(t *testing.T) {
+	var gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotInput = input
+		return `{}`, 200
+	})
+	if err := e.Copy(CopyParams{Local: t.TempDir(), Remote: "gdrive:Backup"}); err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m["_filter"]; ok {
+		t.Errorf("_filter present = %v, want omitted for empty Filters", m["_filter"])
+	}
+}
+
+// TestSyncBuildsParams verifies Sync calls rc "sync/sync" (mirror - deletes on
+// dst to match src) with the same srcFs/dstFs/filter shape as Copy.
+func TestSyncBuildsParams(t *testing.T) {
+	path1 := t.TempDir()
+	var gotMethod, gotInput string
+	e := newTestEngine(func(method, input string) (string, int) {
+		gotMethod, gotInput = method, input
+		return `{}`, 200
+	})
+	err := e.Sync(CopyParams{Local: path1, Remote: "gdrive:Mirror"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "sync/sync" {
+		t.Fatalf("method = %q, want sync/sync", gotMethod)
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
+		t.Fatal(err)
+	}
+	if m["srcFs"] != path1 {
+		t.Errorf("srcFs = %v, want %v", m["srcFs"], path1)
+	}
+	if m["dstFs"] != "gdrive,skip_gdocs=true:Mirror" {
+		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Mirror", m["dstFs"])
+	}
+}
+
+// TestCopyPropagatesRcError verifies a non-200 rc response surfaces as an
+// error from Copy (no ErrNeedsResync classification applies to 1-way modes).
+func TestCopyPropagatesRcError(t *testing.T) {
+	e := newTestEngine(func(method, input string) (string, int) {
+		return `{"error":"permission denied"}`, 500
+	})
+	err := e.Copy(CopyParams{Local: "a", Remote: "gdrive:b"})
+	if err == nil {
+		t.Fatal("want non-nil error")
+	}
+	if errors.Is(err, ErrNeedsResync) {
+		t.Fatalf("Copy error must NOT be classified as ErrNeedsResync, got %v", err)
+	}
+}
+
 func TestDeleteRemote(t *testing.T) {
 	var gotMethod, gotInput string
 	e := newTestEngine(func(method, input string) (string, int) {
@@ -315,5 +428,39 @@ func TestDeleteRemote(t *testing.T) {
 	}
 	if m["name"] != "bdfixtest" {
 		t.Errorf("name = %v, want bdfixtest", m["name"])
+	}
+}
+
+// TestSyncOpsSerialize verifies the engine mutex serializes Copy/Sync/Bisync.
+// rclone applies the rc _filter to process-global state during a sync, so two
+// syncs must never overlap (verified E2E that concurrency silently crosses
+// filters and empties a dest with err=nil).
+func TestSyncOpsSerialize(t *testing.T) {
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	e := newTestEngine(func(method, input string) (string, int) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		time.Sleep(3 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return `{}`, 200
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = e.Copy(CopyParams{Local: "a", Remote: "gdrive:b", Workdir: t.TempDir()})
+		}()
+	}
+	wg.Wait()
+	if maxActive != 1 {
+		t.Fatalf("concurrent sync ops overlapped: maxActive=%d, want 1 (engine mutex must serialize)", maxActive)
 	}
 }

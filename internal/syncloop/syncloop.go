@@ -38,6 +38,8 @@ func (s State) String() string {
 
 type Syncer interface {
 	Bisync(engine.BisyncParams) (engine.BisyncResult, error)
+	Copy(engine.CopyParams) error
+	Sync(engine.CopyParams) error
 }
 
 type IgnoreFunc func() ([]string, error)
@@ -47,6 +49,7 @@ type Loop struct {
 	path1       string
 	path2       string
 	workdir     string
+	mode        string
 	ignore      IgnoreFunc
 	mu          sync.Mutex
 	state       State
@@ -56,9 +59,15 @@ type Loop struct {
 	onChange    func(State)
 }
 
-func New(s Syncer, path1, path2, workdir string, ignore IgnoreFunc) *Loop {
+// New creates a Loop for the given mode ("bisync", "copy", or "sync"); an
+// empty mode defaults to "bisync" for callers that predate mode support (e.g.
+// existing tests via newLoop).
+func New(s Syncer, path1, path2, workdir, mode string, ignore IgnoreFunc) *Loop {
+	if mode == "" {
+		mode = "bisync"
+	}
 	return &Loop{
-		s: s, path1: path1, path2: path2, workdir: workdir, ignore: ignore, state: StateIdle,
+		s: s, path1: path1, path2: path2, workdir: workdir, mode: mode, ignore: ignore, state: StateIdle,
 		hasBaseline: baselineExists(workdir),
 	}
 }
@@ -107,7 +116,7 @@ func (l *Loop) runOnce() {
 		return
 	}
 	l.running = true
-	resync := !l.hasBaseline
+	resync := l.mode == "bisync" && !l.hasBaseline
 	l.mu.Unlock()
 
 	// A panicking Syncer must not leave l.running stuck at true (which would
@@ -128,17 +137,26 @@ func (l *Loop) runOnce() {
 	l.setState(StateSyncing)
 	filters, err := l.ignore()
 	if err == nil {
-		_, err = l.s.Bisync(engine.BisyncParams{
-			Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
-			Resync: resync, Filters: filters,
-		})
+		switch l.mode {
+		case "copy":
+			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, Filters: filters})
+		case "sync":
+			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, Filters: filters})
+		default: // "bisync"
+			_, err = l.s.Bisync(engine.BisyncParams{
+				Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
+				Resync: resync, Filters: filters,
+			})
+		}
 	}
 
 	l.mu.Lock()
 	l.running = false
 	switch {
 	case err == nil:
-		l.hasBaseline = true
+		if l.mode == "bisync" {
+			l.hasBaseline = true
+		}
 		l.state = StateIdle
 	case errors.Is(err, engine.ErrNeedsResync):
 		l.state = StateNeedsResync
