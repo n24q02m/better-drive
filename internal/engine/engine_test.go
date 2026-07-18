@@ -6,7 +6,9 @@ import (
 	"os"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 )
 
 // newTestEngine inject fake rpc, không gọi librclone thật.
@@ -426,5 +428,39 @@ func TestDeleteRemote(t *testing.T) {
 	}
 	if m["name"] != "bdfixtest" {
 		t.Errorf("name = %v, want bdfixtest", m["name"])
+	}
+}
+
+// TestSyncOpsSerialize verifies the engine mutex serializes Copy/Sync/Bisync.
+// rclone applies the rc _filter to process-global state during a sync, so two
+// syncs must never overlap (verified E2E that concurrency silently crosses
+// filters and empties a dest with err=nil).
+func TestSyncOpsSerialize(t *testing.T) {
+	var mu sync.Mutex
+	active, maxActive := 0, 0
+	e := newTestEngine(func(method, input string) (string, int) {
+		mu.Lock()
+		active++
+		if active > maxActive {
+			maxActive = active
+		}
+		mu.Unlock()
+		time.Sleep(3 * time.Millisecond)
+		mu.Lock()
+		active--
+		mu.Unlock()
+		return `{}`, 200
+	})
+	var wg sync.WaitGroup
+	for i := 0; i < 6; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_ = e.Copy(CopyParams{Local: "a", Remote: "gdrive:b", Workdir: t.TempDir()})
+		}()
+	}
+	wg.Wait()
+	if maxActive != 1 {
+		t.Fatalf("concurrent sync ops overlapped: maxActive=%d, want 1 (engine mutex must serialize)", maxActive)
 	}
 }
