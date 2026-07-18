@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	_ "github.com/rclone/rclone/backend/drive"    // register the Drive backend (path2)
 	_ "github.com/rclone/rclone/backend/local"     // register the local filesystem backend (path1)
@@ -18,6 +19,13 @@ var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
 type Engine struct {
 	rpc func(method, input string) (string, int)
+	// syncMu serializes the sync operations (Bisync/Copy/Sync). rclone applies
+	// the rc _filter (and other run options) to PROCESS-GLOBAL state for the
+	// duration of a sync, so two concurrent syncs with different filters race:
+	// verified E2E that concurrent Copy calls silently cross their filters and
+	// one dest ends up empty with err=nil. The multi-pair daemon therefore runs
+	// its pairs' syncs one at a time through this lock.
+	syncMu sync.Mutex
 }
 
 func New() *Engine {
@@ -162,6 +170,8 @@ func (e *Engine) ensureRemoteDir(path string) error {
 }
 
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 	filtersFile := filepath.Join(p.Workdir, "filters.txt")
 	if err := os.MkdirAll(p.Workdir, 0o755); err != nil {
 		return BisyncResult{}, err
@@ -232,6 +242,8 @@ func filterRC(filters []string) map[string]any {
 // Workdir is accepted for interface parity with Bisync/Sync but unused: copy
 // keeps no baseline/listings on disk.
 func (e *Engine) Copy(p CopyParams) error {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 	params := map[string]any{
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
@@ -248,6 +260,8 @@ func (e *Engine) Copy(p CopyParams) error {
 // including deleting anything on Remote that is not present on Local (rc
 // sync/sync - verified empirically that a dst-only file is removed).
 func (e *Engine) Sync(p CopyParams) error {
+	e.syncMu.Lock()
+	defer e.syncMu.Unlock()
 	params := map[string]any{
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
