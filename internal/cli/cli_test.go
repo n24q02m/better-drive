@@ -25,17 +25,11 @@ func TestRootHasSubcommands(t *testing.T) {
 // TestStatusCmdPrintsAllPairs verifies `better-drive status` with a
 // multi-pair config prints one "pair: ..." line per [[pair]] block (not just
 // the first, as the pre-multi-pair implementation did with Pairs[0]).
-// paths.ConfigFile() resolves under os.UserConfigDir(), which on Windows
-// reads the AppData env var - t.Setenv redirects it to a throwaway dir so
-// this never touches a real user config.
+// BETTER_DRIVE_CONFIG points paths.ConfigFile() at a throwaway config so this
+// never touches a real user config and works cross-platform (CI runs on Linux
+// where os.UserConfigDir uses $HOME/.config, not AppData).
 func TestStatusCmdPrintsAllPairs(t *testing.T) {
-	appData := t.TempDir()
-	t.Setenv("AppData", appData)
-
-	cfgDir := filepath.Join(appData, "better-drive")
-	if err := os.MkdirAll(cfgDir, 0o755); err != nil {
-		t.Fatal(err)
-	}
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
 	body := `
 [[pair]]
 local = "C:/pair0"
@@ -49,9 +43,10 @@ interval = "1m"
 mode = "copy"
 exclude = ["node_modules/"]
 `
-	if err := os.WriteFile(filepath.Join(cfgDir, "config.toml"), []byte(body), 0o600); err != nil {
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	t.Setenv("BETTER_DRIVE_CONFIG", cfgPath)
 
 	cmd := newRootCmd()
 	var buf bytes.Buffer

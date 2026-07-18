@@ -14,7 +14,15 @@ func base() string {
 	return filepath.Join(dir, "better-drive")
 }
 
-func ConfigFile() string { return filepath.Join(base(), "config.toml") }
+// ConfigFile returns the config.toml path. BETTER_DRIVE_CONFIG overrides it
+// (used by tests to point at a temp config, and by users who want a non-default
+// location).
+func ConfigFile() string {
+	if p := os.Getenv("BETTER_DRIVE_CONFIG"); p != "" {
+		return p
+	}
+	return filepath.Join(base(), "config.toml")
+}
 func Workdir() string    { return filepath.Join(base(), "bisync") }
 
 // PairWorkdir returns a workdir unique to the pair at the given index in the
