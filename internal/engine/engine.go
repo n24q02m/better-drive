@@ -122,6 +122,20 @@ func withSkipGdocs(remotePath string) string {
 	return name + ",skip_gdocs=true:" + path
 }
 
+// perfConfig returns rc _config overrides that speed up large syncs (matching
+// the tuning of the backup script better-drive replaces): fast-list (UseListR)
+// lists a whole tree in far fewer API calls, and more transfers/checkers with a
+// TPS cap keep large folders (e.g. ~/.claude) from taking many minutes. rc
+// _config keys are the fs.ConfigInfo field names (case-insensitive).
+func perfConfig() map[string]any {
+	return map[string]any{
+		"UseListR":  true, // --fast-list
+		"Transfers": 8,
+		"Checkers":  16,
+		"TPSLimit":  10.0,
+	}
+}
+
 // ListRemote lists the top-level entries under remotePath (e.g.
 // "gdrive:better-drive-e2e") via rc operations/list and returns their names.
 // remotePath is passed as-is for the "fs" param (rclone builds the fs.Fs from
@@ -202,6 +216,7 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		"conflictResolve":    "newer",
 		"conflictLoser":      "num",
 		"compare":            "size,modtime,checksum",
+		"_config":            perfConfig(),
 	}
 	res, err := e.call("sync/bisync", params)
 	out, _ := json.Marshal(res)
@@ -285,6 +300,7 @@ func (e *Engine) Copy(p CopyParams) error {
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
 		"createEmptySrcDirs": true,
+		"_config":            perfConfig(),
 	}
 	if f := filterRC(p.Filters); f != nil {
 		params["_filter"] = f
@@ -310,6 +326,7 @@ func (e *Engine) Sync(p CopyParams) error {
 		"srcFs":              p.Local,
 		"dstFs":              withSkipGdocs(p.Remote),
 		"createEmptySrcDirs": true,
+		"_config":            perfConfig(),
 	}
 	if f := filterRC(p.Filters); f != nil {
 		params["_filter"] = f
