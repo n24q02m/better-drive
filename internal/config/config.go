@@ -21,7 +21,10 @@ type Pair struct {
 }
 
 type Config struct {
-	Pairs []Pair `toml:"pair"`
+	// RcloneConfig is the explicit rclone config file path (e.g. a scoop
+	// portable rclone.conf); empty means auto-detect (see ResolveRcloneConfig).
+	RcloneConfig string
+	Pairs        []Pair `toml:"pair"`
 }
 
 // tomlPair mirrors Pair nhưng Interval là string để toml decode "30s".
@@ -34,7 +37,8 @@ type tomlPair struct {
 }
 
 type tomlConfig struct {
-	Pairs []tomlPair `toml:"pair"`
+	RcloneConfig string     `toml:"rclone_config"`
+	Pairs        []tomlPair `toml:"pair"`
 }
 
 func Load(path string) (*Config, error) {
@@ -43,6 +47,7 @@ func Load(path string) (*Config, error) {
 		return nil, fmt.Errorf("decode %s: %w", path, err)
 	}
 	c := &Config{}
+	c.RcloneConfig = raw.RcloneConfig
 	for _, p := range raw.Pairs {
 		d, err := time.ParseDuration(p.Interval)
 		if err != nil {
