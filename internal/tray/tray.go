@@ -28,9 +28,11 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	systray.SetTooltip("better-drive")
 	mStatus := systray.AddMenuItem("Status: idle", "")
 	mStatus.Disable()
+	systray.AddSeparator()
 	mSync := systray.AddMenuItem("Sync now", "Trigger a sync immediately for all pairs")
 	mPause := systray.AddMenuItem("Pause", "Pause scheduled syncs for all pairs")
 	mOpen := systray.AddMenuItem("Open folder", "Open the local sync folder(s)")
+	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
 	agg.OnChange(func(st syncloop.State) {
