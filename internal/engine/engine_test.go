@@ -580,3 +580,81 @@ func TestSyncOpsSerialize(t *testing.T) {
 		t.Fatalf("concurrent sync ops overlapped: maxActive=%d, want 1 (engine mutex must serialize)", maxActive)
 	}
 }
+
+// swapBackoff sets retryBackoffUnit to d (0 in tests, to avoid real sleeps) and
+// returns a restore func for defer.
+func swapBackoff(d time.Duration) func() {
+	old := retryBackoffUnit
+	retryBackoffUnit = d
+	return func() { retryBackoffUnit = old }
+}
+
+func TestIsRetryable(t *testing.T) {
+	cases := map[string]bool{
+		`rc sync/copy status=500: {"error":"googleapi: Error 403: Quota exceeded ... rateLimitExceeded"}`: true,
+		`rc sync/copy status=500: {"error":"connection reset by peer"}`:                                    true,
+		`rc sync/copy status=500: {"error":"i/o timeout"}`:                                                 true,
+		`rc sync/copy status=500: {"error":"didn't find section in config file (\"gdrive\")"}`:             false,
+		`rc sync/copy status=500: {"error":"directory not found"}`:                                         false,
+	}
+	for msg, want := range cases {
+		if got := isRetryable(errors.New(msg)); got != want {
+			t.Errorf("isRetryable(%q) = %v, want %v", msg, got, want)
+		}
+	}
+}
+
+// TestCallWithRetryRetriesTransientThenSucceeds verifies a transient rate-limit
+// error is retried and a subsequent success is returned (the whole op re-runs,
+// as rclone's cmd.Run does but the rc method does not).
+func TestCallWithRetryRetriesTransientThenSucceeds(t *testing.T) {
+	defer swapBackoff(0)()
+	calls := 0
+	e := newTestEngine(func(method, input string) (string, int) {
+		calls++
+		if calls < 2 {
+			return `{"error":"googleapi: Error 403: rateLimitExceeded"}`, 500
+		}
+		return `{}`, 200
+	})
+	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err != nil {
+		t.Fatalf("want success after retry, got %v", err)
+	}
+	if calls != 2 {
+		t.Errorf("want 2 calls (1 transient fail + 1 success), got %d", calls)
+	}
+}
+
+// TestCallWithRetryFailsFastOnFatal verifies a fatal (config) error is NOT
+// retried - a retry cannot fix a missing remote, so it returns after one call.
+func TestCallWithRetryFailsFastOnFatal(t *testing.T) {
+	defer swapBackoff(0)()
+	calls := 0
+	e := newTestEngine(func(method, input string) (string, int) {
+		calls++
+		return `{"error":"didn't find section in config file (\"gdrive\")"}`, 500
+	})
+	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err == nil {
+		t.Fatal("want error")
+	}
+	if calls != 1 {
+		t.Errorf("fatal error must not retry: want 1 call, got %d", calls)
+	}
+}
+
+// TestCallWithRetryExhaustsOnPersistentTransient verifies retries are bounded:
+// a persistently transient error stops after maxAttempts and returns the error.
+func TestCallWithRetryExhaustsOnPersistentTransient(t *testing.T) {
+	defer swapBackoff(0)()
+	calls := 0
+	e := newTestEngine(func(method, input string) (string, int) {
+		calls++
+		return `{"error":"rateLimitExceeded"}`, 500
+	})
+	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err == nil {
+		t.Fatal("want error after exhausting retries")
+	}
+	if calls != 3 {
+		t.Errorf("want 3 bounded attempts, got %d", calls)
+	}
+}

@@ -8,14 +8,20 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/rclone/rclone/backend/drive"    // register the Drive backend (path2)
 	_ "github.com/rclone/rclone/backend/local"     // register the local filesystem backend (path1)
 	_ "github.com/rclone/rclone/cmd/bisync"        // register the sync/bisync rc method (its init calls addRC)
+	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/librclone/librclone"
 )
 
 var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
+
+// retryBackoffUnit is the base backoff between high-level retries in
+// callWithRetry (attempt N sleeps N*unit). A package var so tests can zero it.
+var retryBackoffUnit = 10 * time.Second
 
 type Engine struct {
 	rpc func(method, input string) (string, int)
@@ -36,6 +42,15 @@ func New() *Engine {
 	// file at the size it first saw, no abort. Set before Initialize so every
 	// local fs the engine creates inherits it.
 	os.Setenv("RCLONE_LOCAL_NO_CHECK_UPDATED", "true")
+	// librclone.Initialize() loads the config via configfile.Install() from
+	// rclone's default path (%APPDATA%\rclone\rclone.conf on Windows). It does
+	// NOT run flag parsing, so the RCLONE_CONFIG env var (which rclone normally
+	// binds to --config) is ignored. Honor it ourselves before Initialize so a
+	// machine whose gdrive remote lives in a non-default config (e.g. a scoop
+	// portable rclone.conf) can point better-drive at it.
+	if p := os.Getenv("RCLONE_CONFIG"); p != "" {
+		_ = config.SetConfigPath(p)
+	}
 	librclone.Initialize()
 	return &Engine{rpc: librclone.RPC}
 }
@@ -55,6 +70,49 @@ func (e *Engine) call(method string, params map[string]any) (map[string]any, err
 		return res, fmt.Errorf("rc %s status=%d: %s", method, status, out)
 	}
 	return res, nil
+}
+
+// callWithRetry wraps call with rclone-style high-level retries for a heavy
+// transfer op (sync/copy, sync/sync, operations/copyfile). The rc methods run
+// only rclone's low-level (per-request) retries, not the high-level retry loop
+// the `rclone` CLI applies in cmd.Run - so an intermittent Drive
+// "rateLimitExceeded" (the shared client_id's per-minute quota) that low-level
+// retries can't outlast fails the whole pair, where `rclone copy` would re-run
+// and succeed. Re-running is cheap: the copy is incremental, so a retry
+// re-attempts only the files that failed, hitting the API far less and usually
+// clearing the quota window. Only transient errors are retried; a config/auth
+// error fails fast.
+func (e *Engine) callWithRetry(method string, params map[string]any) (map[string]any, error) {
+	const maxAttempts = 3
+	var res map[string]any
+	var err error
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		res, err = e.call(method, params)
+		if err == nil || attempt == maxAttempts || !isRetryable(err) {
+			return res, err
+		}
+		time.Sleep(time.Duration(attempt) * retryBackoffUnit) // 10s, then 20s
+	}
+	return res, err
+}
+
+// isRetryable reports whether err looks like a transient Drive/network failure
+// worth re-running the whole operation for (rate limit, quota, Google 5xx,
+// connection reset/timeout) rather than a fatal config/auth/permission error a
+// retry cannot fix.
+func isRetryable(err error) bool {
+	m := strings.ToLower(err.Error())
+	for _, marker := range []string{
+		"ratelimitexceeded", "userratelimitexceeded", "quota exceeded",
+		"too many requests", "backenderror", "internalerror", "serviceunavailable",
+		"connection reset", "connection refused", "i/o timeout", "timeout",
+		"unexpected eof", "tls handshake", "no such host",
+	} {
+		if strings.Contains(m, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 func (e *Engine) RemoteExists(name string) (bool, error) {
@@ -281,7 +339,7 @@ func isFileLocal(local string) bool {
 // there is nothing else under a single source file to include/exclude.
 func (e *Engine) copyLocalFile(local, remoteDir string) error {
 	base := filepath.Base(local)
-	_, err := e.call("operations/copyfile", map[string]any{
+	_, err := e.callWithRetry("operations/copyfile", map[string]any{
 		"srcFs":     filepath.Dir(local),
 		"srcRemote": base,
 		"dstFs":     withSkipGdocs(remoteDir),
@@ -312,7 +370,7 @@ func (e *Engine) Copy(p CopyParams) error {
 	if f := filterRC(p.Filters); f != nil {
 		params["_filter"] = f
 	}
-	_, err := e.call("sync/copy", params)
+	_, err := e.callWithRetry("sync/copy", params)
 	return err
 }
 
@@ -338,6 +396,6 @@ func (e *Engine) Sync(p CopyParams) error {
 	if f := filterRC(p.Filters); f != nil {
 		params["_filter"] = f
 	}
-	_, err := e.call("sync/sync", params)
+	_, err := e.callWithRetry("sync/sync", params)
 	return err
 }
