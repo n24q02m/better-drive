@@ -10,9 +10,9 @@ import (
 	"sync"
 	"time"
 
-	_ "github.com/rclone/rclone/backend/drive"    // register the Drive backend (path2)
-	_ "github.com/rclone/rclone/backend/local"     // register the local filesystem backend (path1)
-	_ "github.com/rclone/rclone/cmd/bisync"        // register the sync/bisync rc method (its init calls addRC)
+	_ "github.com/rclone/rclone/backend/drive" // register the Drive backend (path2)
+	_ "github.com/rclone/rclone/backend/local" // register the local filesystem backend (path1)
+	_ "github.com/rclone/rclone/cmd/bisync"    // register the sync/bisync rc method (its init calls addRC)
 	"github.com/rclone/rclone/fs/config"
 	"github.com/rclone/rclone/librclone/librclone"
 )

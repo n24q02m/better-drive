@@ -592,10 +592,10 @@ func swapBackoff(d time.Duration) func() {
 func TestIsRetryable(t *testing.T) {
 	cases := map[string]bool{
 		`rc sync/copy status=500: {"error":"googleapi: Error 403: Quota exceeded ... rateLimitExceeded"}`: true,
-		`rc sync/copy status=500: {"error":"connection reset by peer"}`:                                    true,
-		`rc sync/copy status=500: {"error":"i/o timeout"}`:                                                 true,
-		`rc sync/copy status=500: {"error":"didn't find section in config file (\"gdrive\")"}`:             false,
-		`rc sync/copy status=500: {"error":"directory not found"}`:                                         false,
+		`rc sync/copy status=500: {"error":"connection reset by peer"}`:                                   true,
+		`rc sync/copy status=500: {"error":"i/o timeout"}`:                                                true,
+		`rc sync/copy status=500: {"error":"didn't find section in config file (\"gdrive\")"}`:            false,
+		`rc sync/copy status=500: {"error":"directory not found"}`:                                        false,
 	}
 	for msg, want := range cases {
 		if got := isRetryable(errors.New(msg)); got != want {
