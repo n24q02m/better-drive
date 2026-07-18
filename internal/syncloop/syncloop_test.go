@@ -341,6 +341,42 @@ func TestModeSyncGenericErrorSetsStateError(t *testing.T) {
 	}
 }
 
+// TestRunOnceReturnsSyncerError verifies the exported RunOnce (the one-shot
+// entry point used by the `sync` CLI command) runs exactly one cycle and
+// surfaces the Syncer's error, in addition to the pre-existing State()
+// transition.
+func TestRunOnceReturnsSyncerError(t *testing.T) {
+	f := &fakeSyncer{err: errors.New("boom")}
+	l := newLoop(f)
+	l.hasBaseline = true // avoid the first-run auto-resync branch, not under test here
+	err := l.RunOnce()
+	if err == nil || err.Error() != "boom" {
+		t.Fatalf("RunOnce() err = %v, want \"boom\"", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("calls=%d, want exactly 1 (one-shot)", len(f.calls))
+	}
+	if l.State() != StateError {
+		t.Fatalf("state=%v, want StateError", l.State())
+	}
+}
+
+// TestRunOnceSuccessReturnsNil verifies RunOnce returns nil and leaves the
+// loop idle after a successful one-shot cycle.
+func TestRunOnceSuccessReturnsNil(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce() err = %v, want nil", err)
+	}
+	if len(f.calls) != 1 {
+		t.Fatalf("calls=%d, want exactly 1", len(f.calls))
+	}
+	if l.State() != StateIdle {
+		t.Fatalf("state=%v, want StateIdle", l.State())
+	}
+}
+
 // TestModeDefaultsToBisyncWhenEmpty verifies New("") behaves like
 // New("bisync") for backward compatibility (config.Load already defaults an
 // empty toml mode to "bisync", but Loop itself must be defensive too).
