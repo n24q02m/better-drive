@@ -17,6 +17,7 @@ builds:
       - amd64
     ldflags:
       - -s -w
+      - -H windowsgui
       - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
       - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
       - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
