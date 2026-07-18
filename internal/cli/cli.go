@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
 
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
@@ -17,7 +18,11 @@ import (
 func Execute() error { return newRootCmd().Execute() }
 
 func newRootCmd() *cobra.Command {
-	root := &cobra.Command{Use: "better-drive", Short: "2-way Google Drive sync with .driveignore", Version: version.Version}
+	root := &cobra.Command{
+		Use:     "better-drive",
+		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
+		Version: version.Version,
+	}
 	root.AddCommand(setupCmd(), runCmd(), statusCmd())
 	return root
 }
@@ -59,7 +64,7 @@ func setupCmd() *cobra.Command {
 func runCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
-		Short: "Start the sync daemon with tray icon",
+		Short: "Start the sync daemon (all configured pairs) with a tray icon showing combined status",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
@@ -68,26 +73,45 @@ func runCmd() *cobra.Command {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			p := cfg.Pairs[0]
-			remoteName, _, _ := strings.Cut(p.Remote, ":")
+
 			e := engine.New()
-			if configured, _ := e.RemoteConfigured(remoteName); !configured {
-				e.Close()
-				return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
+			for _, p := range cfg.Pairs {
+				remoteName, _, _ := strings.Cut(p.Remote, ":")
+				if configured, _ := e.RemoteConfigured(remoteName); !configured {
+					e.Close()
+					return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
+				}
 			}
-			loop := syncloop.New(e, p.Local, p.Remote, paths.Workdir(), p.Mode,
-				func() ([]string, error) { return config.TranslateDriveIgnore(p.Local) })
+
+			// One syncloop per pair, each with its own mode/interval/filters
+			// and its own workdir (bisync baselines must not collide across
+			// pairs). agg.Register wires each loop's OnChange into the shared
+			// aggregator so the tray shows one combined status.
+			agg := tray.NewAggregator()
+			loops := make([]*syncloop.Loop, len(cfg.Pairs))
 			ctx, cancel := context.WithCancel(context.Background())
-			done := make(chan struct{})
-			go func() { loop.Start(ctx, p.Interval); close(done) }()
-			err = tray.Run(loop, p) // blocks on the systray event loop until Quit
+			var wg sync.WaitGroup
+			for i, p := range cfg.Pairs {
+				p := p
+				loop := syncloop.New(e, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
+					func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
+				loops[i] = loop
+				agg.Register(i, loop)
+				wg.Add(1)
+				go func() {
+					defer wg.Done()
+					loop.Start(ctx, p.Interval)
+				}()
+			}
+
+			err = tray.Run(loops, cfg.Pairs, agg) // blocks on the systray event loop until Quit
 			cancel()
-			<-done    // wait for the sync loop goroutine to finish its current cycle
+			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
 			e.Close() // safe to Finalize the engine now that no goroutine can touch it
 			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
-			// right before Quit races with cancel()/<-done above (SyncNow spawns its own
-			// goroutine, not tracked by `done`), so it can still be mid-Bisync when e.Close
-			// runs. Narrow window, no known data loss; revisit if it proves to matter.
+			// right before Quit races with cancel()/wg.Wait() above (SyncNow spawns its own
+			// goroutine per loop, not tracked by `wg`), so a loop can still be mid-sync when
+			// e.Close runs. Narrow window, no known data loss; revisit if it proves to matter.
 			return err
 		},
 	}
@@ -96,7 +120,7 @@ func runCmd() *cobra.Command {
 func statusCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "status",
-		Short: "Print current config",
+		Short: "Print current config (every pair)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
@@ -105,9 +129,10 @@ func statusCmd() *cobra.Command {
 			if err := cfg.Validate(); err != nil {
 				return err
 			}
-			p := cfg.Pairs[0]
-			fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\nrun `better-drive run` to start\n",
-				p.Local, p.Remote, p.Interval, p.Mode)
+			for _, p := range cfg.Pairs {
+				fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\n", p.Local, p.Remote, p.Interval, p.Mode)
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "run `better-drive run` to start")
 			return nil
 		},
 	}

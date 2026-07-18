@@ -13,23 +13,27 @@ import (
 //go:embed icon.ico
 var iconData []byte
 
-func Run(loop *syncloop.Loop, pair config.Pair) error {
-	systray.Run(func() { onReady(loop, pair) }, func() {})
+// Run starts the systray icon and blocks until Quit is chosen. loops and
+// pairs must be the same length and index-aligned (loops[i] is the Loop
+// driving pairs[i]); agg must already be wired to loops via agg.Register so
+// it reflects their combined state.
+func Run(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) error {
+	systray.Run(func() { onReady(loops, pairs, agg) }, func() {})
 	return nil
 }
 
-func onReady(loop *syncloop.Loop, pair config.Pair) {
+func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	systray.SetIcon(iconData)
 	systray.SetTitle("better-drive")
 	systray.SetTooltip("better-drive")
 	mStatus := systray.AddMenuItem("Status: idle", "")
 	mStatus.Disable()
-	mSync := systray.AddMenuItem("Sync now", "Trigger a sync immediately")
-	mPause := systray.AddMenuItem("Pause", "Pause scheduled syncs")
-	mOpen := systray.AddMenuItem("Open folder", "Open the local sync folder")
+	mSync := systray.AddMenuItem("Sync now", "Trigger a sync immediately for all pairs")
+	mPause := systray.AddMenuItem("Pause", "Pause scheduled syncs for all pairs")
+	mOpen := systray.AddMenuItem("Open folder", "Open the local sync folder(s)")
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
-	loop.OnChange(func(st syncloop.State) {
+	agg.OnChange(func(st syncloop.State) {
 		mStatus.SetTitle("Status: " + st.String())
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
@@ -42,15 +46,23 @@ func onReady(loop *syncloop.Loop, pair config.Pair) {
 		for {
 			select {
 			case <-mSync.ClickedCh:
-				loop.SyncNow()
+				for _, l := range loops {
+					l.SyncNow()
+				}
 			case <-mPause.ClickedCh:
-				if loop.State() == syncloop.StatePaused {
-					loop.Resume()
+				if agg.State() == syncloop.StatePaused {
+					for _, l := range loops {
+						l.Resume()
+					}
 				} else {
-					loop.Pause()
+					for _, l := range loops {
+						l.Pause()
+					}
 				}
 			case <-mOpen.ClickedCh:
-				openFolder(pair.Local)
+				for _, p := range pairs {
+					openFolder(p.Local)
+				}
 			case <-mQuit.ClickedCh:
 				systray.Quit()
 				return
