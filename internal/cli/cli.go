@@ -75,7 +75,7 @@ func runCmd() *cobra.Command {
 				e.Close()
 				return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
 			}
-			loop := syncloop.New(e, p.Local, p.Remote, paths.Workdir(),
+			loop := syncloop.New(e, p.Local, p.Remote, paths.Workdir(), p.Mode,
 				func() ([]string, error) { return config.TranslateDriveIgnore(p.Local) })
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan struct{})
@@ -106,8 +106,8 @@ func statusCmd() *cobra.Command {
 				return err
 			}
 			p := cfg.Pairs[0]
-			fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s\nrun `better-drive run` to start\n",
-				p.Local, p.Remote, p.Interval)
+			fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\nrun `better-drive run` to start\n",
+				p.Local, p.Remote, p.Interval, p.Mode)
 			return nil
 		},
 	}

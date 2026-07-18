@@ -13,10 +13,12 @@ import (
 )
 
 type fakeSyncer struct {
-	mu       sync.Mutex
-	calls    []engine.BisyncParams
-	err      error
-	inFlight func()
+	mu        sync.Mutex
+	calls     []engine.BisyncParams
+	copyCalls []engine.CopyParams
+	syncCalls []engine.CopyParams
+	err       error
+	inFlight  func()
 }
 
 func (f *fakeSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
@@ -29,14 +31,41 @@ func (f *fakeSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) 
 	return engine.BisyncResult{}, f.err
 }
 
+func (f *fakeSyncer) Copy(p engine.CopyParams) error {
+	if f.inFlight != nil {
+		f.inFlight()
+	}
+	f.mu.Lock()
+	f.copyCalls = append(f.copyCalls, p)
+	f.mu.Unlock()
+	return f.err
+}
+
+func (f *fakeSyncer) Sync(p engine.CopyParams) error {
+	if f.inFlight != nil {
+		f.inFlight()
+	}
+	f.mu.Lock()
+	f.syncCalls = append(f.syncCalls, p)
+	f.mu.Unlock()
+	return f.err
+}
+
 type panicSyncer struct{}
 
 func (panicSyncer) Bisync(engine.BisyncParams) (engine.BisyncResult, error) {
 	panic("simulated syncer panic")
 }
 
+func (panicSyncer) Copy(engine.CopyParams) error { panic("simulated syncer panic") }
+func (panicSyncer) Sync(engine.CopyParams) error { panic("simulated syncer panic") }
+
 func newLoop(s Syncer) *Loop {
-	return New(s, "C:/x", "gdrive:x", "wd", func() ([]string, error) { return nil, nil })
+	return New(s, "C:/x", "gdrive:x", "wd", "bisync", func() ([]string, error) { return nil, nil })
+}
+
+func newLoopMode(s Syncer, mode string) *Loop {
+	return New(s, "C:/x", "gdrive:x", "wd", mode, func() ([]string, error) { return nil, nil })
 }
 
 func TestFirstRunResyncsThenNot(t *testing.T) {
@@ -97,7 +126,7 @@ func TestExistingBaselineSkipsResync(t *testing.T) {
 		t.Fatal(err)
 	}
 	f := &fakeSyncer{}
-	l := New(f, "C:/x", "gdrive:x", workdir, func() ([]string, error) { return nil, nil })
+	l := New(f, "C:/x", "gdrive:x", workdir, "bisync", func() ([]string, error) { return nil, nil })
 	l.runOnce()
 	if len(f.calls) != 1 {
 		t.Fatalf("calls=%d", len(f.calls))
@@ -225,5 +254,101 @@ func TestPauseDuringInFlightSync(t *testing.T) {
 	<-done         // runOnce returned
 	if l.State() != StatePaused {
 		t.Fatalf("state after pause-during-sync = %v, want StatePaused", l.State())
+	}
+}
+
+// TestModeCopyCallsCopyNotBisync verifies mode="copy" dispatches to the
+// Syncer's Copy method (1-way backup) and never touches Bisync - no
+// resync/baseline concept applies to copy mode.
+func TestModeCopyCallsCopyNotBisync(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoopMode(f, "copy")
+	l.runOnce()
+	if len(f.copyCalls) != 1 {
+		t.Fatalf("copyCalls=%d, want 1", len(f.copyCalls))
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("bisync calls=%d, want 0 (mode=copy must not call Bisync)", len(f.calls))
+	}
+	if len(f.syncCalls) != 0 {
+		t.Fatalf("syncCalls=%d, want 0", len(f.syncCalls))
+	}
+	if f.copyCalls[0].Local != l.path1 || f.copyCalls[0].Remote != l.path2 {
+		t.Errorf("copy params = %+v, want Local=%q Remote=%q", f.copyCalls[0], l.path1, l.path2)
+	}
+	if l.State() != StateIdle {
+		t.Errorf("state=%v, want StateIdle", l.State())
+	}
+}
+
+// TestModeSyncCallsSyncNotBisync verifies mode="sync" dispatches to the
+// Syncer's Sync method (mirror).
+func TestModeSyncCallsSyncNotBisync(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoopMode(f, "sync")
+	l.runOnce()
+	if len(f.syncCalls) != 1 {
+		t.Fatalf("syncCalls=%d, want 1", len(f.syncCalls))
+	}
+	if len(f.calls) != 0 {
+		t.Fatalf("bisync calls=%d, want 0 (mode=sync must not call Bisync)", len(f.calls))
+	}
+	if len(f.copyCalls) != 0 {
+		t.Fatalf("copyCalls=%d, want 0", len(f.copyCalls))
+	}
+	if l.State() != StateIdle {
+		t.Errorf("state=%v, want StateIdle", l.State())
+	}
+}
+
+// TestModeBisyncUnaffectedByModeSupport is a regression guard: mode="bisync"
+// (the default/existing behaviour) must still call Bisync with the resync
+// flag driven by hasBaseline, exactly as before mode support existed.
+func TestModeBisyncUnaffectedByModeSupport(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoopMode(f, "bisync")
+	l.runOnce()
+	if len(f.calls) != 1 {
+		t.Fatalf("bisync calls=%d, want 1", len(f.calls))
+	}
+	if !f.calls[0].Resync {
+		t.Error("first bisync run must resync")
+	}
+	if len(f.copyCalls) != 0 || len(f.syncCalls) != 0 {
+		t.Fatalf("mode=bisync must not call Copy/Sync: copyCalls=%d syncCalls=%d", len(f.copyCalls), len(f.syncCalls))
+	}
+}
+
+// TestModeCopyGenericErrorSetsStateError verifies a plain error from Copy
+// (no ErrNeedsResync concept in 1-way modes) is classified as StateError.
+func TestModeCopyGenericErrorSetsStateError(t *testing.T) {
+	f := &fakeSyncer{err: errors.New("copy failed")}
+	l := newLoopMode(f, "copy")
+	l.runOnce()
+	if l.State() != StateError {
+		t.Fatalf("state=%v, want StateError", l.State())
+	}
+}
+
+// TestModeSyncGenericErrorSetsStateError mirrors the copy-mode error test for
+// sync mode.
+func TestModeSyncGenericErrorSetsStateError(t *testing.T) {
+	f := &fakeSyncer{err: errors.New("sync failed")}
+	l := newLoopMode(f, "sync")
+	l.runOnce()
+	if l.State() != StateError {
+		t.Fatalf("state=%v, want StateError", l.State())
+	}
+}
+
+// TestModeDefaultsToBisyncWhenEmpty verifies New("") behaves like
+// New("bisync") for backward compatibility (config.Load already defaults an
+// empty toml mode to "bisync", but Loop itself must be defensive too).
+func TestModeDefaultsToBisyncWhenEmpty(t *testing.T) {
+	f := &fakeSyncer{}
+	l := New(f, "C:/x", "gdrive:x", "wd", "", func() ([]string, error) { return nil, nil })
+	l.runOnce()
+	if len(f.calls) != 1 {
+		t.Fatalf("bisync calls=%d, want 1 (empty mode must default to bisync)", len(f.calls))
 	}
 }
