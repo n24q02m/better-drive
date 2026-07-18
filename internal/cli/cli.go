@@ -2,7 +2,9 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"os"
 	"strings"
 	"sync"
 
@@ -173,6 +175,13 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) erro
 	failed := false
 	for i, p := range cfg.Pairs {
 		p := p
+		// Skip a pair whose local source does not exist (e.g. a machine that
+		// doesn't have hermes), matching the backup script's Test-Path guard,
+		// instead of failing the whole run on a missing optional source.
+		if _, err := os.Stat(p.Local); errors.Is(err, os.ErrNotExist) {
+			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: SKIPPED (local not found)\n", p.Local, p.Remote, p.Mode)
+			continue
+		}
 		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		if err := loop.RunOnce(); err != nil {

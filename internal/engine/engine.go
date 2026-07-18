@@ -133,6 +133,11 @@ func perfConfig() map[string]any {
 		"Transfers": 8,
 		"Checkers":  16,
 		"TPSLimit":  10.0,
+		// A single file that is locked or being written mid-copy (common in a
+		// live ~/.claude during an active session) yields "corrupted on transfer"
+		// (empty src md5); without this it fails the WHOLE pair. Best-effort
+		// backup: log the file, back up the rest, retry it next run.
+		"IgnoreErrors": true,
 	}
 }
 
