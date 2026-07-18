@@ -3,6 +3,7 @@ package syncloop
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"time"
@@ -104,16 +105,22 @@ func (l *Loop) setState(st State) {
 	}
 }
 
-func (l *Loop) runOnce() {
+// runOnce executes exactly one sync cycle (mode dispatch + bisync
+// resync-if-no-baseline) and returns the Syncer's error for that cycle (nil
+// on success). State()/OnChange observers still see the same transitions as
+// before RunOnce existed; the return value is additive, for one-shot callers
+// (RunOnce, and in turn the `sync` CLI command) that need the outcome
+// directly instead of polling State().
+func (l *Loop) runOnce() (err error) {
 	l.mu.Lock()
 	if l.paused {
 		l.mu.Unlock()
 		l.setState(StatePaused)
-		return
+		return nil
 	}
 	if l.running { // no-overlap guard
 		l.mu.Unlock()
-		return
+		return nil
 	}
 	l.running = true
 	resync := l.mode == "bisync" && !l.hasBaseline
@@ -131,11 +138,13 @@ func (l *Loop) runOnce() {
 			if fn != nil {
 				fn(StateError)
 			}
+			err = fmt.Errorf("syncloop: recovered panic: %v", r)
 		}
 	}()
 
 	l.setState(StateSyncing)
-	filters, err := l.ignore()
+	var filters []string
+	filters, err = l.ignore()
 	if err == nil {
 		switch l.mode {
 		case "copy":
@@ -172,7 +181,15 @@ func (l *Loop) runOnce() {
 	if fn != nil {
 		fn(st)
 	}
+	return err
 }
+
+// RunOnce runs exactly one sync cycle - the same mode dispatch and bisync
+// resync-if-no-baseline logic as the internal ticker path (Start) - and
+// returns its error. It is for one-shot callers (the `sync` CLI command,
+// invoked e.g. by a Windows Scheduled Task) that need a single pass with no
+// tray and no ticker.
+func (l *Loop) RunOnce() error { return l.runOnce() }
 
 func (l *Loop) SyncNow() { go l.runOnce() }
 

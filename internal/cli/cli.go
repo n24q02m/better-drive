@@ -23,7 +23,7 @@ func newRootCmd() *cobra.Command {
 		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
 		Version: version.Version,
 	}
-	root.AddCommand(setupCmd(), runCmd(), statusCmd())
+	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd())
 	return root
 }
 
@@ -136,4 +136,54 @@ func statusCmd() *cobra.Command {
 			return nil
 		},
 	}
+}
+
+// syncCmd runs exactly one sync cycle for every configured pair, then exits -
+// no tray, no ticker. It is meant to be invoked by an external scheduler (a
+// Windows Scheduled Task) in place of a one-shot backup script: same config,
+// same per-pair mode/filters/workdir as `run`, but a single pass instead of a
+// continuous daemon.
+func syncCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "sync",
+		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg, err := config.Load(paths.ConfigFile())
+			if err != nil {
+				return err
+			}
+			if err := cfg.Validate(); err != nil {
+				return err
+			}
+
+			e := engine.New()
+			defer e.Close()
+			return runSyncOnce(cmd, e, cfg)
+		},
+	}
+}
+
+// runSyncOnce builds one syncloop.Loop per configured pair (same workdir
+// convention as runCmd, so a bisync-mode pair's baseline is shared with the
+// `run` daemon) and runs exactly one RunOnce cycle on each, printing a
+// per-pair result line. It returns a non-nil error if any pair failed. The
+// Syncer is a parameter (rather than constructed here) so tests can inject a
+// fake instead of a real engine.Engine, which would make a real Drive rc call.
+func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) error {
+	failed := false
+	for i, p := range cfg.Pairs {
+		p := p
+		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
+			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
+		if err := loop.RunOnce(); err != nil {
+			failed = true
+			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
+			continue
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
+	}
+	if failed {
+		return fmt.Errorf("sync: one or more pairs failed")
+	}
+	return nil
 }
