@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/n24q02m/better-drive/internal/autostart"
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
 	"github.com/n24q02m/better-drive/internal/paths"
@@ -25,8 +26,40 @@ func newRootCmd() *cobra.Command {
 		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
 		Version: version.Version,
 	}
-	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd())
+	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
 	return root
+}
+
+func installCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "install",
+		Short: "Register better-drive to start at login (hidden tray daemon)",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			exe, err := os.Executable()
+			if err != nil {
+				return err
+			}
+			if err := autostart.Enable(exe); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "installed: %q run will start at login\n", exe)
+			return nil
+		},
+	}
+}
+
+func uninstallCmd() *cobra.Command {
+	return &cobra.Command{
+		Use:   "uninstall",
+		Short: "Remove better-drive from login autostart",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := autostart.Disable(); err != nil {
+				return err
+			}
+			fmt.Fprintln(cmd.OutOrStdout(), "uninstalled: login autostart removed")
+			return nil
+		},
+	}
 }
 
 func setupCmd() *cobra.Command {
@@ -35,7 +68,14 @@ func setupCmd() *cobra.Command {
 		Use:   "setup",
 		Short: "Create the rclone Google Drive remote (opens browser for OAuth)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			e := engine.New("")
+			// setup can run before a config.toml exists yet (first-run before any
+			// [[pair]] is defined), so a missing/unloadable config is not fatal
+			// here - fall back to "" (auto-detect) rather than cfg.RcloneConfig.
+			rcloneConfigPath := ""
+			if cfg, err := config.Load(paths.ConfigFile()); err == nil {
+				rcloneConfigPath = cfg.RcloneConfig
+			}
+			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPath))
 			defer e.Close()
 			// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
 			// the remote's config stanza to disk BEFORE OAuth completes, so an
@@ -76,7 +116,7 @@ func runCmd() *cobra.Command {
 				return err
 			}
 
-			e := engine.New("")
+			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
 			for _, p := range cfg.Pairs {
 				remoteName, _, _ := strings.Cut(p.Remote, ":")
 				if configured, _ := e.RemoteConfigured(remoteName); !configured {
@@ -158,7 +198,7 @@ func syncCmd() *cobra.Command {
 				return err
 			}
 
-			e := engine.New("")
+			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
 			defer e.Close()
 			return runSyncOnce(cmd, e, cfg)
 		},

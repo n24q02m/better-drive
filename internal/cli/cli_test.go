@@ -22,7 +22,7 @@ func TestRootHasSubcommands(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []string{"setup", "run", "status", "sync"} {
+	for _, sub := range []string{"setup", "run", "status", "sync", "install", "uninstall"} {
 		if !bytes.Contains(buf.Bytes(), []byte(sub)) {
 			t.Errorf("help missing subcommand %q", sub)
 		}
