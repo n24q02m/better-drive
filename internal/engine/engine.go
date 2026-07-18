@@ -197,3 +197,65 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	out, _ := json.Marshal(res)
 	return BisyncResult{Output: string(out)}, err
 }
+
+// CopyParams configures a 1-way sync/copy or sync/sync call. Unlike
+// BisyncParams there is no Resync/baseline concept: sync/copy and sync/sync
+// are stateless per rc call (rc.Call registration in rclone's fs/sync/rc.go
+// takes only srcFs/dstFs/createEmptySrcDirs - no filtersFile, no listings) and
+// sync/copy auto-creates the destination directory, so no ensureRemoteDir
+// call is needed either (verified empirically - see engine's package doc /
+// the throwaway check run during implementation).
+type CopyParams struct {
+	Local, Remote, Workdir string
+	Filters                []string
+}
+
+// filterRC builds the rc "_filter" object using the RulesOpt.FilterRule field
+// (JSON field name, not the "filter" config-tag name - rc.Params.GetStruct /
+// job.go's getFilter Reshape the object via encoding/json, which uses Go
+// struct field names since filter.Options/RulesOpt carry no `json:` tags).
+// FilterRule expects the SAME "+ glob" / "- glob" prefixed rule syntax as a
+// bisync filters file (first-match-wins across the list), which is exactly
+// what config.TranslateDriveIgnore already produces - so Filters here reuses
+// those strings unchanged. Returns nil (omit "_filter" entirely) when there
+// are no filters, since an empty FilterRule list is harmless but unnecessary.
+func filterRC(filters []string) map[string]any {
+	if len(filters) == 0 {
+		return nil
+	}
+	return map[string]any{"FilterRule": filters}
+}
+
+// Copy performs a 1-way backup copy: files are copied from Local to Remote,
+// but nothing already on Remote is ever deleted (rc sync/copy - verified
+// empirically that a pre-existing extra file on dst survives a copy run).
+// Workdir is accepted for interface parity with Bisync/Sync but unused: copy
+// keeps no baseline/listings on disk.
+func (e *Engine) Copy(p CopyParams) error {
+	params := map[string]any{
+		"srcFs":              p.Local,
+		"dstFs":              withSkipGdocs(p.Remote),
+		"createEmptySrcDirs": true,
+	}
+	if f := filterRC(p.Filters); f != nil {
+		params["_filter"] = f
+	}
+	_, err := e.call("sync/copy", params)
+	return err
+}
+
+// Sync performs a 1-way mirror: Remote is made to exactly match Local,
+// including deleting anything on Remote that is not present on Local (rc
+// sync/sync - verified empirically that a dst-only file is removed).
+func (e *Engine) Sync(p CopyParams) error {
+	params := map[string]any{
+		"srcFs":              p.Local,
+		"dstFs":              withSkipGdocs(p.Remote),
+		"createEmptySrcDirs": true,
+	}
+	if f := filterRC(p.Filters); f != nil {
+		params["_filter"] = f
+	}
+	_, err := e.call("sync/sync", params)
+	return err
+}
