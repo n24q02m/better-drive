@@ -323,19 +323,42 @@ func TestCallGenericErrorNotResync(t *testing.T) {
 	}
 }
 
-// TestCopyBuildsParams verifies Copy calls rc "sync/copy" with srcFs=local,
-// dstFs carrying the runtime skip_gdocs connection string, createEmptySrcDirs
-// set, and filters passed through the "_filter.FilterRule" mechanism (the
-// same "+ "/"- " prefixed rule syntax as bisync's filters file - verified
-// empirically against rclone v1.74.4's fs/sync/rc.go + fs/rc/jobs/job.go
-// getFilter, which Reshapes "_filter" via encoding/json using the Go field
-// name FilterRule, not the RulesOpt "filter" config-tag name).
-func TestCopyBuildsParams(t *testing.T) {
+// indexOf returns the index of want in argv, or -1 if not present.
+func indexOf(argv []string, want string) int {
+	for i, a := range argv {
+		if a == want {
+			return i
+		}
+	}
+	return -1
+}
+
+// containsArg reports whether want is present anywhere in argv.
+func containsArg(argv []string, want string) bool { return indexOf(argv, want) != -1 }
+
+// TestCopyBuildsRcloneArgs verifies Copy builds `rclone copy <local> <remote>`
+// with the perf/retry/skip_gdocs/create-empty-src-dirs flags, and a
+// "--filter-from <tmpfile>" whose content is the joined filter lines (one per
+// line) - the temp file written via os.CreateTemp and removed again once Copy
+// returns (the deferred os.Remove).
+func TestCopyBuildsRcloneArgs(t *testing.T) {
 	path1 := t.TempDir()
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	var gotArgv []string
+	var filterFileContent string
+	var filterFileReadErr error
+	var filterPath string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		// Read the --filter-from file HERE, while Copy's defer cleanup() has
+		// not yet run (it fires only after this fake call returns) - this is
+		// the one point in the test where the temp file is guaranteed to
+		// still exist.
+		if idx := indexOf(args, "--filter-from"); idx != -1 && idx+1 < len(args) {
+			filterPath = args[idx+1]
+			data, err := os.ReadFile(filterPath)
+			filterFileContent, filterFileReadErr = string(data), err
+		}
+		return "", "", nil
 	})
 	err := e.Copy(CopyParams{
 		Local: path1, Remote: "gdrive:Backup", Workdir: t.TempDir(),
@@ -344,93 +367,93 @@ func TestCopyBuildsParams(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "sync/copy" {
-		t.Fatalf("method = %q, want sync/copy", gotMethod)
+	if len(gotArgv) < 3 || gotArgv[0] != "copy" || gotArgv[1] != path1 || gotArgv[2] != "gdrive:Backup" {
+		t.Fatalf("argv = %v, want [copy %s gdrive:Backup ...]", gotArgv, path1)
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
+	for _, want := range []string{"--drive-skip-gdocs", "--local-no-check-updated", "--retries", "--transfers", "--create-empty-src-dirs"} {
+		if !containsArg(gotArgv, want) {
+			t.Errorf("argv %v missing %q", gotArgv, want)
+		}
 	}
-	if m["srcFs"] != path1 {
-		t.Errorf("srcFs = %v, want %v", m["srcFs"], path1)
+	if filterPath == "" {
+		t.Fatalf("argv %v missing --filter-from <path>", gotArgv)
 	}
-	if m["dstFs"] != "gdrive,skip_gdocs=true:Backup" {
-		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Backup", m["dstFs"])
+	if filterFileReadErr != nil {
+		t.Fatalf("read --filter-from file during the fake call: %v", filterFileReadErr)
 	}
-	if m["createEmptySrcDirs"] != true {
-		t.Errorf("createEmptySrcDirs = %v, want true", m["createEmptySrcDirs"])
+	if filterFileContent != "- **/*.tmp\n" {
+		t.Errorf("filter file content = %q, want %q", filterFileContent, "- **/*.tmp\n")
 	}
-	filter, ok := m["_filter"].(map[string]any)
-	if !ok {
-		t.Fatalf("_filter = %v (%T), want map", m["_filter"], m["_filter"])
-	}
-	rules, ok := filter["FilterRule"].([]any)
-	if !ok || len(rules) != 1 || rules[0] != "- **/*.tmp" {
-		t.Errorf("_filter.FilterRule = %v, want [\"- **/*.tmp\"]", filter["FilterRule"])
+	if _, err := os.Stat(filterPath); !os.IsNotExist(err) {
+		t.Errorf("--filter-from temp file %q still exists after Copy returns, want removed", filterPath)
 	}
 }
 
-// TestCopyOmitsFilterWhenEmpty verifies Copy does not send an empty "_filter"
-// object when there are no filters (harmless either way, but keeps the rc
-// payload minimal and matches what a .driveignore-less pair sends today).
-func TestCopyOmitsFilterWhenEmpty(t *testing.T) {
-	var gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotInput = input
-		return `{}`, 200
+// TestCopyOmitsFilterFlagWhenEmpty verifies Copy does not pass --filter-from
+// at all when there are no filters (no temp file created either).
+func TestCopyOmitsFilterFlagWhenEmpty(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
 	if err := e.Copy(CopyParams{Local: t.TempDir(), Remote: "gdrive:Backup"}); err != nil {
 		t.Fatal(err)
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	if _, ok := m["_filter"]; ok {
-		t.Errorf("_filter present = %v, want omitted for empty Filters", m["_filter"])
+	if containsArg(gotArgv, "--filter-from") {
+		t.Errorf("argv %v has --filter-from, want omitted for empty Filters", gotArgv)
 	}
 }
 
-// TestSyncBuildsParams verifies Sync calls rc "sync/sync" (mirror - deletes on
-// dst to match src) with the same srcFs/dstFs/filter shape as Copy.
-func TestSyncBuildsParams(t *testing.T) {
+// TestSyncUsesSyncSubcommand verifies Sync builds `rclone sync <local> <remote>`
+// (mirror - deletes on dst to match src), the same argv shape as Copy otherwise.
+func TestSyncUsesSyncSubcommand(t *testing.T) {
 	path1 := t.TempDir()
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
-	err := e.Sync(CopyParams{Local: path1, Remote: "gdrive:Mirror"})
-	if err != nil {
+	if err := e.Sync(CopyParams{Local: path1, Remote: "gdrive:Mirror"}); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "sync/sync" {
-		t.Fatalf("method = %q, want sync/sync", gotMethod)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	if m["srcFs"] != path1 {
-		t.Errorf("srcFs = %v, want %v", m["srcFs"], path1)
-	}
-	if m["dstFs"] != "gdrive,skip_gdocs=true:Mirror" {
-		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Mirror", m["dstFs"])
+	if len(gotArgv) < 3 || gotArgv[0] != "sync" || gotArgv[1] != path1 || gotArgv[2] != "gdrive:Mirror" {
+		t.Fatalf("argv = %v, want [sync %s gdrive:Mirror ...]", gotArgv, path1)
 	}
 }
 
-// TestCopyPropagatesRcError verifies a non-200 rc response surfaces as an
-// error from Copy (no ErrNeedsResync classification applies to 1-way modes).
-func TestCopyPropagatesRcError(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"error":"permission denied"}`, 500
+// TestCopyPropagatesRunnerError verifies a runner error surfaces from Copy
+// with rclone's stderr folded in for diagnostics (no ErrNeedsResync
+// classification applies to 1-way modes).
+func TestCopyPropagatesRunnerError(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "permission denied", errors.New("exit status 1")
 	})
-	err := e.Copy(CopyParams{Local: "a", Remote: "gdrive:b"})
+	err := e.Copy(CopyParams{Local: t.TempDir(), Remote: "gdrive:b"})
 	if err == nil {
 		t.Fatal("want non-nil error")
 	}
 	if errors.Is(err, ErrNeedsResync) {
 		t.Fatalf("Copy error must NOT be classified as ErrNeedsResync, got %v", err)
+	}
+	if !strings.Contains(err.Error(), "permission denied") {
+		t.Errorf("error = %v, want it to include rclone's stderr", err)
+	}
+}
+
+// TestCopyPrependsConfigFlagWhenSet verifies the engine's cfg path is
+// forwarded as a leading "--config <path>" on every invocation.
+func TestCopyPrependsConfigFlagWhenSet(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("X:/portable/rclone.conf", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.Copy(CopyParams{Local: t.TempDir(), Remote: "gdrive:Backup"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(gotArgv) < 2 || gotArgv[0] != "--config" || gotArgv[1] != "X:/portable/rclone.conf" {
+		t.Fatalf("argv = %v, want [--config X:/portable/rclone.conf ...]", gotArgv)
 	}
 }
 
@@ -455,129 +478,112 @@ func TestDeleteRemote(t *testing.T) {
 	}
 }
 
-// TestCopyWithFileLocalCallsOperationsCopyFile verifies a pair whose Local is
-// a single file (e.g. ~/.claude.json) dispatches to rc operations/copyfile
-// with srcFs split to the file's parent directory + srcRemote as its base
-// name, dstFs the destination directory (with skip_gdocs) + dstRemote the
-// same base name, and no "_filter" (filters do not apply to a single-file
-// copy). Param shape verified empirically against a real Drive remote - see
-// engine package doc history / the throwaway check run during implementation.
-func TestCopyWithFileLocalCallsOperationsCopyFile(t *testing.T) {
+// TestCopyFileLocalUsesCopyto verifies a pair whose Local is a single file
+// (e.g. ~/.claude.json) dispatches to `rclone copyto <file> <remoteDir>/<base>`
+// (skip_gdocs and retries via global flags, not a connection string) and
+// omits --filter-from (filters do not apply to a single-file copy).
+func TestCopyFileLocalUsesCopyto(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "claude.json")
 	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
 	err := e.Copy(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude", Filters: []string{"- **/*.tmp"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "operations/copyfile" {
-		t.Fatalf("method = %q, want operations/copyfile", gotMethod)
+	if len(gotArgv) < 3 || gotArgv[0] != "copyto" {
+		t.Fatalf("argv = %v, want [copyto ...]", gotArgv)
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
+	if gotArgv[1] != filePath {
+		t.Errorf("argv[1] (source) = %v, want %v", gotArgv[1], filePath)
 	}
-	if m["srcFs"] != dir {
-		t.Errorf("srcFs = %v, want %v", m["srcFs"], dir)
+	if gotArgv[2] != "gdrive:Backups/claude/claude.json" {
+		t.Errorf("argv[2] (dest) = %v, want gdrive:Backups/claude/claude.json", gotArgv[2])
 	}
-	if m["srcRemote"] != "claude.json" {
-		t.Errorf("srcRemote = %v, want claude.json", m["srcRemote"])
-	}
-	if m["dstFs"] != "gdrive,skip_gdocs=true:Backups/claude" {
-		t.Errorf("dstFs = %v, want gdrive,skip_gdocs=true:Backups/claude", m["dstFs"])
-	}
-	if m["dstRemote"] != "claude.json" {
-		t.Errorf("dstRemote = %v, want claude.json", m["dstRemote"])
-	}
-	if _, ok := m["_filter"]; ok {
-		t.Errorf("_filter present = %v, want omitted for single-file copy", m["_filter"])
+	if containsArg(gotArgv, "--filter-from") {
+		t.Errorf("argv %v has --filter-from, want omitted for single-file copy", gotArgv)
 	}
 }
 
-// TestSyncWithFileLocalCallsOperationsCopyFile mirrors the Copy file-local
-// test for Sync: a single-file Local has no "extra content" on the dst side
-// to mirror away, so Sync collapses to the same operations/copyfile call.
-func TestSyncWithFileLocalCallsOperationsCopyFile(t *testing.T) {
+// TestSyncFileLocalUsesCopyto mirrors the Copy file-local test for Sync: a
+// single-file Local has no "extra content" on the dst side to mirror away, so
+// Sync collapses to the same copyto call.
+func TestSyncFileLocalUsesCopyto(t *testing.T) {
 	dir := t.TempDir()
 	filePath := filepath.Join(dir, "claude.json")
 	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
 	if err := e.Sync(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude"}); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "operations/copyfile" {
-		t.Fatalf("method = %q, want operations/copyfile", gotMethod)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	if m["srcFs"] != dir || m["srcRemote"] != "claude.json" {
-		t.Errorf("src = %v/%v, want %v/claude.json", m["srcFs"], m["srcRemote"], dir)
+	if len(gotArgv) < 2 || gotArgv[0] != "copyto" || gotArgv[1] != filePath {
+		t.Fatalf("argv = %v, want [copyto %s ...]", gotArgv, filePath)
 	}
 }
 
-// TestCopyWithDirLocalStillCallsSyncCopy is a regression guard: a directory
-// Local (the pre-existing, common case) must keep using rc sync/copy, not the
-// new single-file operations/copyfile path. TestCopyBuildsParams already
+// TestCopyWithDirLocalStillUsesCopySubcommand is a regression guard: a
+// directory Local (the pre-existing, common case) must keep using `rclone
+// copy`, not the single-file copyto path. TestCopyBuildsRcloneArgs already
 // covers this (its path1 is a t.TempDir() directory) - this test names the
 // guarantee explicitly for the file-local feature's benefit.
-func TestCopyWithDirLocalStillCallsSyncCopy(t *testing.T) {
+func TestCopyWithDirLocalStillUsesCopySubcommand(t *testing.T) {
 	dir := t.TempDir()
-	var gotMethod string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod = method
-		return `{}`, 200
+	var gotSubcommand string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		if len(args) > 0 {
+			gotSubcommand = args[0]
+		}
+		return "", "", nil
 	})
 	if err := e.Copy(CopyParams{Local: dir, Remote: "gdrive:Backup"}); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "sync/copy" {
-		t.Fatalf("method = %q, want sync/copy for a directory Local", gotMethod)
+	if gotSubcommand != "copy" {
+		t.Fatalf("subcommand = %q, want copy for a directory Local", gotSubcommand)
 	}
 }
 
-// TestCopyWithNonexistentLocalFallsBackToSyncCopy locks in the fallback
+// TestCopyWithNonexistentLocalFallsBackToCopySubcommand locks in the fallback
 // decision for isFileLocal: a Local that does not exist (os.Stat fails) is
-// NOT treated as a single file - it keeps the pre-existing directory sync/copy
-// behavior and lets rclone report its own error, rather than silently
+// NOT treated as a single file - it keeps the pre-existing directory `rclone
+// copy` behavior and lets rclone report its own error, rather than silently
 // changing dispatch based on a stat failure.
-func TestCopyWithNonexistentLocalFallsBackToSyncCopy(t *testing.T) {
+func TestCopyWithNonexistentLocalFallsBackToCopySubcommand(t *testing.T) {
 	missing := filepath.Join(t.TempDir(), "does-not-exist")
-	var gotMethod string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod = method
-		return `{}`, 200
+	var gotSubcommand string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		if len(args) > 0 {
+			gotSubcommand = args[0]
+		}
+		return "", "", nil
 	})
 	if err := e.Copy(CopyParams{Local: missing, Remote: "gdrive:Backup"}); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "sync/copy" {
-		t.Fatalf("method = %q, want sync/copy for a nonexistent Local", gotMethod)
+	if gotSubcommand != "copy" {
+		t.Fatalf("subcommand = %q, want copy for a nonexistent Local", gotSubcommand)
 	}
 }
 
-// TestSyncOpsSerialize verifies the engine mutex serializes Copy/Sync/Bisync.
-// rclone applies the rc _filter to process-global state during a sync, so two
-// syncs must never overlap (verified E2E that concurrency silently crosses
-// filters and empties a dest with err=nil).
+// TestSyncOpsSerialize verifies the engine mutex serializes Copy/Sync/Bisync
+// subprocess invocations - kept as cheap insurance against overlapping runs
+// (see the syncMu doc comment on Engine).
 func TestSyncOpsSerialize(t *testing.T) {
 	var mu sync.Mutex
 	active, maxActive := 0, 0
-	e := newTestEngine(func(method, input string) (string, int) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
 		mu.Lock()
 		active++
 		if active > maxActive {
@@ -588,7 +594,7 @@ func TestSyncOpsSerialize(t *testing.T) {
 		mu.Lock()
 		active--
 		mu.Unlock()
-		return `{}`, 200
+		return "", "", nil
 	})
 	var wg sync.WaitGroup
 	for i := 0; i < 6; i++ {

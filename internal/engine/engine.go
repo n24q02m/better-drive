@@ -339,83 +339,123 @@ func filterRC(filters []string) map[string]any {
 // isFileLocal reports whether local is an existing regular file (not a
 // directory). A pair whose Local is a single file (e.g. ~/.claude.json,
 // alongside the usual directory pairs) needs file-to-file copy semantics
-// instead of directory sync/copy or sync/sync. A local that does not exist,
-// or that stat fails on, is treated as a directory path (the pre-existing
-// behavior) and left to rclone's own error reporting.
+// instead of directory `rclone copy`/`rclone sync`. A local that does not
+// exist, or that stat fails on, is treated as a directory path (the
+// pre-existing behavior) and left to rclone's own error reporting.
 func isFileLocal(local string) bool {
 	info, err := os.Stat(local)
 	return err == nil && !info.IsDir()
 }
 
-// copyLocalFile copies a single local file to a remote directory via rc
-// operations/copyfile. Verified empirically against rclone v1.74.4's
-// fs/operations/rc.go (rcMoveOrCopyFile) and fs/rc/cache.go
-// (GetFsAndRemoteNamed -> GetFsNamed -> cache.Get(srcFs), then
-// fsrc.NewObject(ctx, srcRemote) in moveOrCopyFile): srcFs/dstFs are each
-// resolved as an fs.Fs ROOT, and srcRemote/dstRemote are paths WITHIN that
-// root - so srcFs must be the file's PARENT DIRECTORY (not the file path
-// itself) and srcRemote its base name; dstFs is the destination directory
-// and dstRemote the name to give the file there. Filters are not applied:
-// there is nothing else under a single source file to include/exclude.
+// commonSyncFlags are the flags shared by copy/sync/bisync invocations:
+// --fast-list plus --transfers/--checkers/--tpslimit (the old rc _config
+// UseListR/Transfers/Checkers/TPSLimit tuning), --retries (rclone's own
+// high-level retry loop, replacing the old callWithRetry wrapper),
+// --local-no-check-updated (RCLONE_LOCAL_NO_CHECK_UPDATED env - a file still
+// being appended to, e.g. ~/.claude/**/instinct.log, transfers at the size
+// first seen instead of aborting), --drive-skip-gdocs (Google Docs cannot be
+// downloaded as files, so any Drive side must skip them - replacing the old
+// withSkipGdocs connection-string trick), and --create-empty-src-dirs.
+func commonSyncFlags() []string {
+	return []string{
+		"--fast-list",
+		"--transfers", "8",
+		"--checkers", "16",
+		"--tpslimit", "10",
+		"--retries", "3",
+		"--local-no-check-updated",
+		"--drive-skip-gdocs",
+		"--create-empty-src-dirs",
+	}
+}
+
+// writeFilters writes filters (if any) to a temp file and returns the argv
+// flag+path to append (e.g. ["--filter-from", path] for copy/sync, or
+// ["--filters-file", path] for bisync) plus a cleanup func that removes the
+// temp file - always safe to call, even when no file was created (len(filters)
+// == 0 returns a nil argv and a no-op cleanup).
+func writeFilters(flag string, filters []string) (argv []string, cleanup func(), err error) {
+	if len(filters) == 0 {
+		return nil, func() {}, nil
+	}
+	f, err := os.CreateTemp("", "better-drive-filter-*.txt")
+	if err != nil {
+		return nil, func() {}, err
+	}
+	path := f.Name()
+	cleanup = func() { os.Remove(path) }
+	if _, err := f.WriteString(strings.Join(filters, "\n") + "\n"); err != nil {
+		f.Close()
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	return []string{flag, path}, cleanup, nil
+}
+
+// joinRemotePath joins a remote directory (e.g. "gdrive:Backups/claude") and a
+// file's base name into the single path `rclone copyto` expects as its
+// destination, e.g. "gdrive:Backups/claude/claude.json". Always uses "/" -
+// remote paths (including Drive) use forward slashes regardless of host OS.
+func joinRemotePath(dir, name string) string {
+	dir = strings.TrimSuffix(dir, "/")
+	if dir == "" {
+		return name
+	}
+	return dir + "/" + name
+}
+
+// copyLocalFile copies a single local file to a remote directory via `rclone
+// copyto <local> <remoteDir>/<base>`. Filters are not applied: there is
+// nothing else under a single source file to include/exclude.
 func (e *Engine) copyLocalFile(local, remoteDir string) error {
-	base := filepath.Base(local)
-	_, err := e.callWithRetry("operations/copyfile", map[string]any{
-		"srcFs":     filepath.Dir(local),
-		"srcRemote": base,
-		"dstFs":     withSkipGdocs(remoteDir),
-		"dstRemote": base,
-	})
-	return err
+	dst := joinRemotePath(remoteDir, filepath.Base(local))
+	_, stderr, err := e.exec("copyto", local, dst,
+		"--retries", "3", "--local-no-check-updated", "--drive-skip-gdocs")
+	if err != nil {
+		return fmt.Errorf("rclone copyto: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
 // Copy performs a 1-way backup copy: files are copied from Local to Remote,
-// but nothing already on Remote is ever deleted (rc sync/copy - verified
-// empirically that a pre-existing extra file on dst survives a copy run).
-// Workdir is accepted for interface parity with Bisync/Sync but unused: copy
-// keeps no baseline/listings on disk. When Local is a single file (not a
-// directory), it is copied file-to-file via rc operations/copyfile instead
-// (see copyLocalFile) - e.g. for a pair backing up ~/.claude.json.
-func (e *Engine) Copy(p CopyParams) error {
-	e.syncMu.Lock()
-	defer e.syncMu.Unlock()
-	if isFileLocal(p.Local) {
-		return e.copyLocalFile(p.Local, p.Remote)
-	}
-	params := map[string]any{
-		"srcFs":              p.Local,
-		"dstFs":              withSkipGdocs(p.Remote),
-		"createEmptySrcDirs": true,
-		"_config":            perfConfig(),
-	}
-	if f := filterRC(p.Filters); f != nil {
-		params["_filter"] = f
-	}
-	_, err := e.callWithRetry("sync/copy", params)
-	return err
-}
+// but nothing already on Remote is ever deleted (`rclone copy`). Workdir is
+// accepted for interface parity with Bisync/Sync but unused: copy keeps no
+// baseline/listings on disk. When Local is a single file (not a directory),
+// it is copied file-to-file via `rclone copyto` instead (see copyLocalFile) -
+// e.g. for a pair backing up ~/.claude.json.
+func (e *Engine) Copy(p CopyParams) error { return e.copyOrSync("copy", p) }
 
 // Sync performs a 1-way mirror: Remote is made to exactly match Local,
-// including deleting anything on Remote that is not present on Local (rc
-// sync/sync - verified empirically that a dst-only file is removed). When
-// Local is a single file, it is copied file-to-file via rc operations/copyfile
-// instead (see Copy's file-local handling) - there is no "extra content" on a
-// single destination file to mirror away, so the copy/sync distinction
-// collapses to the same operation for a file-local pair.
-func (e *Engine) Sync(p CopyParams) error {
+// including deleting anything on Remote that is not present on Local (`rclone
+// sync`). When Local is a single file, it is copied file-to-file via `rclone
+// copyto` instead (see Copy's file-local handling) - there is no "extra
+// content" on a single destination file to mirror away, so the copy/sync
+// distinction collapses to the same operation for a file-local pair.
+func (e *Engine) Sync(p CopyParams) error { return e.copyOrSync("sync", p) }
+
+// copyOrSync implements Copy and Sync: both differ only in the rclone
+// subcommand (copy vs sync), otherwise sharing the same argv shape, filter
+// handling, and file-local dispatch.
+func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if isFileLocal(p.Local) {
 		return e.copyLocalFile(p.Local, p.Remote)
 	}
-	params := map[string]any{
-		"srcFs":              p.Local,
-		"dstFs":              withSkipGdocs(p.Remote),
-		"createEmptySrcDirs": true,
-		"_config":            perfConfig(),
+	filterArgv, cleanup, err := writeFilters("--filter-from", p.Filters)
+	if err != nil {
+		return err
 	}
-	if f := filterRC(p.Filters); f != nil {
-		params["_filter"] = f
+	defer cleanup()
+	argv := append([]string{subcommand, p.Local, p.Remote}, commonSyncFlags()...)
+	argv = append(argv, filterArgv...)
+	_, stderr, err := e.exec(argv...)
+	if err != nil {
+		return fmt.Errorf("rclone %s: %w: %s", subcommand, err, strings.TrimSpace(stderr))
 	}
-	_, err := e.callWithRetry("sync/sync", params)
-	return err
+	return nil
 }
