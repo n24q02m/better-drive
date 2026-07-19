@@ -13,14 +13,37 @@ builds:
       - CGO_ENABLED=0
     goos:
       - windows
+      - linux
+      - darwin
     goarch:
       - amd64
+      - arm64
     ldflags:
       - -s -w
-      - -H windowsgui
       - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
       - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
       - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+    # Windows tray needs the GUI subsystem (no console window on launch).
+    # goreleaser requires both goos AND goarch set on each override entry for
+    # it to match anything, so windows/amd64 and windows/arm64 need one each;
+    # linux/darwin keep the base ldflags above (no -H windowsgui).
+    overrides:
+      - goos: windows
+        goarch: amd64
+        ldflags:
+          - -s -w
+          - -H windowsgui
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - goos: windows
+        goarch: arm64
+        ldflags:
+          - -s -w
+          - -H windowsgui
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
 
 archives:
   - id: default
@@ -32,6 +55,27 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - repository:
+      owner: n24q02m
+      name: homebrew-tap
+      branch: main
+      token: "{{ .Env.TAP_GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/n24q02m/better-drive"
+    description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
+    license: "MIT"
+    dependencies:
+      - name: rclone
+    install: |
+      bin.install "better-drive"
+    test: |
+      assert_match "better-drive version", shell_output("#{bin}/better-drive --version")
+    commit_author:
+      name: goreleaser-bot
+      email: bot@goreleaser.com
+    commit_msg_template: "feat: bump better-drive to {{ .Tag }}"
+
 scoops:
   - repository:
       owner: n24q02m
@@ -42,6 +86,8 @@ scoops:
     homepage: "https://github.com/n24q02m/better-drive"
     description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
     license: MIT
+    depends:
+      - rclone
     commit_author:
       name: goreleaser-bot
       email: bot@goreleaser.com
