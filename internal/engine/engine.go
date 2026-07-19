@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -10,21 +9,11 @@ import (
 	"sort"
 	"strings"
 	"sync"
-	"time"
-
-	_ "github.com/rclone/rclone/backend/drive" // register the Drive backend (path2)
-	_ "github.com/rclone/rclone/backend/local"  // register the local filesystem backend (path1)
-	_ "github.com/rclone/rclone/cmd/bisync"     // register the sync/bisync rc method (its init calls addRC)
 )
 
 var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
-// retryBackoffUnit is the base backoff between high-level retries in
-// callWithRetry (attempt N sleeps N*unit). A package var so tests can zero it.
-var retryBackoffUnit = 10 * time.Second
-
 type Engine struct {
-	rpc func(method, input string) (string, int)
 	// bin is the resolved rclone binary path (from exec.LookPath, or the bare
 	// "rclone" name when not found on PATH - the error surfaces on first use
 	// instead of at New()). cfg is the rclone config file path to pass via
@@ -76,64 +65,6 @@ func (e *Engine) args(base ...string) []string {
 // runner seam, applying args' --config prefixing.
 func (e *Engine) exec(argv ...string) (stdout, stderr string, err error) {
 	return e.run(e.args(argv...)...)
-}
-
-func (e *Engine) call(method string, params map[string]any) (map[string]any, error) {
-	in, _ := json.Marshal(params)
-	out, status := e.rpc(method, string(in))
-	var res map[string]any
-	_ = json.Unmarshal([]byte(out), &res)
-	if status != 200 {
-		msg, _ := res["error"].(string)
-		if strings.Contains(strings.ToLower(msg+out), "must run --resync") {
-			return res, ErrNeedsResync
-		}
-		return res, fmt.Errorf("rc %s status=%d: %s", method, status, out)
-	}
-	return res, nil
-}
-
-// callWithRetry wraps call with rclone-style high-level retries for a heavy
-// transfer op (sync/copy, sync/sync, operations/copyfile). The rc methods run
-// only rclone's low-level (per-request) retries, not the high-level retry loop
-// the `rclone` CLI applies in cmd.Run - so an intermittent Drive
-// "rateLimitExceeded" (the shared client_id's per-minute quota) that low-level
-// retries can't outlast fails the whole pair, where `rclone copy` would re-run
-// and succeed. Re-running is cheap: the copy is incremental, so a retry
-// re-attempts only the files that failed, hitting the API far less and usually
-// clearing the quota window. Only transient errors are retried; a config/auth
-// error fails fast.
-func (e *Engine) callWithRetry(method string, params map[string]any) (map[string]any, error) {
-	const maxAttempts = 3
-	var res map[string]any
-	var err error
-	for attempt := 1; attempt <= maxAttempts; attempt++ {
-		res, err = e.call(method, params)
-		if err == nil || attempt == maxAttempts || !isRetryable(err) {
-			return res, err
-		}
-		time.Sleep(time.Duration(attempt) * retryBackoffUnit) // 10s, then 20s
-	}
-	return res, err
-}
-
-// isRetryable reports whether err looks like a transient Drive/network failure
-// worth re-running the whole operation for (rate limit, quota, Google 5xx,
-// connection reset/timeout) rather than a fatal config/auth/permission error a
-// retry cannot fix.
-func isRetryable(err error) bool {
-	m := strings.ToLower(err.Error())
-	for _, marker := range []string{
-		"ratelimitexceeded", "userratelimitexceeded", "quota exceeded",
-		"too many requests", "backenderror", "internalerror", "serviceunavailable",
-		"connection reset", "connection refused", "i/o timeout", "timeout",
-		"unexpected eof", "tls handshake", "no such host",
-	} {
-		if strings.Contains(m, marker) {
-			return true
-		}
-	}
-	return false
 }
 
 // RemoteExists reports whether name is a configured remote (any type), by
@@ -212,35 +143,6 @@ func (e *Engine) CreateDriveRemote(name string, params map[string]string) error 
 		return fmt.Errorf("rclone config create: %w: %s", err, strings.TrimSpace(stderr))
 	}
 	return nil
-}
-
-// withSkipGdocs adds the skip_gdocs backend option to a remote path via an
-// rclone connection string, e.g. "gdrive:Backup" -> "gdrive,skip_gdocs=true:Backup".
-// Google Docs cannot be downloaded as files, so bisync must skip them or it
-// aborts. Applied at runtime (not stored in config) because config/create
-// drops the param during OAuth and config/update pauses without saving on an
-// already-token'd remote. Verified working: `rclone lsf "gdrive,skip_gdocs=true:..."`.
-// A local path (no remote before the ":") or a bare path is returned unchanged.
-func withSkipGdocs(remotePath string) string {
-	name, path, found := strings.Cut(remotePath, ":")
-	if !found {
-		return remotePath // local path / no remote to annotate
-	}
-	return name + ",skip_gdocs=true:" + path
-}
-
-// perfConfig returns rc _config overrides that speed up large syncs (matching
-// the tuning of the backup script better-drive replaces): fast-list (UseListR)
-// lists a whole tree in far fewer API calls, and more transfers/checkers with a
-// TPS cap keep large folders (e.g. ~/.claude) from taking many minutes. rc
-// _config keys are the fs.ConfigInfo field names (case-insensitive).
-func perfConfig() map[string]any {
-	return map[string]any{
-		"UseListR":  true, // --fast-list
-		"Transfers": 8,
-		"Checkers":  16,
-		"TPSLimit":  10.0,
-	}
 }
 
 // ListRemote lists the top-level entries under remotePath (e.g.
@@ -339,32 +241,13 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	return BisyncResult{}, nil
 }
 
-// CopyParams configures a 1-way sync/copy or sync/sync call. Unlike
-// BisyncParams there is no Resync/baseline concept: sync/copy and sync/sync
-// are stateless per rc call (rc.Call registration in rclone's fs/sync/rc.go
-// takes only srcFs/dstFs/createEmptySrcDirs - no filtersFile, no listings) and
-// sync/copy auto-creates the destination directory, so no ensureRemoteDir
-// call is needed either (verified empirically - see engine's package doc /
-// the throwaway check run during implementation).
+// CopyParams configures a 1-way `rclone copy` or `rclone sync` call. Unlike
+// BisyncParams there is no Resync/baseline concept: copy/sync are stateless
+// per invocation, and `rclone copy`/`rclone sync` auto-create the destination
+// directory, so no ensureRemoteDir call is needed either.
 type CopyParams struct {
 	Local, Remote, Workdir string
 	Filters                []string
-}
-
-// filterRC builds the rc "_filter" object using the RulesOpt.FilterRule field
-// (JSON field name, not the "filter" config-tag name - rc.Params.GetStruct /
-// job.go's getFilter Reshape the object via encoding/json, which uses Go
-// struct field names since filter.Options/RulesOpt carry no `json:` tags).
-// FilterRule expects the SAME "+ glob" / "- glob" prefixed rule syntax as a
-// bisync filters file (first-match-wins across the list), which is exactly
-// what config.TranslateDriveIgnore already produces - so Filters here reuses
-// those strings unchanged. Returns nil (omit "_filter" entirely) when there
-// are no filters, since an empty FilterRule list is harmless but unnecessary.
-func filterRC(filters []string) map[string]any {
-	if len(filters) == 0 {
-		return nil
-	}
-	return map[string]any{"FilterRule": filters}
 }
 
 // isFileLocal reports whether local is an existing regular file (not a

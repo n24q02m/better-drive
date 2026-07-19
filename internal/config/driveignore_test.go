@@ -1,14 +1,14 @@
 package config
 
 import (
+	"bytes"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
-	"time"
-
-	"github.com/rclone/rclone/fs/filter"
 )
 
 func TestTranslateDriveIgnore(t *testing.T) {
@@ -162,11 +162,21 @@ func TestPairFiltersNeverWritesDriveignoreFile(t *testing.T) {
 	}
 }
 
-// TestTranslateDriveIgnoreAgainstRealRcloneFilter builds an actual rclone
-// fs/filter.Filter from the translated rules to guard against regressions
-// that only rclone's own filter compiler (not our string assertions) would
-// catch (e.g. anchoring or precedence mistakes).
+// TestTranslateDriveIgnoreAgainstRealRcloneFilter shells out to the system
+// rclone binary (`rclone lsf --filter-from`) to verify the translated rules
+// against rclone's OWN filter engine, not just our string assertions - a
+// guard against regressions (e.g. anchoring or precedence mistakes) that only
+// rclone's real compiler would catch. Skipped when rclone is not on PATH
+// (e.g. GitHub-hosted CI runners, which do not preinstall it): a real rclone
+// binary is a hard runtime dependency of better-drive itself (see
+// internal/engine), so this only skips an unavailable-in-CI check, not an
+// unavailable-in-production one.
 func TestTranslateDriveIgnoreAgainstRealRcloneFilter(t *testing.T) {
+	bin, err := exec.LookPath("rclone")
+	if err != nil {
+		t.Skip("rclone not found on PATH, skipping real-filter regression check")
+	}
+
 	root := t.TempDir()
 	body := "*.tmp\n!keep.txt\n"
 	if err := os.WriteFile(filepath.Join(root, ".driveignore"), []byte(body), 0o600); err != nil {
@@ -176,22 +186,33 @@ func TestTranslateDriveIgnoreAgainstRealRcloneFilter(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	f, err := filter.NewFilter(nil)
-	if err != nil {
+	filterFile := filepath.Join(t.TempDir(), "filter.txt")
+	if err := os.WriteFile(filterFile, []byte(strings.Join(rules, "\n")+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	for _, r := range rules {
-		if err := f.AddRule(r); err != nil {
-			t.Fatalf("AddRule(%q): %v", r, err)
-		}
+
+	// A separate directory (root only holds .driveignore) to list through the
+	// translated filter.
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "skip.tmp"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "keep.txt"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
 	}
 
-	now := time.Now()
-	if f.Include("skip.tmp", 0, now, nil) {
-		t.Error("skip.tmp at root should be excluded by *.tmp")
+	cmd := exec.Command(bin, "lsf", "--filter-from", filterFile, dir)
+	var stdout, stderr bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("rclone lsf: %v: %s", err, stderr.String())
 	}
-	if !f.Include("keep.txt", 0, now, nil) {
-		t.Error("keep.txt at root should be included")
+	got := stdout.String()
+	if strings.Contains(got, "skip.tmp") {
+		t.Errorf("rclone lsf output %q: skip.tmp should be excluded by *.tmp", got)
+	}
+	if !strings.Contains(got, "keep.txt") {
+		t.Errorf("rclone lsf output %q: keep.txt should be included", got)
 	}
 }

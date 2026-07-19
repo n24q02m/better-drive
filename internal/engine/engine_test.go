@@ -11,11 +11,6 @@ import (
 	"time"
 )
 
-// newTestEngine inject fake rpc, không gọi librclone thật.
-func newTestEngine(fn func(method, input string) (string, int)) *Engine {
-	return &Engine{rpc: fn}
-}
-
 // newFakeRunnerEngine builds an Engine whose runner is fn, bypassing
 // exec.Command entirely - used by tests that assert the constructed rclone
 // argv without a real rclone binary.
@@ -37,14 +32,6 @@ func TestNewResolvesRunner(t *testing.T) {
 	if e.bin == "" {
 		t.Fatal("New(\"\").bin is empty, want a resolved rclone binary name/path")
 	}
-}
-
-// recordedCall captures one fake-rpc invocation (method + raw JSON input),
-// used by tests that need to assert call order/count instead of just the
-// last call.
-type recordedCall struct {
-	method string
-	input  string
 }
 
 // TestBisyncBuildsRcloneArgs verifies Bisync builds `rclone bisync <path1>
@@ -350,26 +337,6 @@ func TestCreateDriveRemoteWithParams(t *testing.T) {
 	}
 }
 
-// TestWithSkipGdocs verifies the runtime connection-string transform: a Drive
-// remote path gains ",skip_gdocs=true" before the ":"; a local/plain path with
-// no remote is returned unchanged. withSkipGdocs itself is now dead code (no
-// remaining caller after the Copy/Sync/Bisync/CreateDriveRemote migrations
-// above use the global --drive-skip-gdocs flag instead) - kept alongside the
-// function until the final purge commit removes both together.
-func TestWithSkipGdocs(t *testing.T) {
-	cases := map[string]string{
-		"gdrive:Backup":     "gdrive,skip_gdocs=true:Backup",
-		"gdrive:":           "gdrive,skip_gdocs=true:",
-		"gdrive:a/b/c":      "gdrive,skip_gdocs=true:a/b/c",
-		"/home/user/folder": "/home/user/folder",
-	}
-	for in, want := range cases {
-		if got := withSkipGdocs(in); got != want {
-			t.Errorf("withSkipGdocs(%q) = %q, want %q", in, got, want)
-		}
-	}
-}
-
 // TestBisyncGenericErrorNotResync verifies a generic rclone failure surfaces
 // as a plain error from Bisync, not classified as ErrNeedsResync.
 func TestBisyncGenericErrorNotResync(t *testing.T) {
@@ -667,80 +634,3 @@ func TestSyncOpsSerialize(t *testing.T) {
 	}
 }
 
-// swapBackoff sets retryBackoffUnit to d (0 in tests, to avoid real sleeps) and
-// returns a restore func for defer.
-func swapBackoff(d time.Duration) func() {
-	old := retryBackoffUnit
-	retryBackoffUnit = d
-	return func() { retryBackoffUnit = old }
-}
-
-func TestIsRetryable(t *testing.T) {
-	cases := map[string]bool{
-		`rc sync/copy status=500: {"error":"googleapi: Error 403: Quota exceeded ... rateLimitExceeded"}`: true,
-		`rc sync/copy status=500: {"error":"connection reset by peer"}`:                                    true,
-		`rc sync/copy status=500: {"error":"i/o timeout"}`:                                                 true,
-		`rc sync/copy status=500: {"error":"didn't find section in config file (\"gdrive\")"}`:             false,
-		`rc sync/copy status=500: {"error":"directory not found"}`:                                         false,
-	}
-	for msg, want := range cases {
-		if got := isRetryable(errors.New(msg)); got != want {
-			t.Errorf("isRetryable(%q) = %v, want %v", msg, got, want)
-		}
-	}
-}
-
-// TestCallWithRetryRetriesTransientThenSucceeds verifies a transient rate-limit
-// error is retried and a subsequent success is returned (the whole op re-runs,
-// as rclone's cmd.Run does but the rc method does not).
-func TestCallWithRetryRetriesTransientThenSucceeds(t *testing.T) {
-	defer swapBackoff(0)()
-	calls := 0
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls++
-		if calls < 2 {
-			return `{"error":"googleapi: Error 403: rateLimitExceeded"}`, 500
-		}
-		return `{}`, 200
-	})
-	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err != nil {
-		t.Fatalf("want success after retry, got %v", err)
-	}
-	if calls != 2 {
-		t.Errorf("want 2 calls (1 transient fail + 1 success), got %d", calls)
-	}
-}
-
-// TestCallWithRetryFailsFastOnFatal verifies a fatal (config) error is NOT
-// retried - a retry cannot fix a missing remote, so it returns after one call.
-func TestCallWithRetryFailsFastOnFatal(t *testing.T) {
-	defer swapBackoff(0)()
-	calls := 0
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls++
-		return `{"error":"didn't find section in config file (\"gdrive\")"}`, 500
-	})
-	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err == nil {
-		t.Fatal("want error")
-	}
-	if calls != 1 {
-		t.Errorf("fatal error must not retry: want 1 call, got %d", calls)
-	}
-}
-
-// TestCallWithRetryExhaustsOnPersistentTransient verifies retries are bounded:
-// a persistently transient error stops after maxAttempts and returns the error.
-func TestCallWithRetryExhaustsOnPersistentTransient(t *testing.T) {
-	defer swapBackoff(0)()
-	calls := 0
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls++
-		return `{"error":"rateLimitExceeded"}`, 500
-	})
-	if _, err := e.callWithRetry("sync/copy", map[string]any{}); err == nil {
-		t.Fatal("want error after exhausting retries")
-	}
-	if calls != 3 {
-		t.Errorf("want 3 bounded attempts, got %d", calls)
-	}
-}
