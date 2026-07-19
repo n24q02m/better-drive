@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -125,6 +126,19 @@ func runCmd() *cobra.Command {
 				}
 			}
 
+			// Persistent sync log: the tray only ever shows the LATEST state
+			// (an Error icon gives no history), so every cycle's outcome is
+			// also appended to a log file. Best-effort - a failure to open it
+			// must not block the daemon, just run with no logger.
+			var logger *log.Logger
+			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			if logErr != nil {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open log file %q: %v (continuing without sync logging)\n", paths.LogFile(), logErr)
+			} else {
+				logger = log.New(logFile, "", log.LstdFlags)
+				logger.Printf("daemon started, %d pairs", len(cfg.Pairs))
+			}
+
 			// One syncloop per pair, each with its own mode/interval/filters
 			// and its own workdir (bisync baselines must not collide across
 			// pairs). agg.Register wires each loop's OnChange into the shared
@@ -139,6 +153,15 @@ func runCmd() *cobra.Command {
 					func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 				loops[i] = loop
 				agg.Register(i, loop)
+				if logger != nil {
+					loop.OnResult(func(err error) {
+						if err != nil {
+							logger.Printf("%s <-> %s [mode=%s]: FAILED: %v", p.Local, p.Remote, p.Mode, err)
+							return
+						}
+						logger.Printf("%s <-> %s [mode=%s]: OK", p.Local, p.Remote, p.Mode)
+					})
+				}
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
@@ -150,6 +173,9 @@ func runCmd() *cobra.Command {
 			cancel()
 			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
 			e.Close() // safe to Finalize the engine now that no goroutine can touch it
+			if logFile != nil {
+				logFile.Close()
+			}
 			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
 			// right before Quit races with cancel()/wg.Wait() above (SyncNow spawns its own
 			// goroutine per loop, not tracked by `wg`), so a loop can still be mid-sync when

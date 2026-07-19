@@ -25,6 +25,11 @@ func ConfigFile() string {
 }
 func Workdir() string    { return filepath.Join(base(), "bisync") }
 
+// LogFile returns the path of the daemon's persistent sync log
+// (base()/better-drive.log), where `better-drive run` appends one line per
+// completed sync cycle per pair.
+func LogFile() string { return filepath.Join(base(), "better-drive.log") }
+
 // PairWorkdir returns a workdir unique to the pair at the given index in the
 // config's [[pair]] list. Each pair needs its own workdir: bisync mode keeps
 // baseline listing files (*.lst) and a filters.txt in the workdir, and those

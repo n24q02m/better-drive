@@ -377,6 +377,58 @@ func TestRunOnceSuccessReturnsNil(t *testing.T) {
 	}
 }
 
+// TestOnResultInvokedWithSuccess verifies OnResult fires with a nil error
+// after a successful cycle - the callback backing the daemon's per-cycle log
+// line ("OK" vs "FAILED: <err>").
+func TestOnResultInvokedWithSuccess(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	var mu sync.Mutex
+	var called bool
+	var got error
+	l.OnResult(func(err error) {
+		mu.Lock()
+		called = true
+		got = err
+		mu.Unlock()
+	})
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce() err = %v, want nil", err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !called {
+		t.Fatal("OnResult callback was never invoked")
+	}
+	if got != nil {
+		t.Errorf("OnResult err = %v, want nil", got)
+	}
+}
+
+// TestOnResultInvokedWithSyncerError verifies OnResult receives the exact
+// Syncer error for a failing cycle (not just a "something failed" signal),
+// since the daemon log line embeds it verbatim.
+func TestOnResultInvokedWithSyncerError(t *testing.T) {
+	f := &fakeSyncer{err: errors.New("boom")}
+	l := newLoop(f)
+	l.hasBaseline = true // avoid the first-run auto-resync branch, not under test here
+	var mu sync.Mutex
+	var got error
+	l.OnResult(func(err error) {
+		mu.Lock()
+		got = err
+		mu.Unlock()
+	})
+	if err := l.RunOnce(); err == nil {
+		t.Fatal("RunOnce() err = nil, want \"boom\"")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if got == nil || got.Error() != "boom" {
+		t.Errorf("OnResult err = %v, want \"boom\"", got)
+	}
+}
+
 // TestModeDefaultsToBisyncWhenEmpty verifies New("") behaves like
 // New("bisync") for backward compatibility (config.Load already defaults an
 // empty toml mode to "bisync", but Loop itself must be defensive too).

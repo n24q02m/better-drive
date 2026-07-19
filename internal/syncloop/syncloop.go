@@ -58,6 +58,7 @@ type Loop struct {
 	hasBaseline bool
 	running     bool
 	onChange    func(State)
+	onResult    func(error)
 }
 
 // New creates a Loop for the given mode ("bisync", "copy", or "sync"); an
@@ -92,6 +93,17 @@ func (l *Loop) State() State {
 func (l *Loop) OnChange(fn func(State)) {
 	l.mu.Lock()
 	l.onChange = fn
+	l.mu.Unlock()
+}
+
+// OnResult registers fn to be called once per completed sync cycle with that
+// cycle's outcome (nil on success, the Syncer's error on failure). Unlike
+// OnChange (state transitions), this fires exactly once per runOnce on the
+// normal path only - never from the panic-recover path - so a caller (the
+// daemon's per-cycle log line) gets the real cycle error, not a synthetic one.
+func (l *Loop) OnResult(fn func(error)) {
+	l.mu.Lock()
+	l.onResult = fn
 	l.mu.Unlock()
 }
 
@@ -177,9 +189,13 @@ func (l *Loop) runOnce() (err error) {
 	}
 	st := l.state
 	fn := l.onChange
+	onResult := l.onResult
 	l.mu.Unlock()
 	if fn != nil {
 		fn(st)
+	}
+	if onResult != nil {
+		onResult(err)
 	}
 	return err
 }
