@@ -2,6 +2,44 @@
 
 <!-- version list -->
 
+## v1.3.0 (2026-07-19)
+
+### Features
+
+- Add cross-platform builds, homebrew tap, and rclone dep to goreleaser
+  ([`42c2ba1`](https://github.com/n24q02m/better-drive/commit/42c2ba1e872362af164c6a8b497d74a05fbf9794))
+
+- Add dependency-review and installer-smoke CI jobs
+  ([`87a85bb`](https://github.com/n24q02m/better-drive/commit/87a85bb8f447a47c84afc2ae4b0a3365dcb192d2))
+
+- Add exec-based runner seam to engine for rclone shell-out
+  ([`2ee04f1`](https://github.com/n24q02m/better-drive/commit/2ee04f1dde454569327eff3d5300592b11dc3ab4))
+
+- Add one-shot install.ps1/install.sh installers
+  ([`ef50451`](https://github.com/n24q02m/better-drive/commit/ef504518a4382fa96cef1b69a68d3ac565bd9475))
+
+- Add OpenSSF Scorecard workflow
+  ([`0531333`](https://github.com/n24q02m/better-drive/commit/053133345824ef2cb7bfb0f5c8d5b8fef259adc5))
+
+- Add real darwin/linux autostart implementations
+  ([`9c08be3`](https://github.com/n24q02m/better-drive/commit/9c08be310a163c0aae1a586b9604f79ccf49e010))
+
+- Purge librclone dependency, drop rclone from go.mod
+  ([`5a0f184`](https://github.com/n24q02m/better-drive/commit/5a0f184ea00b47b3a34092cab1e1ef2aadb3e9c1))
+
+- Shell out Bisync to rclone bisync, keep ErrNeedsResync mapping
+  ([`2858b60`](https://github.com/n24q02m/better-drive/commit/2858b603643fd506a7f15b510585af21791ba14a))
+
+- Shell out Copy/Sync to rclone copy/sync/copyto
+  ([`0ed88d9`](https://github.com/n24q02m/better-drive/commit/0ed88d9ba2f6dc7baa1cdab170f9274c2bbcb643))
+
+- Shell out remote/config methods to rclone config/listremotes/lsf
+  ([`466ac4a`](https://github.com/n24q02m/better-drive/commit/466ac4afd63cf8825194c1e16d405e8a7093070a))
+
+- Split tray package by build tag for cgo-free non-windows builds
+  ([`f7e899f`](https://github.com/n24q02m/better-drive/commit/f7e899fcac1fa6591350dfe523b04e8d3b27a91b))
+
+
 ## v1.2.0 (2026-07-19)
 
 ### Features
