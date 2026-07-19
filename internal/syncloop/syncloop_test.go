@@ -71,8 +71,8 @@ func newLoopMode(s Syncer, mode string) *Loop {
 func TestFirstRunResyncsThenNot(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoop(f)
-	l.runOnce()
-	l.runOnce()
+	_ = l.runOnce()
+	_ = l.runOnce()
 	if len(f.calls) != 2 {
 		t.Fatalf("calls=%d", len(f.calls))
 	}
@@ -91,7 +91,7 @@ func TestNeedsResyncErrorSetsState(t *testing.T) {
 	f := &fakeSyncer{err: engine.ErrNeedsResync}
 	l := newLoop(f)
 	l.hasBaseline = true // giả lập đã có baseline để không auto-resync
-	l.runOnce()
+	_ = l.runOnce()
 	if l.State() != StateNeedsResync {
 		t.Fatalf("state=%v, want NeedsResync", l.State())
 	}
@@ -101,7 +101,7 @@ func TestGenericErrorSetsError(t *testing.T) {
 	f := &fakeSyncer{err: errors.New("boom")}
 	l := newLoop(f)
 	l.hasBaseline = true
-	l.runOnce()
+	_ = l.runOnce()
 	if l.State() != StateError {
 		t.Fatalf("state=%v", l.State())
 	}
@@ -111,7 +111,7 @@ func TestPauseSkipsRun(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoop(f)
 	l.Pause()
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.calls) != 0 {
 		t.Fatalf("paused but ran %d times", len(f.calls))
 	}
@@ -127,7 +127,7 @@ func TestExistingBaselineSkipsResync(t *testing.T) {
 	}
 	f := &fakeSyncer{}
 	l := New(f, "C:/x", "gdrive:x", workdir, "bisync", func() ([]string, error) { return nil, nil })
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.calls) != 1 {
 		t.Fatalf("calls=%d", len(f.calls))
 	}
@@ -193,7 +193,7 @@ func TestOnChangeInvokedOnStateChange(t *testing.T) {
 		seen = append(seen, st)
 		mu.Unlock()
 	})
-	l.runOnce()
+	_ = l.runOnce()
 	mu.Lock()
 	defer mu.Unlock()
 	if len(seen) == 0 {
@@ -228,7 +228,7 @@ func TestRunOncePanicRecovers(t *testing.T) {
 	f := &panicSyncer{}
 	l := newLoop(f)
 	l.hasBaseline = true
-	l.runOnce() // must not panic out of the test
+	_ = l.runOnce() // must not panic out of the test
 	if l.State() != StateError {
 		t.Fatalf("state after panicking Syncer = %v, want StateError", l.State())
 	}
@@ -247,7 +247,7 @@ func TestPauseDuringInFlightSync(t *testing.T) {
 	}}
 	l := newLoop(f)
 	l.hasBaseline = true
-	go func() { l.runOnce(); close(done) }()
+	go func() { _ = l.runOnce(); close(done) }()
 	<-entered      // sync is in-flight
 	l.Pause()      // pause requested mid-flight
 	close(release) // allow the in-flight sync to finish
@@ -263,7 +263,7 @@ func TestPauseDuringInFlightSync(t *testing.T) {
 func TestModeCopyCallsCopyNotBisync(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoopMode(f, "copy")
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.copyCalls) != 1 {
 		t.Fatalf("copyCalls=%d, want 1", len(f.copyCalls))
 	}
@@ -286,7 +286,7 @@ func TestModeCopyCallsCopyNotBisync(t *testing.T) {
 func TestModeSyncCallsSyncNotBisync(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoopMode(f, "sync")
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.syncCalls) != 1 {
 		t.Fatalf("syncCalls=%d, want 1", len(f.syncCalls))
 	}
@@ -307,7 +307,7 @@ func TestModeSyncCallsSyncNotBisync(t *testing.T) {
 func TestModeBisyncUnaffectedByModeSupport(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoopMode(f, "bisync")
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.calls) != 1 {
 		t.Fatalf("bisync calls=%d, want 1", len(f.calls))
 	}
@@ -324,7 +324,7 @@ func TestModeBisyncUnaffectedByModeSupport(t *testing.T) {
 func TestModeCopyGenericErrorSetsStateError(t *testing.T) {
 	f := &fakeSyncer{err: errors.New("copy failed")}
 	l := newLoopMode(f, "copy")
-	l.runOnce()
+	_ = l.runOnce()
 	if l.State() != StateError {
 		t.Fatalf("state=%v, want StateError", l.State())
 	}
@@ -335,7 +335,7 @@ func TestModeCopyGenericErrorSetsStateError(t *testing.T) {
 func TestModeSyncGenericErrorSetsStateError(t *testing.T) {
 	f := &fakeSyncer{err: errors.New("sync failed")}
 	l := newLoopMode(f, "sync")
-	l.runOnce()
+	_ = l.runOnce()
 	if l.State() != StateError {
 		t.Fatalf("state=%v, want StateError", l.State())
 	}
@@ -435,7 +435,7 @@ func TestOnResultInvokedWithSyncerError(t *testing.T) {
 func TestModeDefaultsToBisyncWhenEmpty(t *testing.T) {
 	f := &fakeSyncer{}
 	l := New(f, "C:/x", "gdrive:x", "wd", "", func() ([]string, error) { return nil, nil })
-	l.runOnce()
+	_ = l.runOnce()
 	if len(f.calls) != 1 {
 		t.Fatalf("bisync calls=%d, want 1 (empty mode must default to bisync)", len(f.calls))
 	}

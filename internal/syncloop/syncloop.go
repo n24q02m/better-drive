@@ -207,7 +207,7 @@ func (l *Loop) runOnce() (err error) {
 // tray and no ticker.
 func (l *Loop) RunOnce() error { return l.runOnce() }
 
-func (l *Loop) SyncNow() { go l.runOnce() }
+func (l *Loop) SyncNow() { go func() { _ = l.runOnce() }() }
 
 func (l *Loop) Pause() {
 	l.mu.Lock()
@@ -224,7 +224,7 @@ func (l *Loop) Resume() {
 }
 
 func (l *Loop) Start(ctx context.Context, interval time.Duration) {
-	l.runOnce()
+	_ = l.runOnce()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -232,7 +232,7 @@ func (l *Loop) Start(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			l.runOnce()
+			_ = l.runOnce()
 		}
 	}
 }
