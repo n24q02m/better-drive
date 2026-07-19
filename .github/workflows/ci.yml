@@ -36,3 +36,49 @@ jobs:
         with:
           languages: go
       - uses: github/codeql-action/analyze@v3
+
+  dependency-review:
+    name: Dependency Review
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: actions/dependency-review-action@a1d282b36b6f3519aa1f3fc636f609c47dddb294 # v5.0.0
+        with:
+          fail-on-severity: moderate
+          comment-summary-in-pr: always
+
+  installer-smoke:
+    name: Installer smoke test (${{ matrix.os }})
+    # Gate behind workflow_dispatch/tag: these install from the live
+    # scoop-bucket/homebrew-tap repos and pull real release assets, so PR
+    # pushes should not depend on external reachability or a release existing
+    # yet. Run on demand or on tag (mirrors skret's installer-smoke). This
+    # directly tests the scoop + brew distribution channels.
+    if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/v')
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Install via scoop (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command scoop -ErrorAction SilentlyContinue)) {
+            try {
+              iwr -useb get.scoop.sh | iex
+            } catch {
+              Write-Error "scoop bootstrap failed: $_"
+              exit 1
+            }
+          }
+          scoop bucket add n24q02m https://github.com/n24q02m/scoop-bucket
+          scoop install better-drive
+          better-drive --version
+      - name: Install via brew (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          brew install n24q02m/homebrew-tap/better-drive
+          better-drive --version
