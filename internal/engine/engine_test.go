@@ -48,62 +48,110 @@ type recordedCall struct {
 	input  string
 }
 
-func TestBisyncBuildsParams(t *testing.T) {
+// TestBisyncBuildsRcloneArgs verifies Bisync builds `rclone bisync <path1>
+// <path2> --workdir <workdir> ...` with the shared perf/retry/skip_gdocs
+// flags plus the bisync-specific ones (--resilient, --recover, --max-delete
+// 50, --conflict-resolve newer, --conflict-loser num, --compare
+// size,modtime,checksum), and a --filters-file whose content is the joined
+// filter lines - the temp file removed again once Bisync returns.
+func TestBisyncBuildsRcloneArgs(t *testing.T) {
 	// path1 must be a real (but disposable) directory: Resync:true makes
 	// Bisync os.MkdirAll(p.Path1), and a hard-coded "C:/x" would leak that
 	// dir onto the real disk every time the unit suite runs.
 	path1 := t.TempDir()
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	workdir := t.TempDir()
+	var gotArgv []string
+	var filterFileContent string
+	var filterFileReadErr error
+	var filterPath string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		if len(args) > 0 && args[0] == "bisync" {
+			gotArgv = args
+			// Read the --filters-file HERE, while Bisync's defer cleanup()
+			// has not yet run - the one point the temp file is guaranteed to
+			// still exist.
+			if idx := indexOf(args, "--filters-file"); idx != -1 && idx+1 < len(args) {
+				filterPath = args[idx+1]
+				data, err := os.ReadFile(filterPath)
+				filterFileContent, filterFileReadErr = string(data), err
+			}
+		}
+		return "", "", nil
 	})
 	_, err := e.Bisync(BisyncParams{
-		Path1: path1, Path2: "gdrive:x", Workdir: t.TempDir(),
+		Path1: path1, Path2: "gdrive:x", Workdir: workdir,
 		Resync: true, Filters: []string{"- **/*.tmp"},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "sync/bisync" {
-		t.Fatalf("method = %q", gotMethod)
+	if len(gotArgv) < 3 || gotArgv[0] != "bisync" || gotArgv[1] != path1 || gotArgv[2] != "gdrive:x" {
+		t.Fatalf("argv = %v, want [bisync %s gdrive:x ...]", gotArgv, path1)
 	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	for k, want := range map[string]any{
-		// path2 carries the runtime skip_gdocs connection string (see withSkipGdocs).
-		"path1": path1, "path2": "gdrive,skip_gdocs=true:x", "resync": true,
-		"conflictResolve": "newer", "conflictLoser": "num", "resilient": true,
-		// JSON numbers unmarshal into map[string]any as float64.
-		"maxDelete": float64(50),
+	for _, want := range []string{
+		"--resync", "--resilient", "--recover", "--create-empty-src-dirs",
+		"--drive-skip-gdocs", "--local-no-check-updated", "--retries",
 	} {
-		if m[k] != want {
-			t.Errorf("param %s = %v, want %v", k, m[k], want)
+		if !containsArg(gotArgv, want) {
+			t.Errorf("argv %v missing %q", gotArgv, want)
 		}
 	}
-	if !strings.HasSuffix(m["filtersFile"].(string), "filters.txt") {
-		t.Errorf("filtersFile = %v", m["filtersFile"])
+	for flag, want := range map[string]string{
+		"--workdir": workdir, "--max-delete": "50",
+		"--conflict-resolve": "newer", "--conflict-loser": "num",
+		"--compare": "size,modtime,checksum",
+	} {
+		idx := indexOf(gotArgv, flag)
+		if idx == -1 || idx+1 >= len(gotArgv) {
+			t.Errorf("argv %v missing %s <value>", gotArgv, flag)
+			continue
+		}
+		if gotArgv[idx+1] != want {
+			t.Errorf("%s = %v, want %q", flag, gotArgv[idx+1], want)
+		}
 	}
-	data, err := os.ReadFile(m["filtersFile"].(string))
-	if err != nil {
-		t.Fatalf("read filters file: %v", err)
+	if filterPath == "" {
+		t.Fatalf("argv %v missing --filters-file <path>", gotArgv)
 	}
-	if string(data) != "- **/*.tmp\n" {
-		t.Errorf("filters file content = %q, want %q", string(data), "- **/*.tmp\n")
+	if filterFileReadErr != nil {
+		t.Fatalf("read --filters-file during the fake call: %v", filterFileReadErr)
+	}
+	if filterFileContent != "- **/*.tmp\n" {
+		t.Errorf("filters file content = %q, want %q", filterFileContent, "- **/*.tmp\n")
+	}
+	if _, err := os.Stat(filterPath); !os.IsNotExist(err) {
+		t.Errorf("--filters-file temp file %q still exists after Bisync returns, want removed", filterPath)
 	}
 }
 
-// TestBisyncEnsuresRemoteDirOnResync verifies ensureRemoteDir's split: on a
-// --resync run, Bisync must call operations/mkdir on path2's remote root
-// (fs="gdrive:", remote="sub") before it calls sync/bisync itself - rclone
-// bisync --resync aborts when path2's root doesn't exist yet.
+// TestBisyncResyncFlag verifies Resync:true/false controls whether --resync
+// is present in the bisync argv.
+func TestBisyncResyncFlag(t *testing.T) {
+	for _, resync := range []bool{true, false} {
+		var gotArgv []string
+		e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+			gotArgv = args
+			return "", "", nil
+		})
+		_, err := e.Bisync(BisyncParams{Path1: t.TempDir(), Path2: "gdrive:x", Workdir: t.TempDir(), Resync: resync})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := containsArg(gotArgv, "--resync"); got != resync {
+			t.Errorf("Resync=%v: --resync present = %v, want %v (argv=%v)", resync, got, resync, gotArgv)
+		}
+	}
+}
+
+// TestBisyncEnsuresRemoteDirOnResync verifies ensureRemoteDir's rclone call:
+// on a --resync run, Bisync must run `rclone mkdir gdrive:sub` before
+// `rclone bisync ...` - rclone bisync --resync aborts when path2's root
+// doesn't exist yet.
 func TestBisyncEnsuresRemoteDirOnResync(t *testing.T) {
-	var calls []recordedCall
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls = append(calls, recordedCall{method: method, input: input})
-		return `{}`, 200
+	var calls [][]string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		calls = append(calls, args)
+		return "", "", nil
 	})
 	_, err := e.Bisync(BisyncParams{
 		Path1: t.TempDir(), Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: true,
@@ -112,32 +160,32 @@ func TestBisyncEnsuresRemoteDirOnResync(t *testing.T) {
 		t.Fatal(err)
 	}
 	mkdirIdx, bisyncIdx := -1, -1
-	for i, c := range calls {
-		if c.method == "operations/mkdir" && mkdirIdx == -1 {
-			mkdirIdx = i
-			var m map[string]any
-			if err := json.Unmarshal([]byte(c.input), &m); err != nil {
-				t.Fatal(err)
-			}
-			if m["fs"] != "gdrive:" {
-				t.Errorf("mkdir fs = %v, want %q", m["fs"], "gdrive:")
-			}
-			if m["remote"] != "sub" {
-				t.Errorf("mkdir remote = %v, want %q", m["remote"], "sub")
-			}
+	for i, argv := range calls {
+		if len(argv) == 0 {
+			continue
 		}
-		if c.method == "sync/bisync" && bisyncIdx == -1 {
-			bisyncIdx = i
+		switch argv[0] {
+		case "mkdir":
+			if mkdirIdx == -1 {
+				mkdirIdx = i
+				if len(argv) < 2 || argv[1] != "gdrive:sub" {
+					t.Errorf("mkdir argv = %v, want [mkdir gdrive:sub]", argv)
+				}
+			}
+		case "bisync":
+			if bisyncIdx == -1 {
+				bisyncIdx = i
+			}
 		}
 	}
 	if mkdirIdx == -1 {
-		t.Fatal("no operations/mkdir call recorded")
+		t.Fatal("no mkdir call recorded")
 	}
 	if bisyncIdx == -1 {
-		t.Fatal("no sync/bisync call recorded")
+		t.Fatal("no bisync call recorded")
 	}
 	if mkdirIdx >= bisyncIdx {
-		t.Fatalf("operations/mkdir (call %d) must happen before sync/bisync (call %d)", mkdirIdx, bisyncIdx)
+		t.Fatalf("mkdir (call %d) must happen before bisync (call %d)", mkdirIdx, bisyncIdx)
 	}
 }
 
@@ -145,10 +193,10 @@ func TestBisyncEnsuresRemoteDirOnResync(t *testing.T) {
 // on --resync runs: a normal (non-resync) bisync must not touch path2's root,
 // since it may legitimately not exist as a subfolder yet on later runs.
 func TestBisyncSkipsMkdirWhenNotResync(t *testing.T) {
-	var calls []recordedCall
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls = append(calls, recordedCall{method: method, input: input})
-		return `{}`, 200
+	var calls [][]string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		calls = append(calls, args)
+		return "", "", nil
 	})
 	_, err := e.Bisync(BisyncParams{
 		Path1: t.TempDir(), Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: false,
@@ -156,16 +204,18 @@ func TestBisyncSkipsMkdirWhenNotResync(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, c := range calls {
-		if c.method == "operations/mkdir" {
-			t.Fatalf("unexpected operations/mkdir call on non-resync run: %s", c.input)
+	for _, argv := range calls {
+		if len(argv) > 0 && argv[0] == "mkdir" {
+			t.Fatalf("unexpected mkdir call on non-resync run: %v", argv)
 		}
 	}
 }
 
-func TestBisyncNeedsResyncError(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"error":"cannot find prior Path1 or Path2 listings, likely due to critical error. must run --resync"}`, 500
+// TestBisyncNeedsResyncMappedFromStderr verifies a stderr message telling the
+// caller to (re-)run --resync (case-insensitive) is mapped to ErrNeedsResync.
+func TestBisyncNeedsResyncMappedFromStderr(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "cannot find prior Path1 or Path2 listings, likely due to critical error. Must run --resync", errors.New("exit status 7")
 	})
 	_, err := e.Bisync(BisyncParams{Path1: "a", Path2: "b", Workdir: t.TempDir()})
 	if !errors.Is(err, ErrNeedsResync) {
@@ -310,9 +360,11 @@ func TestWithSkipGdocs(t *testing.T) {
 	}
 }
 
-func TestCallGenericErrorNotResync(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"error":"permission denied"}`, 500
+// TestBisyncGenericErrorNotResync verifies a generic rclone failure surfaces
+// as a plain error from Bisync, not classified as ErrNeedsResync.
+func TestBisyncGenericErrorNotResync(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "permission denied", errors.New("exit status 1")
 	})
 	_, err := e.Bisync(BisyncParams{Path1: "a", Path2: "b", Workdir: t.TempDir()})
 	if err == nil {

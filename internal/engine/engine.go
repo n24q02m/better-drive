@@ -257,21 +257,30 @@ type BisyncParams struct {
 type BisyncResult struct{ Output string }
 
 // ensureRemoteDir creates a remote path (e.g. "gdrive:Backup") if it does not
-// exist yet. rclone bisync --resync aborts when path2's root is missing, so the
-// first run must create it. mkdir is idempotent, so an existing dir is a no-op.
+// exist yet via `rclone mkdir`. rclone bisync --resync aborts when path2's
+// root is missing, so the first run must create it. mkdir is idempotent, so
+// an existing dir is a no-op.
 func (e *Engine) ensureRemoteDir(path string) error {
-	fsName, remote, found := strings.Cut(path, ":")
+	_, remote, found := strings.Cut(path, ":")
 	if !found || remote == "" {
 		return nil // not a remote path, or the remote root (always exists)
 	}
-	_, err := e.call("operations/mkdir", map[string]any{"fs": fsName + ":", "remote": remote})
-	return err
+	_, stderr, err := e.exec("mkdir", path)
+	if err != nil {
+		return fmt.Errorf("rclone mkdir: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
+// Bisync runs a 2-way sync via `rclone bisync path1 path2 --workdir workdir
+// [--resync] ...`, keeping rclone's own baseline (*.lst listing files) under
+// Workdir - the same location syncloop.baselineExists checks to decide
+// whether a pair still needs its first --resync. On error, a stderr message
+// telling the caller to (re-)run --resync is mapped to the ErrNeedsResync
+// sentinel; any other error is wrapped with rclone's stderr for diagnostics.
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	filtersFile := filepath.Join(p.Workdir, "filters.txt")
 	if err := os.MkdirAll(p.Workdir, 0o755); err != nil {
 		return BisyncResult{}, err
 	}
@@ -285,27 +294,33 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 			return BisyncResult{}, err
 		}
 	}
-	if err := os.WriteFile(filtersFile, []byte(strings.Join(p.Filters, "\n")+"\n"), 0o600); err != nil {
+	filterArgv, cleanup, err := writeFilters("--filters-file", p.Filters)
+	if err != nil {
 		return BisyncResult{}, err
 	}
-	params := map[string]any{
-		"path1":              p.Path1,
-		"path2":              withSkipGdocs(p.Path2), // skip Google Docs on the Drive side (can't be downloaded)
-		"workdir":            p.Workdir,
-		"filtersFile":        filtersFile,
-		"resync":             p.Resync,
-		"resilient":          true,
-		"recover":            true,
-		"maxDelete":          50, // percent; rc omits the CLI's 50% default, and 0 aborts on ANY delete (breaks 2-way delete propagation)
-		"createEmptySrcDirs": true,
-		"conflictResolve":    "newer",
-		"conflictLoser":      "num",
-		"compare":            "size,modtime,checksum",
-		"_config":            perfConfig(),
+	defer cleanup()
+
+	argv := []string{"bisync", p.Path1, p.Path2, "--workdir", p.Workdir}
+	if p.Resync {
+		argv = append(argv, "--resync")
 	}
-	res, err := e.call("sync/bisync", params)
-	out, _ := json.Marshal(res)
-	return BisyncResult{Output: string(out)}, err
+	argv = append(argv, commonSyncFlags()...)
+	argv = append(argv,
+		"--resilient", "--recover",
+		"--max-delete", "50", // percent; 0 aborts on ANY delete (breaks 2-way delete propagation)
+		"--conflict-resolve", "newer", "--conflict-loser", "num",
+		"--compare", "size,modtime,checksum",
+	)
+	argv = append(argv, filterArgv...)
+
+	_, stderr, err := e.exec(argv...)
+	if err != nil {
+		if strings.Contains(strings.ToLower(stderr), "must run --resync") {
+			return BisyncResult{}, ErrNeedsResync
+		}
+		return BisyncResult{}, fmt.Errorf("rclone bisync: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return BisyncResult{}, nil
 }
 
 // CopyParams configures a 1-way sync/copy or sync/sync call. Unlike
