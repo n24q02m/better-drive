@@ -1,9 +1,8 @@
-//go:build windows
+//go:build windows || linux || darwin
 
 package tray
 
 import (
-	_ "embed"
 	"os/exec"
 	"runtime"
 
@@ -11,9 +10,6 @@ import (
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 )
-
-//go:embed icon.ico
-var iconData []byte
 
 // Run starts the systray icon and blocks until Quit is chosen. loops and
 // pairs must be the same length and index-aligned (loops[i] is the Loop
@@ -25,7 +21,7 @@ func Run(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) error {
 }
 
 func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
-	systray.SetIcon(iconData)
+	systray.SetIcon(trayIcon)
 	systray.SetTitle("better-drive")
 	systray.SetTooltip("better-drive")
 	mStatus := systray.AddMenuItem("Status: idle", "")
