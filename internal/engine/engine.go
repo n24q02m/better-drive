@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -135,14 +136,19 @@ func isRetryable(err error) bool {
 	return false
 }
 
+// RemoteExists reports whether name is a configured remote (any type), by
+// parsing `rclone listremotes` output (one "name:" per line).
 func (e *Engine) RemoteExists(name string) (bool, error) {
-	res, err := e.call("config/listremotes", map[string]any{})
+	stdout, stderr, err := e.exec("listremotes")
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	list, _ := res["remotes"].([]any)
-	for _, r := range list {
-		if s, _ := r.(string); s == name {
+	for _, line := range strings.Split(stdout, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		if strings.TrimSuffix(line, ":") == name {
 			return true, nil
 		}
 	}
@@ -151,45 +157,61 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 
 // RemoteConfigured reports whether name is a remote with a valid OAuth token,
 // as opposed to a broken, token-less stanza left behind by an interrupted
-// config/create (see CreateDriveRemote doc). Verified empirically: rc
-// config/get returns status=200 for a missing remote too (empty {} body,
-// no "error" field) - so a non-200/err response is treated the same as
-// "not configured" rather than being distinguished as a separate case.
+// config/create (see CreateDriveRemote doc). `rclone config show <name>` on a
+// remote whose config/create hasn't finished OAuth yet returns the stanza
+// without a "token" line at all; on a missing remote (or any other failure)
+// it errors - both are treated the same as "not configured" rather than
+// distinguished as a separate case.
 func (e *Engine) RemoteConfigured(name string) (bool, error) {
-	res, err := e.call("config/get", map[string]any{"name": name})
+	stdout, _, err := e.exec("config", "show", name)
 	if err != nil {
 		return false, nil
 	}
-	token, _ := res["token"].(string)
-	return token != "", nil
+	for _, line := range strings.Split(stdout, "\n") {
+		key, value, found := strings.Cut(line, "=")
+		if !found {
+			continue
+		}
+		if strings.TrimSpace(key) == "token" && strings.TrimSpace(value) != "" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
-// DeleteRemote removes a remote's config stanza (used to clear a broken,
-// token-less remote before recreating it).
+// DeleteRemote removes a remote's config stanza via `rclone config delete
+// <name>` (used to clear a broken, token-less remote before recreating it).
 func (e *Engine) DeleteRemote(name string) error {
-	_, err := e.call("config/delete", map[string]any{"name": name})
-	return err
+	_, stderr, err := e.exec("config", "delete", name)
+	if err != nil {
+		return fmt.Errorf("rclone config delete: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
-// CreateDriveRemote creates a Drive remote via rc config/create. skip_gdocs is
-// NOT set here: it is applied at runtime through a connection string on the
-// bisync path (see withSkipGdocs). config/create cannot persist a stored
-// skip_gdocs anyway - the drive backend's OAuth state-machine rebuilds the
-// stored config from its interactive answers and drops extra "parameters"
+// CreateDriveRemote creates a Drive remote via `rclone config create <name>
+// drive [key=value ...]` (params sorted by key for a deterministic argv).
+// skip_gdocs is NOT passed here: it is applied per-invocation through the
+// global --drive-skip-gdocs flag (see commonSyncFlags) instead of a stored
+// config value - the drive backend's OAuth state-machine rebuilds the stored
+// config from its interactive answers and drops extra backend options
 // (verified: after setup, `rclone config dump` showed only scope/team_drive/
-// token/type), and rc config/update pauses on the token-refresh question
-// without saving. The runtime connection string sidesteps both.
+// token/type), so a stored skip_gdocs would not survive OAuth anyway.
 func (e *Engine) CreateDriveRemote(name string, params map[string]string) error {
-	if params == nil {
-		params = map[string]string{}
+	argv := []string{"config", "create", name, "drive"}
+	keys := make([]string, 0, len(params))
+	for k := range params {
+		keys = append(keys, k)
 	}
-	p := map[string]any{
-		"name":       name,
-		"type":       "drive",
-		"parameters": params,
+	sort.Strings(keys)
+	for _, k := range keys {
+		argv = append(argv, k+"="+params[k])
 	}
-	_, err := e.call("config/create", p)
-	return err
+	_, stderr, err := e.exec(argv...)
+	if err != nil {
+		return fmt.Errorf("rclone config create: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	return nil
 }
 
 // withSkipGdocs adds the skip_gdocs backend option to a remote path via an
@@ -222,28 +244,22 @@ func perfConfig() map[string]any {
 }
 
 // ListRemote lists the top-level entries under remotePath (e.g.
-// "gdrive:better-drive-e2e") via rc operations/list and returns their names.
-// remotePath is passed as-is for the "fs" param (rclone builds the fs.Fs from
-// the "remote:path" string directly), with "remote" left empty so the
-// listing is rooted at remotePath itself.
+// "gdrive:better-drive-e2e") via `rclone lsf` and returns their names.
+// `lsf`'s default format marks directories with a trailing "/", which is
+// stripped so a directory entry's name matches a file entry's shape.
 func (e *Engine) ListRemote(remotePath string) ([]string, error) {
-	res, err := e.call("operations/list", map[string]any{
-		"fs":     remotePath,
-		"remote": "",
-	})
+	stdout, stderr, err := e.exec("lsf", remotePath)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("rclone lsf: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	items, _ := res["list"].([]any)
-	names := make([]string, 0, len(items))
-	for _, it := range items {
-		m, ok := it.(map[string]any)
-		if !ok {
+	lines := strings.Split(stdout, "\n")
+	names := make([]string, 0, len(lines))
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
 			continue
 		}
-		if name, _ := m["Name"].(string); name != "" {
-			names = append(names, name)
-		}
+		names = append(names, strings.TrimSuffix(line, "/"))
 	}
 	return names, nil
 }

@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -223,34 +222,45 @@ func TestBisyncNeedsResyncMappedFromStderr(t *testing.T) {
 	}
 }
 
+// TestRemoteExists verifies RemoteExists parses `rclone listremotes` output
+// (one "name:" per line) and matches by name with the trailing colon stripped.
 func TestRemoteExists(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"remotes":["gdrive","other"]}`, 200
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "gdrive:\nother:\n", "", nil
 	})
 	ok, err := e.RemoteExists("gdrive")
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v", ok, err)
 	}
+	ok, err = e.RemoteExists("missing")
+	if err != nil || ok {
+		t.Fatalf("ok=%v err=%v, want false, nil", ok, err)
+	}
 }
 
+// TestRemoteConfiguredWithToken verifies RemoteConfigured parses `rclone
+// config show <name>` output and reports true when a non-empty "token" line
+// is present.
 func TestRemoteConfiguredWithToken(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		if method != "config/get" {
-			t.Fatalf("method = %q, want config/get", method)
-		}
-		return `{"type":"drive","skip_gdocs":"true","token":"{\"access_token\":\"x\"}"}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "[gdrive]\ntype = drive\nskip_gdocs = true\ntoken = {\"access_token\":\"x\"}\n", "", nil
 	})
 	ok, err := e.RemoteConfigured("gdrive")
 	if err != nil || !ok {
 		t.Fatalf("ok=%v err=%v, want true, nil", ok, err)
 	}
+	if len(gotArgv) < 3 || gotArgv[0] != "config" || gotArgv[1] != "show" || gotArgv[2] != "gdrive" {
+		t.Fatalf("argv = %v, want [config show gdrive]", gotArgv)
+	}
 }
 
+// TestRemoteConfiguredTokenless verifies a remote whose config/create hasn't
+// finished OAuth yet (no "token" line at all) is reported as not configured.
 func TestRemoteConfiguredTokenless(t *testing.T) {
-	// Rclone rc config/get on a remote whose config/create hasn't finished OAuth
-	// yet returns the stanza without a "token" key at all (verified empirically).
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"type":"drive","skip_gdocs":"true"}`, 200
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "[gdrive]\ntype = drive\nskip_gdocs = true\n", "", nil
 	})
 	ok, err := e.RemoteConfigured("gdrive")
 	if err != nil || ok {
@@ -258,9 +268,11 @@ func TestRemoteConfiguredTokenless(t *testing.T) {
 	}
 }
 
+// TestRemoteConfiguredErrorTreatedAsMissing verifies a `rclone config show`
+// failure (e.g. no such remote) is treated the same as "not configured".
 func TestRemoteConfiguredErrorTreatedAsMissing(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"error":"didn't find section in config file"}`, 500
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "didn't find section in config file", errors.New("exit status 1")
 	})
 	ok, err := e.RemoteConfigured("gdrive")
 	if err != nil || ok {
@@ -268,31 +280,20 @@ func TestRemoteConfiguredErrorTreatedAsMissing(t *testing.T) {
 	}
 }
 
+// TestListRemote verifies ListRemote calls `rclone lsf <remotePath>` and
+// strips each entry's trailing "/" (rclone lsf's default directory marker).
 func TestListRemote(t *testing.T) {
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{"list":[
-			{"Path":"keep.txt","Name":"keep.txt","Size":2,"IsDir":false},
-			{"Path":"sub","Name":"sub","Size":0,"IsDir":true}
-		]}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "keep.txt\nsub/\n", "", nil
 	})
 	names, err := e.ListRemote("gdrive:better-drive-e2e")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "operations/list" {
-		t.Fatalf("method = %q, want operations/list", gotMethod)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	if m["fs"] != "gdrive:better-drive-e2e" {
-		t.Errorf("fs = %v, want gdrive:better-drive-e2e", m["fs"])
-	}
-	if m["remote"] != "" {
-		t.Errorf("remote = %v, want empty string", m["remote"])
+	if len(gotArgv) < 2 || gotArgv[0] != "lsf" || gotArgv[1] != "gdrive:better-drive-e2e" {
+		t.Fatalf("argv = %v, want [lsf gdrive:better-drive-e2e]", gotArgv)
 	}
 	want := []string{"keep.txt", "sub"}
 	if !reflect.DeepEqual(names, want) {
@@ -301,8 +302,8 @@ func TestListRemote(t *testing.T) {
 }
 
 func TestListRemoteEmpty(t *testing.T) {
-	e := newTestEngine(func(method, input string) (string, int) {
-		return `{"list":[]}`, 200
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "", nil
 	})
 	names, err := e.ListRemote("gdrive:better-drive-e2e")
 	if err != nil {
@@ -313,39 +314,48 @@ func TestListRemoteEmpty(t *testing.T) {
 	}
 }
 
-// TestCreateDriveRemote verifies CreateDriveRemote issues a single config/create
-// for a plain "drive" remote. skip_gdocs is NOT stored here - it is applied at
-// runtime via withSkipGdocs on the bisync path (see CreateDriveRemote's doc).
+// TestCreateDriveRemote verifies CreateDriveRemote issues a single `rclone
+// config create <name> drive` call. skip_gdocs is NOT passed here - it is
+// applied per-invocation via the global --drive-skip-gdocs flag (see
+// CreateDriveRemote's doc).
 func TestCreateDriveRemote(t *testing.T) {
-	var calls []recordedCall
-	e := newTestEngine(func(method, input string) (string, int) {
-		calls = append(calls, recordedCall{method: method, input: input})
-		return `{}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
 	if err := e.CreateDriveRemote("gdrive", nil); err != nil {
 		t.Fatal(err)
 	}
-	if len(calls) != 1 {
-		t.Fatalf("calls = %#v, want 1 (config/create only)", calls)
+	want := []string{"config", "create", "gdrive", "drive"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, want)
 	}
-	if calls[0].method != "config/create" {
-		t.Fatalf("method = %q, want config/create", calls[0].method)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(calls[0].input), &m); err != nil {
+}
+
+// TestCreateDriveRemoteWithParams verifies extra backend params are appended
+// as sorted "key=value" args (sorted for a deterministic, reviewable argv).
+func TestCreateDriveRemoteWithParams(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.CreateDriveRemote("gdrive", map[string]string{"scope": "drive", "team_drive": "abc"}); err != nil {
 		t.Fatal(err)
 	}
-	if m["type"] != "drive" {
-		t.Errorf("type = %v, want %q", m["type"], "drive")
-	}
-	if m["name"] != "gdrive" {
-		t.Errorf("name = %v, want %q", m["name"], "gdrive")
+	want := []string{"config", "create", "gdrive", "drive", "scope=drive", "team_drive=abc"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, want)
 	}
 }
 
 // TestWithSkipGdocs verifies the runtime connection-string transform: a Drive
 // remote path gains ",skip_gdocs=true" before the ":"; a local/plain path with
-// no remote is returned unchanged.
+// no remote is returned unchanged. withSkipGdocs itself is now dead code (no
+// remaining caller after the Copy/Sync/Bisync/CreateDriveRemote migrations
+// above use the global --drive-skip-gdocs flag instead) - kept alongside the
+// function until the final purge commit removes both together.
 func TestWithSkipGdocs(t *testing.T) {
 	cases := map[string]string{
 		"gdrive:Backup":     "gdrive,skip_gdocs=true:Backup",
@@ -509,24 +519,19 @@ func TestCopyPrependsConfigFlagWhenSet(t *testing.T) {
 	}
 }
 
+// TestDeleteRemote verifies DeleteRemote issues `rclone config delete <name>`.
 func TestDeleteRemote(t *testing.T) {
-	var gotMethod, gotInput string
-	e := newTestEngine(func(method, input string) (string, int) {
-		gotMethod, gotInput = method, input
-		return `{}`, 200
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
 	})
 	if err := e.DeleteRemote("bdfixtest"); err != nil {
 		t.Fatal(err)
 	}
-	if gotMethod != "config/delete" {
-		t.Fatalf("method = %q, want config/delete", gotMethod)
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(gotInput), &m); err != nil {
-		t.Fatal(err)
-	}
-	if m["name"] != "bdfixtest" {
-		t.Errorf("name = %v, want bdfixtest", m["name"])
+	want := []string{"config", "delete", "bdfixtest"}
+	if !reflect.DeepEqual(gotArgv, want) {
+		t.Fatalf("argv = %#v, want %#v", gotArgv, want)
 	}
 }
 
