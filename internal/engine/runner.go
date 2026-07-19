@@ -16,6 +16,7 @@ type runner func(args ...string) (stdout string, stderr string, err error)
 func execRunner(bin string) runner {
 	return func(args ...string) (string, string, error) {
 		cmd := exec.Command(bin, args...)
+		hideConsole(cmd) // Windows: no console window flash per rclone invocation
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
