@@ -17,6 +17,29 @@ func newTestEngine(fn func(method, input string) (string, int)) *Engine {
 	return &Engine{rpc: fn}
 }
 
+// newFakeRunnerEngine builds an Engine whose runner is fn, bypassing
+// exec.Command entirely - used by tests that assert the constructed rclone
+// argv without a real rclone binary.
+func newFakeRunnerEngine(cfg string, fn runner) *Engine {
+	return &Engine{cfg: cfg, run: fn}
+}
+
+// TestNewResolvesRunner verifies New wires up a working runner seam (the
+// rclone shell-out replacement for librclone.Initialize/RPC) without
+// requiring a real rclone binary on PATH for the construction itself.
+func TestNewResolvesRunner(t *testing.T) {
+	e := New("")
+	if e == nil {
+		t.Fatal("New(\"\") returned nil")
+	}
+	if e.run == nil {
+		t.Fatal("New(\"\").run is nil, want a resolved runner")
+	}
+	if e.bin == "" {
+		t.Fatal("New(\"\").bin is empty, want a resolved rclone binary name/path")
+	}
+}
+
 // recordedCall captures one fake-rpc invocation (method + raw JSON input),
 // used by tests that need to assert call order/count instead of just the
 // last call.

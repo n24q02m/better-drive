@@ -5,16 +5,15 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
-	_ "github.com/rclone/rclone/backend/drive"    // register the Drive backend (path2)
-	_ "github.com/rclone/rclone/backend/local"     // register the local filesystem backend (path1)
-	_ "github.com/rclone/rclone/cmd/bisync"        // register the sync/bisync rc method (its init calls addRC)
-	"github.com/rclone/rclone/fs/config"
-	"github.com/rclone/rclone/librclone/librclone"
+	_ "github.com/rclone/rclone/backend/drive" // register the Drive backend (path2)
+	_ "github.com/rclone/rclone/backend/local"  // register the local filesystem backend (path1)
+	_ "github.com/rclone/rclone/cmd/bisync"     // register the sync/bisync rc method (its init calls addRC)
 )
 
 var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
@@ -25,44 +24,58 @@ var retryBackoffUnit = 10 * time.Second
 
 type Engine struct {
 	rpc func(method, input string) (string, int)
-	// syncMu serializes the sync operations (Bisync/Copy/Sync). rclone applies
-	// the rc _filter (and other run options) to PROCESS-GLOBAL state for the
-	// duration of a sync, so two concurrent syncs with different filters race:
-	// verified E2E that concurrent Copy calls silently cross their filters and
-	// one dest ends up empty with err=nil. The multi-pair daemon therefore runs
-	// its pairs' syncs one at a time through this lock.
+	// bin is the resolved rclone binary path (from exec.LookPath, or the bare
+	// "rclone" name when not found on PATH - the error surfaces on first use
+	// instead of at New()). cfg is the rclone config file path to pass via
+	// --config; empty means let rclone fall back to its own default discovery
+	// (including honoring the RCLONE_CONFIG env var itself). run is the seam
+	// tests inject a fake into; New wires it to the real execRunner(bin).
+	bin string
+	cfg string
+	run runner
+	// syncMu serializes the sync operations (Bisync/Copy/Sync). The previous
+	// librclone rc engine applied its _filter (and other run options) to
+	// PROCESS-GLOBAL state for the duration of a sync, so two concurrent syncs
+	// with different filters raced: verified E2E that concurrent Copy calls
+	// silently crossed their filters and one dest ended up empty with err=nil.
+	// Each rclone subprocess is now independent, but the lock is kept as cheap
+	// insurance and to guard the temp filter-file's lifetime (a second sync
+	// must not remove the first one's still-in-use file).
 	syncMu sync.Mutex
 }
 
-// New initializes the librclone engine. rcloneConfigPath, when non-empty,
-// points librclone at a specific rclone.conf (e.g. a scoop portable install);
-// an empty value falls back to the RCLONE_CONFIG env var for back-compat.
+// New builds an Engine that shells out to the system rclone binary.
+// rcloneConfigPath, when non-empty, is passed to every rclone invocation via
+// --config (e.g. a scoop portable install's rclone.conf); an empty value is
+// passed through as-is (no --config flag), letting rclone fall back to its
+// own default config discovery, including the RCLONE_CONFIG env var, which
+// the rclone CLI honors natively.
 func New(rcloneConfigPath string) *Engine {
-	// Back up live directories: log files (e.g. ~/.claude/**/instinct.log) are
-	// appended to during the copy, which otherwise aborts a file with "can't
-	// copy - source file is being updated (size changed ...)" and fails the
-	// whole pair. no_check_updated tells the local backend to transfer such a
-	// file at the size it first saw, no abort. Set before Initialize so every
-	// local fs the engine creates inherits it.
-	os.Setenv("RCLONE_LOCAL_NO_CHECK_UPDATED", "true")
-	// librclone.Initialize() loads the config via configfile.Install() from
-	// rclone's default path (%APPDATA%\rclone\rclone.conf on Windows). It does
-	// NOT run flag parsing, so neither an explicit path nor the RCLONE_CONFIG
-	// env var (which rclone normally binds to --config) is honored on its own.
-	// Apply the resolved path (or the env fallback) ourselves before
-	// Initialize so a machine whose gdrive remote lives in a non-default
-	// config (e.g. a scoop portable rclone.conf) can point better-drive at it.
-	if rcloneConfigPath == "" {
-		rcloneConfigPath = os.Getenv("RCLONE_CONFIG") // back-compat fallback
+	bin, err := exec.LookPath("rclone")
+	if err != nil {
+		bin = "rclone" // not found on PATH; the error surfaces on first use
 	}
-	if rcloneConfigPath != "" {
-		_ = config.SetConfigPath(rcloneConfigPath)
-	}
-	librclone.Initialize()
-	return &Engine{rpc: librclone.RPC}
+	return &Engine{bin: bin, cfg: rcloneConfigPath, run: execRunner(bin)}
 }
 
-func (e *Engine) Close() { librclone.Finalize() }
+// Close is a no-op: each rclone invocation is an independent subprocess with
+// nothing to finalize (unlike the previous in-process librclone engine).
+func (e *Engine) Close() {}
+
+// args prepends --config <cfg> to base when the engine has a non-empty
+// config path, so every rclone invocation goes through it.
+func (e *Engine) args(base ...string) []string {
+	if e.cfg == "" {
+		return base
+	}
+	return append([]string{"--config", e.cfg}, base...)
+}
+
+// exec runs an rclone subcommand (argv, without --config) through the
+// runner seam, applying args' --config prefixing.
+func (e *Engine) exec(argv ...string) (stdout, stderr string, err error) {
+	return e.run(e.args(argv...)...)
+}
 
 func (e *Engine) call(method string, params map[string]any) (map[string]any, error) {
 	in, _ := json.Marshal(params)
