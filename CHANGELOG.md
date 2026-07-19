@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.4.0 (2026-07-19)
+
+### Bug Fixes
+
+- Keep macOS build headless (defer cgo tray), correct README to Windows/Linux tray
+  ([`eb6a974`](https://github.com/n24q02m/better-drive/commit/eb6a97482d4a106d7d7c7e0015cc565374bfb628))
+
+- Refresh README for shell-out rclone engine + cross-platform install
+  ([`c545c44`](https://github.com/n24q02m/better-drive/commit/c545c44ed297d0e81767dac3585116de18e01485))
+
+- Run rclone with CREATE_NO_WINDOW so the GUI daemon stops flashing console windows
+  ([`9dbaadb`](https://github.com/n24q02m/better-drive/commit/9dbaadb855d2d568ab31874a5e0e1ed39f7bf666))
+
+### Features
+
+- Document macOS system-tray support in README
+  ([`c552af2`](https://github.com/n24q02m/better-drive/commit/c552af230d1e61309e8af5758074886482ea4eb1))
+
+- Enable systray daemon on linux and macOS
+  ([`188c3eb`](https://github.com/n24q02m/better-drive/commit/188c3eb3f7f03d5c3ad4737425aeba4fe1848682))
+
+
 ## v1.3.0 (2026-07-19)
 
 ### Features
