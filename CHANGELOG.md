@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.2.0 (2026-07-19)
+
+### Features
+
+- Log each sync cycle's outcome to a persistent log file
+  ([`22609c9`](https://github.com/n24q02m/better-drive/commit/22609c9632a865abce316afded7356e1ad3a60a1))
+
+
 ## v1.1.0 (2026-07-18)
 
 ### Bug Fixes
