@@ -28,7 +28,7 @@ go install github.com/n24q02m/better-drive@latest
 ```bash
 better-drive setup      # create the rclone Google Drive remote (opens browser OAuth) — or reuse an existing rclone remote
 better-drive install    # register the daemon to start at login (HKCU Run key / LaunchAgent / systemd-user)
-better-drive run        # start the sync daemon (system-tray on Windows/Linux/macOS, headless elsewhere)
+better-drive run        # start the sync daemon (system-tray on Windows/Linux, headless on macOS/other)
 better-drive status     # show configured pairs and their state
 better-drive sync       # one-shot sync of every pair (for scripts/cron), then exit
 better-drive uninstall  # remove the login autostart
@@ -100,7 +100,7 @@ Rules are evaluated top-to-bottom, gitignore-style (config `exclude` entries fir
 
 better-drive builds an `rclone` command line from each pair's config and runs the system `rclone` binary (`rclone bisync`/`copy`/`sync`), translating `.driveignore`/`exclude` rules into an rclone filter file and applying safe defaults (`--fast-list`, tuned `--transfers`/`--checkers`/`--tpslimit`, `--retries`, `--local-no-check-updated` for live directories, `--drive-skip-gdocs`). Because rclone does the transfers, better-drive stays tiny and inherits rclone's config, auth, and reliability.
 
-`better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows, Linux, and macOS it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on other platforms it runs headless (use the log + `better-drive status`).
+`better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows and Linux it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on macOS and other platforms it runs headless (use the log + `better-drive status`).
 
 ## Requirements
 
