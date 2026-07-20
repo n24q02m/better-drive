@@ -23,7 +23,7 @@ func Run(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) error {
 func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	systray.SetIcon(trayIcon)
 	systray.SetTitle("better-drive")
-	systray.SetTooltip("better-drive")
+	systray.SetTooltip("better-drive: idle")
 	mStatus := systray.AddMenuItem("Status: idle", "")
 	mStatus.Disable()
 	mSync := systray.AddMenuItem("Sync now", "Trigger a sync immediately for all pairs")
@@ -33,6 +33,7 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 
 	agg.OnChange(func(st syncloop.State) {
 		mStatus.SetTitle("Status: " + st.String())
+		systray.SetTooltip("better-drive: " + st.String())
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
 		} else {

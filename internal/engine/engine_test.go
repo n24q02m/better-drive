@@ -633,4 +633,3 @@ func TestSyncOpsSerialize(t *testing.T) {
 		t.Fatalf("concurrent sync ops overlapped: maxActive=%d, want 1 (engine mutex must serialize)", maxActive)
 	}
 }
-

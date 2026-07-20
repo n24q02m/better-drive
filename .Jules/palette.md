@@ -1,0 +1,3 @@
+## 2024-03-24 - Zero-Click Observability for Background Daemons
+**Learning:** Background daemons (like `better-drive`) often have UI hidden behind a tray icon click. Users need to verify status frequently without breaking their workflow. Adding the current application state to the tray icon's tooltip provides a "zero-click" observability path (just hovering over the icon) which significantly improves micro-UX and accessibility (easier to read status via screen reader tooltip announcements).
+**Action:** Always map the core status (e.g. `idle`, `syncing`, `paused`) of any long-running application to the tray tooltip or primary title property so it can be viewed at a glance without interaction.
