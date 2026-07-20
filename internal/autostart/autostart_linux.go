@@ -39,11 +39,12 @@ func Enable(exePath string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	// Fix: Restrict systemd user directory permissions to 0700 and unit file to 0600
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	unit := fmt.Sprintf(unitTemplate, exePath)
-	if err := os.WriteFile(path, []byte(unit), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(unit), 0o600); err != nil {
 		return err
 	}
 	if err := exec.Command("systemctl", "--user", "daemon-reload").Run(); err != nil {

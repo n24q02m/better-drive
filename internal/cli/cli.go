@@ -131,7 +131,8 @@ func runCmd() *cobra.Command {
 			// also appended to a log file. Best-effort - a failure to open it
 			// must not block the daemon, just run with no logger.
 			var logger *log.Logger
-			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			// Fix: Restrict log file permissions to 0600 (owner read/write only) to protect sensitive paths/errors
+			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			if logErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open log file %q: %v (continuing without sync logging)\n", paths.LogFile(), logErr)
 			} else {
@@ -174,7 +175,7 @@ func runCmd() *cobra.Command {
 			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
 			e.Close() // safe to Finalize the engine now that no goroutine can touch it
 			if logFile != nil {
-				logFile.Close()
+				_ = logFile.Close() // Fix: Handle potential error from Close
 			}
 			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
 			// right before Quit races with cancel()/wg.Wait() above (SyncNow spawns its own

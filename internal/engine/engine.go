@@ -199,13 +199,14 @@ func (e *Engine) ensureRemoteDir(path string) error {
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	if err := os.MkdirAll(p.Workdir, 0o755); err != nil {
+	// Fix: Restrict working directory and local path permissions to 0700 (owner only)
+	if err := os.MkdirAll(p.Workdir, 0o700); err != nil {
 		return BisyncResult{}, err
 	}
 	// First run (resync): ensure both sides exist. path1 is always a local folder
 	// for better-drive; path2 is the Drive remote.
 	if p.Resync {
-		if err := os.MkdirAll(p.Path1, 0o755); err != nil {
+		if err := os.MkdirAll(p.Path1, 0o700); err != nil {
 			return BisyncResult{}, err
 		}
 		if err := e.ensureRemoteDir(p.Path2); err != nil {
@@ -297,9 +298,9 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 		return nil, func() {}, err
 	}
 	path := f.Name()
-	cleanup = func() { os.Remove(path) }
+	cleanup = func() { _ = os.Remove(path) }
 	if _, err := f.WriteString(strings.Join(filters, "\n") + "\n"); err != nil {
-		f.Close()
+		_ = f.Close()
 		cleanup()
 		return nil, func() {}, err
 	}
