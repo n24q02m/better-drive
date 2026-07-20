@@ -1,6 +1,63 @@
 {
   "$schema": "https://docs.renovatebot.com/renovate-schema.json",
-  "extends": [
-    "config:recommended"
-  ]
+  "extends": ["config:recommended", ":semanticCommits"],
+  "schedule": ["before 5am"],
+  "timezone": "Asia/Ho_Chi_Minh",
+  "prConcurrentLimit": 2,
+  "prHourlyLimit": 1,
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+  "minimumReleaseAge": "7 days",
+  "lockFileMaintenance": {
+    "enabled": true,
+    "schedule": ["before 5am"]
+  },
+  "packageRules": [
+    {
+      "description": "Pin GitHub Actions to SHA for security",
+      "matchManagers": ["github-actions"],
+      "pinDigests": true
+    },
+    {
+      "description": "Auto-merge GitHub Actions digest updates after cooldown",
+      "matchManagers": ["github-actions"],
+      "matchUpdateTypes": ["digest", "pinDigest"],
+      "groupName": "github-actions digests",
+      "groupSlug": "gha-digests",
+      "automerge": true,
+      "automergeType": "pr",
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Group all non-major updates",
+      "matchUpdateTypes": ["minor", "patch"],
+      "groupName": "non-major dependencies",
+      "groupSlug": "non-major"
+    },
+    {
+      "description": "Auto-merge non-major devDependencies",
+      "matchDepTypes": ["devDependencies", "dependency-groups", "tool.uv.dev-dependencies"],
+      "matchUpdateTypes": ["minor", "patch"],
+      "automerge": true,
+      "automergeType": "pr",
+      "minimumReleaseAge": "7 days"
+    },
+    {
+      "description": "Pin Python runtime to 3.13.x",
+      "matchPackageNames": ["python"],
+      "allowedVersions": ">=3.13.0 <3.14.0"
+    },
+    {
+      "description": "Disable runtime version updates from mise",
+      "matchManagers": ["mise"],
+      "matchDepNames": ["python", "node", "go"],
+      "enabled": false
+    }
+  ],
+  "semanticCommits": "enabled",
+  "commitMessagePrefix": "fix(deps):",
+  "commitMessageAction": "update",
+  "commitMessageTopic": "{{depName}}",
+  "semanticCommitType": "fix",
+  "semanticCommitScope": "deps"
 }
