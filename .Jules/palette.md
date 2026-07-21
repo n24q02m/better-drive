@@ -1,0 +1,3 @@
+## 2024-07-21 - Dynamic System Tray Feedback
+**Learning:** System tray apps often hide their state behind a click. Users need passive visibility (like hovering) to check status without interrupting their workflow. Furthermore, action buttons (like sync or pause) should reflect their state dynamically (e.g., updating tooltips on toggle, or disabling during async operations) to prevent confusion.
+**Action:** Bind `systray.SetTooltip` to the application's state aggregator so hovering shows the current status. Update menu item tooltips on toggle, and disable action buttons during ongoing operations to provide immediate visual feedback.

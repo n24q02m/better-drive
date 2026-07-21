@@ -23,16 +23,25 @@ func Run(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) error {
 func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	systray.SetIcon(trayIcon)
 	systray.SetTitle("better-drive")
-	systray.SetTooltip("better-drive")
+	systray.SetTooltip("better-drive (" + agg.State().String() + ")")
 	mStatus := systray.AddMenuItem("Status: idle", "")
 	mStatus.Disable()
 	mSync := systray.AddMenuItem("Sync now", "Trigger a sync immediately for all pairs")
+	if agg.State() == syncloop.StateSyncing {
+		mSync.Disable()
+	}
 	mPause := systray.AddMenuItem("Pause", "Pause scheduled syncs for all pairs")
 	mOpen := systray.AddMenuItem("Open folder", "Open the local sync folder(s)")
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
 	agg.OnChange(func(st syncloop.State) {
+		systray.SetTooltip("better-drive (" + st.String() + ")")
 		mStatus.SetTitle("Status: " + st.String())
+		if st == syncloop.StateSyncing {
+			mSync.Disable()
+		} else {
+			mSync.Enable()
+		}
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
 		} else {
