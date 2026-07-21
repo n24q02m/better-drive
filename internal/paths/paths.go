@@ -23,7 +23,7 @@ func ConfigFile() string {
 	}
 	return filepath.Join(base(), "config.toml")
 }
-func Workdir() string    { return filepath.Join(base(), "bisync") }
+func Workdir() string { return filepath.Join(base(), "bisync") }
 
 // LogFile returns the path of the daemon's persistent sync log
 // (base()/better-drive.log), where `better-drive run` appends one line per
