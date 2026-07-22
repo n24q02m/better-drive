@@ -74,7 +74,11 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	for _, line := range strings.Split(stdout, "\n") {
+	// ⚡ Bolt: Iterate strings.Cut instead of strings.Split to avoid GC overhead
+	// and slice allocation from large process outputs.
+	for len(stdout) > 0 {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -98,7 +102,11 @@ func (e *Engine) RemoteConfigured(name string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	for _, line := range strings.Split(stdout, "\n") {
+	// ⚡ Bolt: Iterate strings.Cut instead of strings.Split to avoid GC overhead
+	// and slice allocation from large process outputs.
+	for len(stdout) > 0 {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		key, value, found := strings.Cut(line, "=")
 		if !found {
 			continue
@@ -154,9 +162,12 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rclone lsf: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	lines := strings.Split(stdout, "\n")
-	names := make([]string, 0, len(lines))
-	for _, line := range lines {
+	// ⚡ Bolt: Iterate strings.Cut and pre-allocate capacity via strings.Count
+	// to avoid GC overhead and slice allocation from strings.Split.
+	names := make([]string, 0, strings.Count(stdout, "\n"))
+	for len(stdout) > 0 {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
