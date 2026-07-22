@@ -131,7 +131,7 @@ func runCmd() *cobra.Command {
 			// also appended to a log file. Best-effort - a failure to open it
 			// must not block the daemon, just run with no logger.
 			var logger *log.Logger
-			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
 			if logErr != nil {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open log file %q: %v (continuing without sync logging)\n", paths.LogFile(), logErr)
 			} else {
