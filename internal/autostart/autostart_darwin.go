@@ -56,11 +56,11 @@ func Enable(exePath string) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
 	plist := fmt.Sprintf(plistTemplate, escapeXML(exePath))
-	if err := os.WriteFile(path, []byte(plist), 0o644); err != nil {
+	if err := os.WriteFile(path, []byte(plist), 0o600); err != nil {
 		return err
 	}
 	return exec.Command("launchctl", "load", "-w", path).Run()
