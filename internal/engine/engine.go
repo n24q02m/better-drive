@@ -74,13 +74,19 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	for _, line := range strings.Split(stdout, "\n") {
+	// ⚡ Bolt: avoid strings.Split intermediate slice allocation
+	for {
+		var line string
+		var found bool
+		line, stdout, found = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		if line != "" {
+			if strings.TrimSuffix(line, ":") == name {
+				return true, nil
+			}
 		}
-		if strings.TrimSuffix(line, ":") == name {
-			return true, nil
+		if !found {
+			break
 		}
 	}
 	return false, nil
@@ -98,13 +104,24 @@ func (e *Engine) RemoteConfigured(name string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	for _, line := range strings.Split(stdout, "\n") {
-		key, value, found := strings.Cut(line, "=")
-		if !found {
+	// ⚡ Bolt: avoid strings.Split intermediate slice allocation
+	for {
+		var line string
+		var found bool
+		line, stdout, found = strings.Cut(stdout, "\n")
+
+		key, value, foundEq := strings.Cut(line, "=")
+		if !foundEq {
+			if !found {
+				break
+			}
 			continue
 		}
 		if strings.TrimSpace(key) == "token" && strings.TrimSpace(value) != "" {
 			return true, nil
+		}
+		if !found {
+			break
 		}
 	}
 	return false, nil
@@ -154,14 +171,19 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rclone lsf: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	lines := strings.Split(stdout, "\n")
-	names := make([]string, 0, len(lines))
-	for _, line := range lines {
+	// ⚡ Bolt: avoid strings.Split intermediate slice allocation and pre-allocate exactly
+	names := make([]string, 0, strings.Count(stdout, "\n")+1)
+	for {
+		var line string
+		var found bool
+		line, stdout, found = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
-		if line == "" {
-			continue
+		if line != "" {
+			names = append(names, strings.TrimSuffix(line, "/"))
 		}
-		names = append(names, strings.TrimSuffix(line, "/"))
+		if !found {
+			break
+		}
 	}
 	return names, nil
 }
