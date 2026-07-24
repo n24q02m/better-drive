@@ -2,6 +2,28 @@
 
 <!-- version list -->
 
+## v1.5.0-beta.1 (2026-07-24)
+
+### Bug Fixes
+
+- Configure Renovate with SHA pinning and rate limits
+  ([#1](https://github.com/n24q02m/better-drive/pull/1),
+  [`63e5202`](https://github.com/n24q02m/better-drive/commit/63e52021f49af796df7e0daca2ef7d9a6691a66b))
+
+- Pin GitHub Action references to commit SHAs ([#8](https://github.com/n24q02m/better-drive/pull/8),
+  [`cd0a822`](https://github.com/n24q02m/better-drive/commit/cd0a8227748a34aa2b99eefc73d2c8b79b98d88d))
+
+### Chores
+
+- Configure Renovate ([#1](https://github.com/n24q02m/better-drive/pull/1),
+  [`63e5202`](https://github.com/n24q02m/better-drive/commit/63e52021f49af796df7e0daca2ef7d9a6691a66b))
+
+### Features
+
+- Show dynamic sync status in system tray tooltip and disable invalid actions
+  ([`a70278e`](https://github.com/n24q02m/better-drive/commit/a70278e3512a36cf0a87dd7f07b78899a33bcbe8))
+
+
 ## v1.4.0 (2026-07-19)
 
 ### Bug Fixes
