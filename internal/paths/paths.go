@@ -23,7 +23,7 @@ func ConfigFile() string {
 	}
 	return filepath.Join(base(), "config.toml")
 }
-func Workdir() string    { return filepath.Join(base(), "bisync") }
+func Workdir() string { return filepath.Join(base(), "bisync") }
 
 // PairWorkdir returns a workdir unique to the pair at the given index in the
 // config's [[pair]] list. Each pair needs its own workdir: bisync mode keeps

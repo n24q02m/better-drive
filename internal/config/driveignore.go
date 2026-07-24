@@ -39,18 +39,52 @@ func readDriveIgnoreLines(localRoot string) ([]string, error) {
 // reversed as a whole after translation so later negations (which must win
 // under gitignore semantics) are checked before the rules they negate.
 func TranslateIgnoreLines(lines []string) []string {
-	var out []string
+	if len(lines) == 0 {
+		return nil
+	}
+	// Pre-allocate the slice to avoid dynamic growth and reallocation overhead in tight loop
+	out := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
+		// Use direct byte indexing instead of strings.HasPrefix to save function call overhead
+		if line == "" || line[0] == '#' {
 			continue
 		}
+
 		sign := "- "
-		if strings.HasPrefix(line, "!") {
+		if line[0] == '!' {
 			sign = "+ "
 			line = line[1:]
 		}
-		out = append(out, sign+toRclonePattern(line))
+
+		if len(line) == 0 {
+			continue
+		}
+
+		// Use direct indexing/slicing instead of strings.HasSuffix/strings.TrimSuffix
+		dir := line[len(line)-1] == '/'
+
+		body := line
+		if dir {
+			body = body[:len(body)-1]
+		}
+
+		anchored := strings.ContainsRune(body, '/')
+		if len(body) > 0 && body[0] == '/' {
+			body = body[1:]
+		}
+
+		// gitignore: a "/" at the start or middle anchors the pattern to root; a
+		// slash-less pattern (or one with only a trailing "/") matches at any depth.
+		// rclone uses the same leading-"/" = "^" convention and auto-prefixes "(^|/)"
+		// for un-anchored patterns, so DO NOT add "**/".
+		if dir {
+			body += "/**"
+		}
+		if anchored {
+			body = "/" + body
+		}
+		out = append(out, sign+body)
 	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
@@ -85,22 +119,4 @@ func PairFilters(localRoot string, exclude []string) ([]string, error) {
 	lines = append(lines, exclude...)
 	lines = append(lines, fileLines...)
 	return TranslateIgnoreLines(lines), nil
-}
-
-func toRclonePattern(pat string) string {
-	dir := strings.HasSuffix(pat, "/")
-	trimmed := strings.TrimSuffix(pat, "/")
-	// gitignore: a "/" at the start or middle anchors the pattern to root; a
-	// slash-less pattern (or one with only a trailing "/") matches at any depth.
-	// rclone uses the same leading-"/" = "^" convention and auto-prefixes "(^|/)"
-	// for un-anchored patterns, so DO NOT add "**/".
-	anchored := strings.Contains(trimmed, "/")
-	body := strings.TrimPrefix(trimmed, "/")
-	if dir {
-		body += "/**"
-	}
-	if anchored {
-		body = "/" + body
-	}
-	return body
 }
