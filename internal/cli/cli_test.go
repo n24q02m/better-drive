@@ -2,15 +2,18 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/spf13/cobra"
 )
 
@@ -71,6 +74,72 @@ exclude = ["node_modules/"]
 	}
 }
 
+// statusFixtureConfig writes a single-pair config to a temp file and points
+// BETTER_DRIVE_CONFIG at it, returning the path (unused by callers so far,
+// kept for symmetry with the other fixture helpers in this file).
+func statusFixtureConfig(t *testing.T) string {
+	t.Helper()
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := `
+[[pair]]
+local = "C:/pair0"
+remote = "gdrive:pair0"
+interval = "30s"
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", cfgPath)
+	return cfgPath
+}
+
+// TestStatusCmd_TableFormatUnchanged verifies the default (no --format)
+// output is byte-shape-identical to the pre-change format, so existing users
+// and scripts see no difference.
+func TestStatusCmd_TableFormatUnchanged(t *testing.T) {
+	statusFixtureConfig(t)
+
+	var out bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs(nil)
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status: %v", err)
+	}
+
+	if matched, _ := regexp.MatchString(`^pair: .+ <-> .+ every .+ \[mode=.+\]\n`, out.String()); !matched {
+		t.Errorf("table output does not match the expected shape; got:\n%s", out.String())
+	}
+	if strings.Contains(out.String(), "{") {
+		t.Errorf("table format must not emit JSON; got:\n%s", out.String())
+	}
+}
+
+// TestStatusCmd_JSONFormat verifies --format json emits a JSON array of
+// output.PairStatus decodable by a machine consumer.
+func TestStatusCmd_JSONFormat(t *testing.T) {
+	statusFixtureConfig(t)
+
+	var out bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --format json: %v", err)
+	}
+
+	var got []output.PairStatus
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal: %v; got:\n%s", err, out.String())
+	}
+	if len(got) == 0 {
+		t.Fatal("want at least one pair, got none")
+	}
+	if got[0].Local == "" {
+		t.Error("want a non-empty Local field")
+	}
+}
+
 // fakeCLISyncer is a syncloop.Syncer test double for runSyncOnce: it never
 // makes a real rc/network call, so `sync` command tests stay offline. errByRemote
 // lets a specific pair (keyed by its Remote string) fail while others succeed.
@@ -100,7 +169,7 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	err := runSyncOnce(cmd, s, cfg)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -128,7 +197,7 @@ func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	err := runSyncOnce(cmd, s, cfg)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -152,12 +221,48 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	if err := runSyncOnce(cmd, s, cfg); err != nil {
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
+	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
 	out := buf.String()
 	if !strings.Contains(out, "gdrive:a") || !strings.Contains(out, "gdrive:b") {
 		t.Errorf("missing a per-pair line; got:\n%s", out)
+	}
+	if len(results) != 2 || results[0].Status != "ok" || results[1].Status != "ok" {
+		t.Errorf("results = %#v, want 2 ok results", results)
+	}
+}
+
+// TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines verifies the json
+// format writes nothing per pair to stdout during the loop, then renders the
+// full []output.PairResult once at the end - the table format's per-pair OK
+// line must not leak into json mode.
+func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "copy"},
+	}}
+	s := &fakeCLISyncer{}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON)
+	if err != nil {
+		t.Fatalf("runSyncOnce err = %v, want nil", err)
+	}
+	if strings.Contains(out.String(), "OK\n") {
+		t.Errorf("json format must not print a table-style OK line; got:\n%s", out.String())
+	}
+	var got []output.PairResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal: %v; got:\n%s", err, out.String())
+	}
+	if len(got) != 1 || got[0].Status != "ok" || got[0].Remote != "gdrive:a" {
+		t.Errorf("got %#v, want one ok result for gdrive:a", got)
+	}
+	if len(results) != len(got) {
+		t.Errorf("returned results len = %d, rendered json len = %d", len(results), len(got))
 	}
 }
 

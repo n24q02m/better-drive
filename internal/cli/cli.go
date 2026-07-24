@@ -13,6 +13,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
 	"github.com/n24q02m/better-drive/internal/exitcode"
+	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
@@ -187,16 +188,27 @@ func runCmd() *cobra.Command {
 }
 
 func statusCmd() *cobra.Command {
-	return &cobra.Command{
+	var format string
+	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print current config (every pair)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return exitcode.ConfigError(err)
+			}
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
 				return exitcode.ConfigError(err)
 			}
 			if err := cfg.Validate(); err != nil {
 				return exitcode.ConfigError(err)
+			}
+			if format == output.FormatJSON {
+				pairs := make([]output.PairStatus, 0, len(cfg.Pairs))
+				for _, p := range cfg.Pairs {
+					pairs = append(pairs, output.PairStatus{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Interval: p.Interval.String()})
+				}
+				return output.RenderJSON(cmd.OutOrStdout(), pairs)
 			}
 			for _, p := range cfg.Pairs {
 				fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\n", p.Local, p.Remote, p.Interval, p.Mode)
@@ -205,6 +217,8 @@ func statusCmd() *cobra.Command {
 			return nil
 		},
 	}
+	output.AddFormatFlag(c, &format)
+	return c
 }
 
 // syncCmd runs exactly one sync cycle for every configured pair, then exits -
@@ -213,10 +227,14 @@ func statusCmd() *cobra.Command {
 // same per-pair mode/filters/workdir as `run`, but a single pass instead of a
 // continuous daemon.
 func syncCmd() *cobra.Command {
-	return &cobra.Command{
+	var format string
+	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return exitcode.ConfigError(err)
+			}
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
 				return exitcode.ConfigError(err)
@@ -227,19 +245,28 @@ func syncCmd() *cobra.Command {
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
 			defer e.Close()
-			return runSyncOnce(cmd, e, cfg)
+			_, err = runSyncOnce(cmd, e, cfg, format)
+			return err
 		},
 	}
+	output.AddFormatFlag(c, &format)
+	return c
 }
 
 // runSyncOnce builds one syncloop.Loop per configured pair (same workdir
 // convention as runCmd, so a bisync-mode pair's baseline is shared with the
-// `run` daemon) and runs exactly one RunOnce cycle on each, printing a
-// per-pair result line. It returns a non-nil error if any pair failed. The
-// Syncer is a parameter (rather than constructed here) so tests can inject a
-// fake instead of a real engine.Engine, which would make a real Drive rc call.
-func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) error {
+// `run` daemon) and runs exactly one RunOnce cycle on each. In the table
+// format it prints a per-pair OK line to stdout as each pair finishes (the
+// pre-existing behavior); in the json format nothing is written per pair -
+// the full []output.PairResult is rendered once, after the loop. Diagnostics
+// (SKIPPED, FAILED) always go to stderr, in both formats. It returns the
+// per-pair results (for callers/tests that need the outcome directly) and a
+// non-nil error if any pair failed. The Syncer is a parameter (rather than
+// constructed here) so tests can inject a fake instead of a real
+// engine.Engine, which would make a real Drive rc call.
+func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, format string) ([]output.PairResult, error) {
 	failed := false
+	results := make([]output.PairResult, 0, len(cfg.Pairs))
 	for i, p := range cfg.Pairs {
 		p := p
 		// Skip a pair whose local source does not exist (e.g. a machine that
@@ -247,6 +274,7 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) erro
 		// instead of failing the whole run on a missing optional source.
 		if _, err := os.Stat(p.Local); errors.Is(err, os.ErrNotExist) {
 			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: SKIPPED (local not found)\n", p.Local, p.Remote, p.Mode)
+			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "skipped"})
 			continue
 		}
 		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
@@ -254,12 +282,21 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) erro
 		if err := loop.RunOnce(); err != nil {
 			failed = true
 			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
+			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "failed", Error: err.Error()})
 			continue
 		}
-		fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
+		if format == output.FormatTable {
+			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
+		}
+		results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "ok"})
+	}
+	if format == output.FormatJSON {
+		if err := output.RenderJSON(cmd.OutOrStdout(), results); err != nil {
+			return results, err
+		}
 	}
 	if failed {
-		return exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed"))
+		return results, exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed"))
 	}
-	return nil
+	return results, nil
 }
