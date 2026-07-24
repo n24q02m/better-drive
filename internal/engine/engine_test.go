@@ -394,6 +394,31 @@ func TestSyncDryRunPassesFlagToRclone(t *testing.T) {
 	}
 }
 
+// TestBisyncResyncDryRunSkipsRealMkdir verifies Resync+DryRun together never
+// run a REAL `rclone mkdir` against the remote (nor os.MkdirAll on the local
+// side) - the --resync setup step is a genuine write, so "no changes will be
+// made" must skip it, not just append --dry-run to the bisync argv itself.
+func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
+	path1 := filepath.Join(t.TempDir(), "not-yet-created")
+	var calls [][]string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		calls = append(calls, args)
+		return "", "", nil
+	})
+	_, err := e.Bisync(BisyncParams{Path1: path1, Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: true, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range calls {
+		if len(argv) > 0 && argv[0] == "mkdir" {
+			t.Fatalf("unexpected real `rclone mkdir` call under DryRun: %v", argv)
+		}
+	}
+	if _, statErr := os.Stat(path1); !os.IsNotExist(statErr) {
+		t.Errorf("Path1 %q was created on disk under DryRun, want left absent", path1)
+	}
+}
+
 // TestCopyDryRunPassesFlagToRclone mirrors the sync case for Copy, so preview
 // works uniformly regardless of which pair mode is configured.
 func TestCopyDryRunPassesFlagToRclone(t *testing.T) {

@@ -206,8 +206,13 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		return BisyncResult{}, err
 	}
 	// First run (resync): ensure both sides exist. path1 is always a local folder
-	// for better-drive; path2 is the Drive remote.
-	if p.Resync {
+	// for better-drive; path2 is the Drive remote. Both are real writes (a local
+	// mkdir and a remote `rclone mkdir`), so DryRun skips them entirely - "no
+	// changes will be made" must hold even on the very first (resync) cycle;
+	// rclone's own --dry-run then previews (or reports) against whatever
+	// already exists, rather than this step silently creating the destination
+	// first.
+	if p.Resync && !p.DryRun {
 		if err := os.MkdirAll(p.Path1, 0o700); err != nil {
 			return BisyncResult{}, err
 		}
