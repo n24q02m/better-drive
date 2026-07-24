@@ -394,6 +394,31 @@ func TestSyncDryRunPassesFlagToRclone(t *testing.T) {
 	}
 }
 
+// TestBisyncResyncDryRunSkipsRealMkdir verifies Resync+DryRun together never
+// run a REAL `rclone mkdir` against the remote (nor os.MkdirAll on the local
+// side) - the --resync setup step is a genuine write, so "no changes will be
+// made" must skip it, not just append --dry-run to the bisync argv itself.
+func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
+	path1 := filepath.Join(t.TempDir(), "not-yet-created")
+	var calls [][]string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		calls = append(calls, args)
+		return "", "", nil
+	})
+	_, err := e.Bisync(BisyncParams{Path1: path1, Path2: "gdrive:sub", Workdir: t.TempDir(), Resync: true, DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, argv := range calls {
+		if len(argv) > 0 && argv[0] == "mkdir" {
+			t.Fatalf("unexpected real `rclone mkdir` call under DryRun: %v", argv)
+		}
+	}
+	if _, statErr := os.Stat(path1); !os.IsNotExist(statErr) {
+		t.Errorf("Path1 %q was created on disk under DryRun, want left absent", path1)
+	}
+}
+
 // TestCopyDryRunPassesFlagToRclone mirrors the sync case for Copy, so preview
 // works uniformly regardless of which pair mode is configured.
 func TestCopyDryRunPassesFlagToRclone(t *testing.T) {
@@ -606,6 +631,32 @@ func TestCopyFileLocalUsesCopyto(t *testing.T) {
 	}
 	if containsArg(gotArgv, "--filter-from") {
 		t.Errorf("argv %v has --filter-from, want omitted for single-file copy", gotArgv)
+	}
+}
+
+// TestCopyFileLocalDryRunPassesFlagToRclone verifies DryRun also reaches the
+// single-file (`rclone copyto`) dispatch path, not just the directory
+// `rclone copy`/`sync` path - copyLocalFile takes DryRun as an explicit
+// parameter precisely so this case is not silently skipped.
+func TestCopyFileLocalDryRunPassesFlagToRclone(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.Copy(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if gotArgv[0] != "copyto" {
+		t.Fatalf("argv = %v, want [copyto ...]", gotArgv)
+	}
+	if !containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v missing --dry-run", gotArgv)
 	}
 }
 
