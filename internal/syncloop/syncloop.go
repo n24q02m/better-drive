@@ -57,6 +57,7 @@ type Loop struct {
 	paused      bool
 	hasBaseline bool
 	running     bool
+	dryRun      bool
 	onChange    func(State)
 	onResult    func(error)
 }
@@ -107,6 +108,16 @@ func (l *Loop) OnResult(fn func(error)) {
 	l.mu.Unlock()
 }
 
+// SetDryRun controls whether the next (and subsequent) sync cycles preview
+// changes via rclone's own --dry-run instead of applying them. It exists for
+// the `sync` CLI command's --dry-run flag; the continuous daemon (`run`)
+// never sets it.
+func (l *Loop) SetDryRun(v bool) {
+	l.mu.Lock()
+	l.dryRun = v
+	l.mu.Unlock()
+}
+
 func (l *Loop) setState(st State) {
 	l.mu.Lock()
 	l.state = st
@@ -136,6 +147,7 @@ func (l *Loop) runOnce() (err error) {
 	}
 	l.running = true
 	resync := l.mode == "bisync" && !l.hasBaseline
+	dryRun := l.dryRun
 	l.mu.Unlock()
 
 	// A panicking Syncer must not leave l.running stuck at true (which would
@@ -160,13 +172,13 @@ func (l *Loop) runOnce() (err error) {
 	if err == nil {
 		switch l.mode {
 		case "copy":
-			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, Filters: filters})
+			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
 		case "sync":
-			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, Filters: filters})
+			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
 		default: // "bisync"
 			_, err = l.s.Bisync(engine.BisyncParams{
 				Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
-				Resync: resync, Filters: filters,
+				Resync: resync, DryRun: dryRun, Filters: filters,
 			})
 		}
 	}
