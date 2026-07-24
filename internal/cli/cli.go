@@ -245,14 +245,14 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) erro
 		// doesn't have hermes), matching the backup script's Test-Path guard,
 		// instead of failing the whole run on a missing optional source.
 		if _, err := os.Stat(p.Local); errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: SKIPPED (local not found)\n", p.Local, p.Remote, p.Mode)
+			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: SKIPPED (local not found)\n", p.Local, p.Remote, p.Mode)
 			continue
 		}
 		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		if err := loop.RunOnce(); err != nil {
 			failed = true
-			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
+			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
 			continue
 		}
 		fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)

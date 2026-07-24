@@ -95,20 +95,48 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "sync"},
 	}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
-	var buf bytes.Buffer
+	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
-	cmd.SetOut(&buf)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
 
 	err := runSyncOnce(cmd, s, cfg)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
-	out := buf.String()
-	if !strings.Contains(out, "gdrive:ok") || !strings.Contains(out, "OK") {
-		t.Errorf("missing ok-pair line; got:\n%s", out)
+	if !strings.Contains(out.String(), "gdrive:ok") || !strings.Contains(out.String(), "OK") {
+		t.Errorf("missing ok-pair line on stdout; got:\n%s", out.String())
 	}
-	if !strings.Contains(out, "gdrive:bad") || !strings.Contains(out, "FAILED") || !strings.Contains(out, "boom") {
-		t.Errorf("missing failed-pair line with its error; got:\n%s", out)
+	// FAILED is a diagnostic, not a success result, so it belongs on stderr -
+	// this assertion used to check stdout, which encoded the bug fixed here.
+	if !strings.Contains(errOut.String(), "gdrive:bad") || !strings.Contains(errOut.String(), "FAILED") || !strings.Contains(errOut.String(), "boom") {
+		t.Errorf("missing failed-pair line with its error on stderr; got:\n%s", errOut.String())
+	}
+}
+
+// TestRunSyncOnce_FailuresGoToStderr verifies the AX contract: stdout carries
+// only success (OK) lines, while FAILED (and SKIPPED) diagnostics go to
+// stderr. Every agent consumer of `sync` (and Task 3's JSON renderer) depends
+// on stdout staying success-only.
+func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	err := runSyncOnce(cmd, s, cfg)
+	if err == nil {
+		t.Fatal("want non-nil error when a pair fails")
+	}
+	if strings.Contains(out.String(), "FAILED") {
+		t.Errorf("stdout must not carry failure lines; got:\n%s", out.String())
+	}
+	if !strings.Contains(errOut.String(), "FAILED") {
+		t.Errorf("failures belong on stderr; got:\n%s", errOut.String())
 	}
 }
 
