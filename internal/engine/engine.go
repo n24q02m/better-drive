@@ -199,13 +199,13 @@ func (e *Engine) ensureRemoteDir(path string) error {
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	if err := os.MkdirAll(p.Workdir, 0o755); err != nil {
+	if err := os.MkdirAll(p.Workdir, 0o700); err != nil {
 		return BisyncResult{}, err
 	}
 	// First run (resync): ensure both sides exist. path1 is always a local folder
 	// for better-drive; path2 is the Drive remote.
 	if p.Resync {
-		if err := os.MkdirAll(p.Path1, 0o755); err != nil {
+		if err := os.MkdirAll(p.Path1, 0o700); err != nil {
 			return BisyncResult{}, err
 		}
 		if err := e.ensureRemoteDir(p.Path2); err != nil {
