@@ -17,6 +17,44 @@ import (
 	"github.com/spf13/cobra"
 )
 
+// TestRootCmd_HasCompletionCommand verifies the root command registers the
+// standard cobra shell-completion subcommand (`completion bash|zsh|fish|
+// powershell`), so an agent or a shell can discover and script against it.
+func TestRootCmd_HasCompletionCommand(t *testing.T) {
+	root := newRootCmd()
+	var names []string
+	for _, c := range root.Commands() {
+		names = append(names, c.Name())
+	}
+	found := false
+	for _, n := range names {
+		if n == "completion" {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("root commands = %v, want \"completion\" among them", names)
+	}
+}
+
+// TestEveryCommandHasLongAndExample verifies every user-facing command
+// documents itself beyond its one-line Short description, so `--help` (and an
+// agent reading it) has enough context to use the command correctly.
+func TestEveryCommandHasLongAndExample(t *testing.T) {
+	root := newRootCmd()
+	for _, c := range root.Commands() {
+		if c.Name() == "completion" || c.Name() == "help" {
+			continue
+		}
+		if c.Long == "" {
+			t.Errorf("command %q needs a Long description", c.Name())
+		}
+		if c.Example == "" {
+			t.Errorf("command %q needs an Example", c.Name())
+		}
+	}
+}
+
 func TestRootHasSubcommands(t *testing.T) {
 	cmd := newRootCmd()
 	var buf bytes.Buffer

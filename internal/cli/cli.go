@@ -30,6 +30,7 @@ func newRootCmd() *cobra.Command {
 		Version: version.Version,
 	}
 	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
+	root.InitDefaultCompletionCmd()
 	return root
 }
 
@@ -37,6 +38,10 @@ func installCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
 		Short: "Register better-drive to start at login (hidden tray daemon)",
+		Long: "Register the current executable to start automatically at login, running\n" +
+			"the same sync daemon as `better-drive run` (tray icon, all configured\n" +
+			"pairs). Safe to run again: re-registers the current binary's path.",
+		Example: "  better-drive install",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			exe, err := os.Executable()
 			if err != nil {
@@ -55,6 +60,9 @@ func uninstallCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "uninstall",
 		Short: "Remove better-drive from login autostart",
+		Long: "Remove the login-autostart registration added by `better-drive install`.\n" +
+			"Does not touch config.toml, the rclone remote, or any synced files.",
+		Example: "  better-drive uninstall",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := autostart.Disable(); err != nil {
 				return err
@@ -70,6 +78,12 @@ func setupCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "setup",
 		Short: "Create the rclone Google Drive remote (opens browser for OAuth)",
+		Long: "Create (or repair) an rclone Google Drive remote via `rclone config\n" +
+			"create`, which opens a browser for OAuth. Idempotent: a remote that is\n" +
+			"already configured with a valid token is left alone; a broken, token-less\n" +
+			"remote left behind by an interrupted setup is deleted and recreated.",
+		Example: "  better-drive setup\n" +
+			"  better-drive setup --remote gdrive-work",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			// setup can run before a config.toml exists yet (first-run before any
 			// [[pair]] is defined), so a missing/unloadable config is not fatal
@@ -110,6 +124,11 @@ func runCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
 		Short: "Start the sync daemon (all configured pairs) with a tray icon showing combined status",
+		Long: "Start the continuous sync daemon: one sync loop per pair in config.toml,\n" +
+			"each on its own interval/mode, plus a system-tray icon showing the\n" +
+			"combined status. Blocks until the tray is quit. Every remote referenced\n" +
+			"by a pair must already be set up (`better-drive setup`).",
+		Example: "  better-drive run",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
@@ -192,6 +211,11 @@ func statusCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "status",
 		Short: "Print current config (every pair)",
+		Long: "Print every pair from config.toml: local path, remote, interval and mode.\n" +
+			"Read-only - makes no rclone call and never touches the network. Use\n" +
+			"--format json for machine-readable output.",
+		Example: "  better-drive status\n" +
+			"  better-drive status --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return exitcode.ConfigError(err)
@@ -232,6 +256,14 @@ func syncCmd() *cobra.Command {
 	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
+		Long: "Run a single sync cycle for every pair in config.toml, then exit - no tray,\n" +
+			"no ticker. A pair whose local path does not exist is SKIPPED (not a\n" +
+			"failure). Successful pairs are reported on stdout; SKIPPED and FAILED\n" +
+			"pairs go to stderr. Use --format json for machine-readable output and\n" +
+			"--dry-run to preview changes without applying them.",
+		Example: "  better-drive sync\n" +
+			"  better-drive sync --dry-run\n" +
+			"  better-drive sync --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return exitcode.ConfigError(err)
