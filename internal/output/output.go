@@ -30,6 +30,9 @@ type PairResult struct {
 	Mode   string `json:"mode"`
 	Status string `json:"status"` // ok | failed | skipped
 	Error  string `json:"error,omitempty"`
+	// DryRun reports whether this cycle only previewed changes (--dry-run)
+	// rather than applying them.
+	DryRun bool `json:"dry_run,omitempty"`
 }
 
 // AddFormatFlag registers --format on cmd, defaulting to the table format.

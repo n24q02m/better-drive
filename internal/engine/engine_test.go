@@ -337,6 +337,80 @@ func TestCreateDriveRemoteWithParams(t *testing.T) {
 	}
 }
 
+// TestBisyncDryRunPassesFlagToRclone verifies BisyncParams.DryRun appends
+// --dry-run to the rclone bisync argv, so a caller can preview a bisync cycle
+// (including its delete propagation) without applying any change.
+func TestBisyncDryRunPassesFlagToRclone(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	_, err := e.Bisync(BisyncParams{Path1: t.TempDir(), Path2: "gdrive:x", Workdir: t.TempDir(), DryRun: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
+// TestBisyncOmitsDryRunWhenFalse verifies the zero value of DryRun does not
+// add --dry-run - a normal bisync run must apply its changes.
+func TestBisyncOmitsDryRunWhenFalse(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	_, err := e.Bisync(BisyncParams{Path1: t.TempDir(), Path2: "gdrive:x", Workdir: t.TempDir()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v has --dry-run, want omitted for DryRun=false", gotArgv)
+	}
+}
+
+// TestSyncDryRunPassesFlagToRclone verifies CopyParams.DryRun appends
+// --dry-run to `rclone sync`'s argv - this is the mode the dry-run feature
+// exists for: mode="sync" deletes remote files absent locally, and --dry-run
+// is the only way to preview that deletion before it happens.
+func TestSyncDryRunPassesFlagToRclone(t *testing.T) {
+	path1 := t.TempDir()
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.Sync(CopyParams{Local: path1, Remote: "gdrive:Mirror", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if gotArgv[0] != "sync" {
+		t.Fatalf("subcommand = %q, want sync", gotArgv[0])
+	}
+	if !containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
+// TestCopyDryRunPassesFlagToRclone mirrors the sync case for Copy, so preview
+// works uniformly regardless of which pair mode is configured.
+func TestCopyDryRunPassesFlagToRclone(t *testing.T) {
+	path1 := t.TempDir()
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.Copy(CopyParams{Local: path1, Remote: "gdrive:Backup", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if !containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
 // TestBisyncGenericErrorNotResync verifies a generic rclone failure surfaces
 // as a plain error from Bisync, not classified as ErrNeedsResync.
 func TestBisyncGenericErrorNotResync(t *testing.T) {

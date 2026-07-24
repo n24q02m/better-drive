@@ -228,6 +228,7 @@ func statusCmd() *cobra.Command {
 // continuous daemon.
 func syncCmd() *cobra.Command {
 	var format string
+	var dryRun bool
 	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
@@ -245,11 +246,12 @@ func syncCmd() *cobra.Command {
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
 			defer e.Close()
-			_, err = runSyncOnce(cmd, e, cfg, format)
+			_, err = runSyncOnce(cmd, e, cfg, format, dryRun)
 			return err
 		},
 	}
 	output.AddFormatFlag(c, &format)
+	c.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without modifying anything")
 	return c
 }
 
@@ -264,7 +266,10 @@ func syncCmd() *cobra.Command {
 // non-nil error if any pair failed. The Syncer is a parameter (rather than
 // constructed here) so tests can inject a fake instead of a real
 // engine.Engine, which would make a real Drive rc call.
-func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, format string) ([]output.PairResult, error) {
+func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, format string, dryRun bool) ([]output.PairResult, error) {
+	if dryRun {
+		fmt.Fprintln(cmd.ErrOrStderr(), "dry-run: no changes will be made")
+	}
 	failed := false
 	results := make([]output.PairResult, 0, len(cfg.Pairs))
 	for i, p := range cfg.Pairs {
@@ -279,16 +284,17 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		}
 		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
+		loop.SetDryRun(dryRun)
 		if err := loop.RunOnce(); err != nil {
 			failed = true
 			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
-			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "failed", Error: err.Error()})
+			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "failed", Error: err.Error(), DryRun: dryRun})
 			continue
 		}
 		if format == output.FormatTable {
 			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
 		}
-		results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "ok"})
+		results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "ok", DryRun: dryRun})
 	}
 	if format == output.FormatJSON {
 		if err := output.RenderJSON(cmd.OutOrStdout(), results); err != nil {

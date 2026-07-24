@@ -169,7 +169,10 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 type BisyncParams struct {
 	Path1, Path2, Workdir string
 	Resync                bool
-	Filters               []string
+	// DryRun previews the cycle (including its delete propagation) via
+	// rclone's own --dry-run, applying no change.
+	DryRun  bool
+	Filters []string
 }
 
 type BisyncResult struct{ Output string }
@@ -222,6 +225,9 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	if p.Resync {
 		argv = append(argv, "--resync")
 	}
+	if p.DryRun {
+		argv = append(argv, "--dry-run")
+	}
 	argv = append(argv, commonSyncFlags()...)
 	argv = append(argv,
 		"--resilient", "--recover",
@@ -247,7 +253,11 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 // directory, so no ensureRemoteDir call is needed either.
 type CopyParams struct {
 	Local, Remote, Workdir string
-	Filters                []string
+	// DryRun previews the operation via rclone's own --dry-run, applying no
+	// change - the mode this matters most for is "sync" (Sync below), which
+	// deletes remote files absent locally.
+	DryRun  bool
+	Filters []string
 }
 
 // isFileLocal reports whether local is an existing regular file (not a
@@ -325,10 +335,13 @@ func joinRemotePath(dir, name string) string {
 // copyLocalFile copies a single local file to a remote directory via `rclone
 // copyto <local> <remoteDir>/<base>`. Filters are not applied: there is
 // nothing else under a single source file to include/exclude.
-func (e *Engine) copyLocalFile(local, remoteDir string) error {
+func (e *Engine) copyLocalFile(local, remoteDir string, dryRun bool) error {
 	dst := joinRemotePath(remoteDir, filepath.Base(local))
-	_, stderr, err := e.exec("copyto", local, dst,
-		"--retries", "3", "--local-no-check-updated", "--drive-skip-gdocs")
+	argv := []string{"copyto", local, dst, "--retries", "3", "--local-no-check-updated", "--drive-skip-gdocs"}
+	if dryRun {
+		argv = append(argv, "--dry-run")
+	}
+	_, stderr, err := e.exec(argv...)
 	if err != nil {
 		return fmt.Errorf("rclone copyto: %w: %s", err, strings.TrimSpace(stderr))
 	}
@@ -358,7 +371,7 @@ func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if isFileLocal(p.Local) {
-		return e.copyLocalFile(p.Local, p.Remote)
+		return e.copyLocalFile(p.Local, p.Remote, p.DryRun)
 	}
 	filterArgv, cleanup, err := writeFilters("--filter-from", p.Filters)
 	if err != nil {
@@ -366,6 +379,9 @@ func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
 	}
 	defer cleanup()
 	argv := append([]string{subcommand, p.Local, p.Remote}, commonSyncFlags()...)
+	if p.DryRun {
+		argv = append(argv, "--dry-run")
+	}
 	argv = append(argv, filterArgv...)
 	_, stderr, err := e.exec(argv...)
 	if err != nil {

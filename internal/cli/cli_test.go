@@ -143,15 +143,26 @@ func TestStatusCmd_JSONFormat(t *testing.T) {
 // fakeCLISyncer is a syncloop.Syncer test double for runSyncOnce: it never
 // makes a real rc/network call, so `sync` command tests stay offline. errByRemote
 // lets a specific pair (keyed by its Remote string) fail while others succeed.
+// bisyncParams/copyParams record the params each call received, so a test can
+// assert on e.g. DryRun without a real rclone invocation.
 type fakeCLISyncer struct {
-	errByRemote map[string]error
+	errByRemote  map[string]error
+	bisyncParams []engine.BisyncParams
+	copyParams   []engine.CopyParams
 }
 
 func (f *fakeCLISyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
+	f.bisyncParams = append(f.bisyncParams, p)
 	return engine.BisyncResult{}, f.errByRemote[p.Path2]
 }
-func (f *fakeCLISyncer) Copy(p engine.CopyParams) error { return f.errByRemote[p.Remote] }
-func (f *fakeCLISyncer) Sync(p engine.CopyParams) error { return f.errByRemote[p.Remote] }
+func (f *fakeCLISyncer) Copy(p engine.CopyParams) error {
+	f.copyParams = append(f.copyParams, p)
+	return f.errByRemote[p.Remote]
+}
+func (f *fakeCLISyncer) Sync(p engine.CopyParams) error {
+	f.copyParams = append(f.copyParams, p)
+	return f.errByRemote[p.Remote]
+}
 
 // TestRunSyncOnceReportsPerPairAndFailsOnAnyError verifies runSyncOnce (the
 // shared body behind the `sync` CLI command) runs one RunOnce cycle per
@@ -169,7 +180,7 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -197,7 +208,7 @@ func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -221,7 +232,7 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -247,7 +258,7 @@ func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, false)
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -263,6 +274,49 @@ func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
 	}
 	if len(results) != len(got) {
 		t.Errorf("returned results len = %d, rendered json len = %d", len(results), len(got))
+	}
+}
+
+// TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr verifies dryRun=true
+// (a) prints the "dry-run: no changes will be made" banner to stderr before
+// any pair runs, (b) is forwarded as DryRun on the params the Syncer
+// receives, and (c) is echoed on each PairResult - all without applying any
+// real change (the fake Syncer here never shells out to rclone).
+func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true)
+	if err != nil {
+		t.Fatalf("runSyncOnce err = %v, want nil", err)
+	}
+	if !strings.Contains(errOut.String(), "dry-run: no changes will be made") {
+		t.Errorf("missing dry-run banner on stderr; got:\n%s", errOut.String())
+	}
+	if len(s.bisyncParams) != 1 || !s.bisyncParams[0].DryRun {
+		t.Fatalf("bisyncParams = %+v, want exactly 1 call with DryRun=true", s.bisyncParams)
+	}
+	if len(results) != 1 || !results[0].DryRun {
+		t.Errorf("results = %+v, want DryRun=true", results)
+	}
+}
+
+// TestSyncCmd_HasDryRunFlag verifies the `sync` command registers --dry-run
+// (defaulting to false, so a plain `sync` keeps applying real changes).
+func TestSyncCmd_HasDryRunFlag(t *testing.T) {
+	c := syncCmd()
+	f := c.Flags().Lookup("dry-run")
+	if f == nil {
+		t.Fatal("sync command has no --dry-run flag")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--dry-run default = %q, want %q", f.DefValue, "false")
 	}
 }
 

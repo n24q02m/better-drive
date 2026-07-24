@@ -429,6 +429,42 @@ func TestOnResultInvokedWithSyncerError(t *testing.T) {
 	}
 }
 
+// TestSetDryRunThreadsIntoBisyncParams verifies SetDryRun(true) is read at
+// the start of the next runOnce cycle and forwarded as BisyncParams.DryRun.
+func TestSetDryRunThreadsIntoBisyncParams(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	l.hasBaseline = true
+	l.SetDryRun(true)
+	l.runOnce()
+	if len(f.calls) != 1 || !f.calls[0].DryRun {
+		t.Fatalf("calls=%+v, want exactly 1 call with DryRun=true", f.calls)
+	}
+}
+
+// TestSetDryRunThreadsIntoSyncParams mirrors the bisync case for mode="sync"
+// (CopyParams), the mode dry-run exists to preview (remote deletion).
+func TestSetDryRunThreadsIntoSyncParams(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoopMode(f, "sync")
+	l.SetDryRun(true)
+	l.runOnce()
+	if len(f.syncCalls) != 1 || !f.syncCalls[0].DryRun {
+		t.Fatalf("syncCalls=%+v, want exactly 1 call with DryRun=true", f.syncCalls)
+	}
+}
+
+// TestDryRunFalseByDefault verifies a Loop that never called SetDryRun keeps
+// applying real changes - dry-run must be opt-in.
+func TestDryRunFalseByDefault(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	l.runOnce()
+	if len(f.calls) != 1 || f.calls[0].DryRun {
+		t.Fatalf("calls=%+v, want exactly 1 call with DryRun=false", f.calls)
+	}
+}
+
 // TestModeDefaultsToBisyncWhenEmpty verifies New("") behaves like
 // New("bisync") for backward compatibility (config.Load already defaults an
 // empty toml mode to "bisync", but Loop itself must be defensive too).
