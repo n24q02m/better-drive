@@ -32,11 +32,17 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
 	agg.OnChange(func(st syncloop.State) {
+		systray.SetTooltip("better-drive - " + st.String())
 		mStatus.SetTitle("Status: " + st.String())
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
 		} else {
 			mPause.SetTitle("Pause")
+		}
+		if st == syncloop.StateSyncing {
+			mSync.Disable()
+		} else {
+			mSync.Enable()
 		}
 	})
 
