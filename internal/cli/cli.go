@@ -12,6 +12,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/autostart"
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
@@ -111,10 +112,10 @@ func runCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 			if err := cfg.Validate(); err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
@@ -122,7 +123,7 @@ func runCmd() *cobra.Command {
 				remoteName, _, _ := strings.Cut(p.Remote, ":")
 				if configured, _ := e.RemoteConfigured(remoteName); !configured {
 					e.Close()
-					return fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
+					return exitcode.RemoteNotConfiguredError(fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName))
 				}
 			}
 
@@ -192,10 +193,10 @@ func statusCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 			if err := cfg.Validate(); err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 			for _, p := range cfg.Pairs {
 				fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\n", p.Local, p.Remote, p.Interval, p.Mode)
@@ -218,10 +219,10 @@ func syncCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 			if err := cfg.Validate(); err != nil {
-				return err
+				return exitcode.ConfigError(err)
 			}
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
@@ -258,7 +259,7 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config) erro
 		fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
 	}
 	if failed {
-		return fmt.Errorf("sync: one or more pairs failed")
+		return exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed"))
 	}
 	return nil
 }
