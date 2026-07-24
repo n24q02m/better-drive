@@ -140,7 +140,11 @@ func TestStatusCmd_TableFormatUnchanged(t *testing.T) {
 	var out bytes.Buffer
 	cmd := statusCmd()
 	cmd.SetOut(&out)
-	cmd.SetArgs(nil)
+	// SetArgs(nil) would make cobra fall back to the REAL os.Args[1:] of the
+	// test binary process (e.g. "-covermode=atomic" under `go test -cover`),
+	// which pflag then tries to parse as a flag on this command - pass an
+	// explicit empty (non-nil) slice to mean "no args" instead.
+	cmd.SetArgs([]string{})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status: %v", err)
 	}
