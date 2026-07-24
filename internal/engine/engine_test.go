@@ -634,6 +634,32 @@ func TestCopyFileLocalUsesCopyto(t *testing.T) {
 	}
 }
 
+// TestCopyFileLocalDryRunPassesFlagToRclone verifies DryRun also reaches the
+// single-file (`rclone copyto`) dispatch path, not just the directory
+// `rclone copy`/`sync` path - copyLocalFile takes DryRun as an explicit
+// parameter precisely so this case is not silently skipped.
+func TestCopyFileLocalDryRunPassesFlagToRclone(t *testing.T) {
+	dir := t.TempDir()
+	filePath := filepath.Join(dir, "claude.json")
+	if err := os.WriteFile(filePath, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return "", "", nil
+	})
+	if err := e.Copy(CopyParams{Local: filePath, Remote: "gdrive:Backups/claude", DryRun: true}); err != nil {
+		t.Fatal(err)
+	}
+	if gotArgv[0] != "copyto" {
+		t.Fatalf("argv = %v, want [copyto ...]", gotArgv)
+	}
+	if !containsArg(gotArgv, "--dry-run") {
+		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
 // TestSyncFileLocalUsesCopyto mirrors the Copy file-local test for Sync: a
 // single-file Local has no "extra content" on the dst side to mirror away, so
 // Sync collapses to the same copyto call.
