@@ -3,6 +3,7 @@
 /cmd/spike/spike*
 *.test
 /dist/
+/coverage.out
 
 # SDD scratch (ledger, review packages)
 .superpowers/

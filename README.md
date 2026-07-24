@@ -1,5 +1,7 @@
 # better-drive
 
+[![CI](https://github.com/n24q02m/better-drive/actions/workflows/ci.yml/badge.svg)](https://github.com/n24q02m/better-drive/actions/workflows/ci.yml)
+
 Cross-platform Google Drive sync — bisync (2-way), copy, or sync (1-way mirror) per pair, with `.driveignore` filters and config-level excludes. A thin, lean wrapper around the [rclone](https://rclone.org) binary: better-drive owns the ergonomics (`.driveignore`, multi-pair config, a system-tray daemon, per-OS autostart) and shells out to your installed `rclone` for the actual transfers. Supports multiple independent `[[pair]]` blocks in one config (e.g. syncing/backing up several unrelated folders under one daemon).
 
 Runs on Windows, Linux, and macOS. The binary is small (~4 MB) and requires `rclone` on `PATH` (installed automatically by the scoop/brew packages below).
