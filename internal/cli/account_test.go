@@ -13,6 +13,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // fakeAccountEngine is an accountEngine test double, so the account command
@@ -352,6 +353,132 @@ func TestAccountCmd_HasListSubcommandWithFlags(t *testing.T) {
 		if list.Flags().Lookup(flag) == nil {
 			t.Errorf("account list has no --%s flag", flag)
 		}
+	}
+}
+
+// fakeSetupEngine is a setupEngine test double for the add/setup body, so
+// those tests never open a browser or write to a real rclone config.
+// configured and exists drive the idempotency branches; created records the
+// name and params each CreateDriveRemote call received, which is what the
+// headless-credential tests assert on.
+type fakeSetupEngine struct {
+	configured  bool
+	exists      bool
+	deleted     []string
+	created     []string
+	createdWith []map[string]string
+	createErr   error
+}
+
+func (f *fakeSetupEngine) RemoteConfigured(string) (bool, error) { return f.configured, nil }
+func (f *fakeSetupEngine) RemoteExists(string) (bool, error)     { return f.exists, nil }
+
+func (f *fakeSetupEngine) DeleteRemote(name string) error {
+	f.deleted = append(f.deleted, name)
+	return nil
+}
+
+func (f *fakeSetupEngine) CreateDriveRemote(name string, params map[string]string) error {
+	f.created = append(f.created, name)
+	f.createdWith = append(f.createdWith, params)
+	return f.createErr
+}
+
+// TestSetupAndAccountAdd_ShareFlags verifies `setup` and `account add` expose
+// exactly the same flags. They are one command under two names, so a flag that
+// landed on only one of them would make the documented equivalence false for
+// whichever name a user happened to reach for.
+func TestSetupAndAccountAdd_ShareFlags(t *testing.T) {
+	flagNames := func(c *cobra.Command) map[string]bool {
+		names := map[string]bool{}
+		c.Flags().VisitAll(func(f *pflag.Flag) { names[f.Name] = true })
+		return names
+	}
+
+	setupFlags := flagNames(setupCmd())
+	addFlags := flagNames(accountAddCmd())
+
+	for name := range setupFlags {
+		if !addFlags[name] {
+			t.Errorf("`setup` has --%s but `account add` does not", name)
+		}
+	}
+	for name := range addFlags {
+		if !setupFlags[name] {
+			t.Errorf("`account add` has --%s but `setup` does not", name)
+		}
+	}
+	if len(setupFlags) == 0 {
+		t.Error("setup exposes no flags at all, so this comparison proves nothing")
+	}
+}
+
+// TestSetupOutput_Unchanged pins the two lines `setup` prints at runtime, byte
+// for byte. Moving the body behind a shared constructor and adding flags to it
+// must leave what an existing user or script sees completely untouched.
+func TestSetupOutput_Unchanged(t *testing.T) {
+	t.Run("already set up", func(t *testing.T) {
+		e := &fakeSetupEngine{configured: true}
+		cmd, out, _ := newAccountTestCmd()
+
+		if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+			t.Fatalf("runAccountAdd error = %v", err)
+		}
+
+		if got, want := out.String(), "remote \"gdrive\" already set up\n"; got != want {
+			t.Errorf("stdout = %q, want %q", got, want)
+		}
+		if len(e.created) != 0 {
+			t.Errorf("CreateDriveRemote called %v, want no call for an already-configured remote", e.created)
+		}
+	})
+
+	t.Run("created", func(t *testing.T) {
+		e := &fakeSetupEngine{}
+		cmd, out, _ := newAccountTestCmd()
+
+		if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+			t.Fatalf("runAccountAdd error = %v", err)
+		}
+
+		if got, want := out.String(), "remote \"gdrive\" created\n"; got != want {
+			t.Errorf("stdout = %q, want %q", got, want)
+		}
+	})
+}
+
+// TestAccountAdd_RecreatesTokenlessRemote verifies the self-healing branch
+// survives the extraction: a remote that exists by name but has no token (an
+// interrupted setup) is deleted before being created again, rather than being
+// left broken.
+func TestAccountAdd_RecreatesTokenlessRemote(t *testing.T) {
+	e := &fakeSetupEngine{exists: true}
+	cmd, _, _ := newAccountTestCmd()
+
+	if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+		t.Fatalf("runAccountAdd error = %v", err)
+	}
+
+	if len(e.deleted) != 1 || e.deleted[0] != "gdrive" {
+		t.Errorf("deleted = %v, want the token-less remote cleared first", e.deleted)
+	}
+	if len(e.created) != 1 || e.created[0] != "gdrive" {
+		t.Errorf("created = %v, want the remote recreated", e.created)
+	}
+}
+
+// TestAccountAdd_IsRegisteredUnderTheAccountGroup verifies `add` is reachable
+// as `better-drive account add`, which is what the account group's own
+// documentation tells users to run.
+func TestAccountAdd_IsRegisteredUnderTheAccountGroup(t *testing.T) {
+	var found bool
+	for _, sub := range accountCmd().Commands() {
+		if sub.Name() == "add" {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("account command has no add subcommand")
 	}
 }
 

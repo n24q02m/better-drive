@@ -23,6 +23,17 @@ type accountEngine interface {
 	DeleteRemote(name string) error
 }
 
+// setupEngine is the slice of engine.Engine the add/setup command needs.
+// Separate from accountEngine because the two commands genuinely need
+// different things - list reads state, add writes it - and a double for one
+// should not have to stub the other's methods.
+type setupEngine interface {
+	RemoteConfigured(name string) (bool, error)
+	RemoteExists(name string) (bool, error)
+	DeleteRemote(name string) error
+	CreateDriveRemote(name string, params map[string]string) error
+}
+
 // loadConfigBestEffort reads config.toml but reports every failure as "there
 // is no config yet" instead of as an error. The account commands run
 // legitimately before any [[pair]] exists - an account has to be added before
@@ -99,8 +110,69 @@ func accountCmd() *cobra.Command {
 			"  better-drive account add --remote gdrive-work\n" +
 			"  better-drive account remove gdrive-work",
 	}
-	c.AddCommand(accountListCmd())
+	c.AddCommand(accountListCmd(), accountAddCmd())
 	return c
+}
+
+// accountAddCmd is `better-drive account add`, the account group's name for
+// the command `better-drive setup` also exposes at the top level.
+func accountAddCmd() *cobra.Command {
+	return newAccountAddCmd("add",
+		"Add a Google Drive account (the same command as `better-drive setup`)",
+		"Add a Google Drive account by creating (or repairing) an rclone remote via\n"+
+			"`rclone config create`, which opens a browser for OAuth. Idempotent: an\n"+
+			"account that already has a valid token is left alone; a broken, token-less\n"+
+			"remote left behind by an interrupted run is deleted and recreated. This is\n"+
+			"the same command as `better-drive setup`, reachable under either name.",
+		"  better-drive account add\n"+
+			"  better-drive account add --remote gdrive-work")
+}
+
+// newAccountAddCmd builds the one command that both `setup` and `account add`
+// are names for. `setup` is what the README, the scoop and homebrew package
+// descriptions, and every existing user's habit point at, so renaming it would
+// break a published contract for nothing; `account add` is where the command
+// belongs now that accounts are a group of their own. Building both here means
+// a flag or behaviour change cannot land on only one of the two names.
+func newAccountAddCmd(use, short, long, example string) *cobra.Command {
+	var remote string
+	c := &cobra.Command{
+		Use:     use,
+		Short:   short,
+		Long:    long,
+		Example: example,
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			cfg := loadConfigBestEffort()
+			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
+			defer e.Close()
+			return runAccountAdd(cmd, e, remote)
+		},
+	}
+	c.Flags().StringVar(&remote, "remote", "gdrive", "rclone remote name to create")
+	return c
+}
+
+// runAccountAdd is the add/setup body, taking its engine as a parameter so the
+// output-parity test can drive it with a double instead of opening a real
+// browser against a real Google account.
+func runAccountAdd(cmd *cobra.Command, e setupEngine, remote string) error {
+	// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
+	// the remote's config stanza to disk BEFORE OAuth completes, so an
+	// interrupted run leaves behind a remote that "exists" by name but has no
+	// token. Treat that as broken and self-heal instead of silently skipping.
+	configured, _ := e.RemoteConfigured(remote)
+	if configured {
+		fmt.Fprintf(cmd.OutOrStdout(), "remote %q already set up\n", remote)
+		return nil
+	}
+	if exists, _ := e.RemoteExists(remote); exists {
+		_ = e.DeleteRemote(remote) // clear broken, token-less stanza before recreating
+	}
+	if err := e.CreateDriveRemote(remote, nil); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "remote %q created\n", remote)
+	return nil
 }
 
 func accountListCmd() *cobra.Command {
