@@ -30,13 +30,62 @@ go install github.com/n24q02m/better-drive@latest
 ```bash
 better-drive setup      # create the rclone Google Drive remote (opens browser OAuth) — or reuse an existing rclone remote
 better-drive install    # register the daemon to start at login (HKCU Run key / LaunchAgent / systemd-user)
-better-drive run        # start the sync daemon (system-tray on Windows/Linux, headless on macOS/other)
+better-drive run        # start the sync daemon (system-tray on Windows/Linux/macOS)
 better-drive status     # show configured pairs and their state
 better-drive sync       # one-shot sync of every pair (for scripts/cron), then exit
 better-drive uninstall  # remove the login autostart
 ```
 
 The daemon syncs each pair once on start, then again every `interval`, and logs each cycle to `<config-dir>/better-drive.log`.
+
+## Accounts
+
+Each Google Drive account is an rclone remote; a `[[pair]]` block points its `remote` at one of them by name, so any number of accounts can be synced side by side by one `better-drive run` daemon.
+
+```bash
+better-drive account list                 # table: each account's state and pair count, offline, no network call
+better-drive account list --quota         # same, plus each configured account's Drive storage usage (one rclone call per account)
+better-drive account list --format json   # same data as JSON
+better-drive account add --remote NAME    # same command as `better-drive setup`, under the account group
+better-drive account remove NAME          # delete an account's rclone remote
+```
+
+```
+$ better-drive account list
+account testdrive: ready, 1 pair(s)
+account testdrive2: not set up, 0 pair(s)
+
+$ better-drive account list --format json
+[
+  {
+    "name": "testdrive",
+    "configured": true,
+    "pairs": [
+      "C:/Users/you/Documents"
+    ]
+  }
+]
+```
+
+`account remove NAME` refuses while a `[[pair]]` still references the account — the error names the pairs holding it — unless `--force` is passed. `account add` is the exact same command as `setup`, reachable under either name.
+
+### Multiple accounts
+
+Point different `[[pair]]` blocks at different remotes to sync more than one Google account from a single daemon:
+
+```toml
+[[pair]]
+local = "C:\\Users\\YourName\\GoogleDrive"
+remote = "gdrive:/"
+interval = "30s"
+
+[[pair]]
+local = "C:\\Users\\YourName\\WorkDrive"
+remote = "gdrive-work:Backups"
+interval = "6h"
+```
+
+Both pairs run concurrently under the same `better-drive run` process; `better-drive account list` reports both `gdrive` and `gdrive-work`.
 
 ## Configuration
 
@@ -102,12 +151,30 @@ Rules are evaluated top-to-bottom, gitignore-style (config `exclude` entries fir
 
 better-drive builds an `rclone` command line from each pair's config and runs the system `rclone` binary (`rclone bisync`/`copy`/`sync`), translating `.driveignore`/`exclude` rules into an rclone filter file and applying safe defaults (`--fast-list`, tuned `--transfers`/`--checkers`/`--tpslimit`, `--retries`, `--local-no-check-updated` for live directories, `--drive-skip-gdocs`). Because rclone does the transfers, better-drive stays tiny and inherits rclone's config, auth, and reliability.
 
-`better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows and Linux it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on macOS and other platforms it runs headless (use the log + `better-drive status`).
+`better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows, Linux and macOS it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on any other platform it runs headless (use the log + `better-drive status`).
 
 ## Requirements
 
 - [`rclone`](https://rclone.org) on `PATH` (installed automatically by the scoop and brew packages).
-- A configured rclone Google Drive remote — run `better-drive setup`, or reuse a remote you already have (`rclone config`). Tip: create your own Google [client_id](https://rclone.org/drive/#making-your-own-client-id) to avoid the shared-client rate limits.
+- A configured rclone Google Drive remote — run `better-drive setup`, or reuse a remote you already have (`rclone config`). Tip: create your own Google [client_id](https://rclone.org/drive/#making-your-own-client-id) to avoid the shared-client rate limits (pass it to `setup`/`account add` as `--client-id`/`--client-secret`).
+
+### Non-interactive setup
+
+`setup` and `account add` both take `--token`, `--client-id`, `--client-secret`, `--service-account-file` and `--non-interactive`, for a machine with no browser (CI, a headless server, a remote agent). Run `rclone authorize "drive"` on a machine that does have one, then pass the printed token:
+
+```bash
+better-drive account add --remote gdrive --token '<token>' --non-interactive
+# or, for a service account: --service-account-file /path/to/service-account.json
+```
+
+The token is a credential — in CI, pull it from a secret store or an environment variable rather than shell history. `--non-interactive` refuses to run without `--token` or `--service-account-file`, before touching rclone:
+
+```
+$ better-drive account add --remote probe --non-interactive
+error: --non-interactive needs --token or --service-account-file; get a token by running 'rclone authorize "drive"' on a machine with a browser
+```
+
+(exit code 2, nothing created.)
 
 ## License
 
