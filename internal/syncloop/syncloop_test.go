@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/paths"
 )
 
 type fakeSyncer struct {
@@ -133,6 +134,59 @@ func TestExistingBaselineSkipsResync(t *testing.T) {
 	}
 	if f.calls[0].Resync {
 		t.Error("existing baseline (*.lst present) must NOT trigger resync on first run")
+	}
+}
+
+// TestForeignPairListingsDoNotCountAsBaseline is the regression test for a
+// pair that syncs once and is then stuck forever: when workdirs were keyed by
+// a pair's POSITION in the config, changing that position (reordering,
+// inserting or deleting a [[pair]] block) handed a pair a directory full of
+// ANOTHER pair's listings. baselineExists only asks whether any *.lst file is
+// present, so the loop skipped --resync, rclone aborted with "must run
+// --resync" because it has no listing for this path1/path2 session, and every
+// later run repeated that exact sequence.
+//
+// Keying the workdir on the pair's identity is what actually fixes it, so the
+// two directories here are built from the real paths.PairWorkdir names (only
+// relocated under a temp root, to keep the test off the user's real config
+// tree) rather than from names invented by the test.
+func TestForeignPairListingsDoNotCountAsBaseline(t *testing.T) {
+	root := t.TempDir()
+	dirFor := func(local, remote string) string {
+		return filepath.Join(root, filepath.Base(paths.PairWorkdir(local, remote)))
+	}
+	foreign := dirFor("C:/other", "gdrive:other")
+	mine := dirFor("C:/mine", "gdrive:mine")
+	if err := os.MkdirAll(foreign, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// rclone derives its listing file names from the two paths of the session
+	// that wrote them, which is why these belong to the other pair alone.
+	if err := os.WriteFile(filepath.Join(foreign, "C__other..gdrive_other..path1.lst"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	f := &fakeSyncer{}
+	l := New(f, "C:/mine", "gdrive:mine", mine, "bisync", func() ([]string, error) { return nil, nil })
+	l.runOnce()
+	if len(f.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(f.calls))
+	}
+	if !f.calls[0].Resync {
+		t.Error("a pair with no listings of its own must resync, even when another pair's listings exist")
+	}
+
+	// Control: the pair those listings actually belong to must still NOT
+	// resync, or the fix would have traded one bug (a stuck pair) for another
+	// (a resync on every run, which does not propagate deletions).
+	owner := &fakeSyncer{}
+	ownerLoop := New(owner, "C:/other", "gdrive:other", foreign, "bisync", func() ([]string, error) { return nil, nil })
+	ownerLoop.runOnce()
+	if len(owner.calls) != 1 {
+		t.Fatalf("owner calls=%d, want 1", len(owner.calls))
+	}
+	if owner.calls[0].Resync {
+		t.Error("the pair owning the listings must keep its baseline, not resync")
 	}
 }
 

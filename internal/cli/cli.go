@@ -212,7 +212,7 @@ func runCmd() *cobra.Command {
 			var wg sync.WaitGroup
 			for i, p := range cfg.Pairs {
 				p := p
-				loop := syncloop.New(e, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
+				loop := syncloop.New(e, p.Local, p.Remote, paths.PairWorkdir(p.Local, p.Remote), p.Mode,
 					func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 				loops[i] = loop
 				agg.Register(i, loop)
@@ -340,7 +340,7 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 	}
 	failed := false
 	results := make([]output.PairResult, 0, len(cfg.Pairs))
-	for i, p := range cfg.Pairs {
+	for _, p := range cfg.Pairs {
 		p := p
 		// Skip a pair whose local source does not exist (e.g. a machine that
 		// doesn't have hermes), matching the backup script's Test-Path guard,
@@ -350,7 +350,7 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "skipped"})
 			continue
 		}
-		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(i), p.Mode,
+		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(p.Local, p.Remote), p.Mode,
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		loop.SetDryRun(dryRun)
 		if err := loop.RunOnce(); err != nil {

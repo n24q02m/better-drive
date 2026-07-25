@@ -476,6 +476,47 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	}
 }
 
+// TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder verifies each pair
+// keeps its own bisync workdir when the [[pair]] blocks are reordered. This is
+// the regression test for a pair that syncs once and then fails forever:
+// workdirs used to be keyed by a pair's index in the config, so swapping two
+// blocks (or inserting/deleting one) pointed a pair at another pair's baseline
+// listings - which rclone rejects with "must run --resync", while the loop, in
+// turn, saw *.lst files present and never asked for one.
+func TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder(t *testing.T) {
+	a := config.Pair{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"}
+	b := config.Pair{Local: t.TempDir(), Remote: "gdrive:b", Interval: time.Second, Mode: "bisync"}
+
+	// workdirs runs one full sync pass over pairs (in the given order) and
+	// reports the workdir each pair's Bisync call received, keyed by remote.
+	workdirs := func(pairs ...config.Pair) map[string]string {
+		t.Helper()
+		s := &fakeCLISyncer{}
+		cmd := &cobra.Command{}
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if _, err := runSyncOnce(cmd, s, &config.Config{Pairs: pairs}, output.FormatTable, false); err != nil {
+			t.Fatalf("runSyncOnce: %v", err)
+		}
+		got := make(map[string]string, len(s.bisyncParams))
+		for _, p := range s.bisyncParams {
+			got[p.Path2] = p.Workdir
+		}
+		return got
+	}
+
+	inOrder := workdirs(a, b)
+	swapped := workdirs(b, a)
+	for _, remote := range []string{"gdrive:a", "gdrive:b"} {
+		if inOrder[remote] != swapped[remote] {
+			t.Errorf("pair %s changed workdir when the config was reordered: %q -> %q", remote, inOrder[remote], swapped[remote])
+		}
+	}
+	if inOrder["gdrive:a"] == inOrder["gdrive:b"] {
+		t.Errorf("both pairs share workdir %q; per-pair baselines would corrupt each other", inOrder["gdrive:a"])
+	}
+}
+
 // TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines verifies the json
 // format writes nothing per pair to stdout during the loop, then renders the
 // full []output.PairResult once at the end - the table format's per-pair OK
