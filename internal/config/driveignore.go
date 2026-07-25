@@ -4,14 +4,23 @@ import (
 	"bufio"
 	"errors"
 	"os"
-	"path/filepath"
 	"strings"
 )
 
 // readDriveIgnoreLines returns the raw (untrimmed, unfiltered) lines of the
 // .driveignore file at localRoot, or (nil, nil) if the file does not exist.
 func readDriveIgnoreLines(localRoot string) ([]string, error) {
-	f, err := os.Open(filepath.Join(localRoot, ".driveignore"))
+	root, err := os.OpenRoot(localRoot)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	defer root.Close()
+
+	// Use root.Open to prevent path traversal via symlinks
+	f, err := root.Open(".driveignore")
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
