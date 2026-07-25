@@ -2,6 +2,69 @@
 
 <!-- version list -->
 
+## v1.5.0-beta.3 (2026-07-25)
+
+### Bug Fixes
+
+- Name the way out in the guard messages, not only in the json remediation
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Read .driveignore through os.OpenRoot so symlinks cannot escape the pair root
+  ([`f916caf`](https://github.com/n24q02m/better-drive/commit/f916caf61a6c9c4309a73c7a7273b19dbd5c3795))
+
+- Walk rclone output without materialising a line slice
+  ([`c13936a`](https://github.com/n24q02m/better-drive/commit/c13936ae83d4fd793e91c052e4ab124899a47736))
+
+### Features
+
+- Add account list showing Drive remotes, their state and the pairs using them
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Add account remove guarded against deleting a remote still in use
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Add engine methods to list Drive remotes and read their quota
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Add the account command group and non-interactive setup
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Build the darwin release binaries with cgo so the tray works on macOS
+  ([#28](https://github.com/n24q02m/better-drive/pull/28),
+  [`616c9fb`](https://github.com/n24q02m/better-drive/commit/616c9fb6701a94f9cfde60edbafe8b7cfa164d5e))
+
+- Document the account commands, non-interactive setup and macOS tray
+  ([#30](https://github.com/n24q02m/better-drive/pull/30),
+  [`0372b50`](https://github.com/n24q02m/better-drive/commit/0372b50fce3a0ea111ecb5a849fecf56a05c6ea2))
+
+- Emit a JSON error envelope for --format json command failures
+  ([#27](https://github.com/n24q02m/better-drive/pull/27),
+  [`b7a1ed5`](https://github.com/n24q02m/better-drive/commit/b7a1ed58e25d7164f49dfdd42f6c4d4720694d72))
+
+- Enable the system tray and cgo darwin release builds on macOS
+  ([#28](https://github.com/n24q02m/better-drive/pull/28),
+  [`616c9fb`](https://github.com/n24q02m/better-drive/commit/616c9fb6701a94f9cfde60edbafe8b7cfa164d5e))
+
+- Enable the system tray on macOS ([#28](https://github.com/n24q02m/better-drive/pull/28),
+  [`616c9fb`](https://github.com/n24q02m/better-drive/commit/616c9fb6701a94f9cfde60edbafe8b7cfa164d5e))
+
+- Expose setup as account add without changing its output
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+- Group tray menu actions with separators
+  ([`b449a50`](https://github.com/n24q02m/better-drive/commit/b449a507ed18de4011ca9e8fc143c35846d57b62))
+
+- Let setup run without a browser via token or service-account credentials
+  ([#29](https://github.com/n24q02m/better-drive/pull/29),
+  [`4f2ce21`](https://github.com/n24q02m/better-drive/commit/4f2ce21ccd1679e795d1cf6c2369f104fa2b614e))
+
+
 ## v1.5.0-beta.2 (2026-07-25)
 
 ### Bug Fixes
