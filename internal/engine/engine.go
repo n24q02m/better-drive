@@ -74,7 +74,9 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	// ⚡ Bolt: Iterate using strings.Cut instead of strings.Split to avoid allocating a large []string for rclone output.
+	// Cut walks the output one line at a time instead of splitting it into a
+	// []string up front, so a single pass never materializes lines it won't
+	// need beyond the first match.
 	for stdout != "" {
 		var line string
 		line, stdout, _ = strings.Cut(stdout, "\n")
@@ -101,7 +103,6 @@ func (e *Engine) RemoteConfigured(name string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	// ⚡ Bolt: Iterate using strings.Cut instead of strings.Split to avoid allocating a large []string for rclone output.
 	for stdout != "" {
 		var line string
 		line, stdout, _ = strings.Cut(stdout, "\n")
@@ -160,9 +161,7 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rclone lsf: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	// ⚡ Bolt: Pre-allocate names capacity using strings.Count to prevent repeated slice growth.
 	names := make([]string, 0, strings.Count(stdout, "\n"))
-	// ⚡ Bolt: Iterate using strings.Cut instead of strings.Split to avoid allocating a large []string for rclone output.
 	for stdout != "" {
 		var line string
 		line, stdout, _ = strings.Cut(stdout, "\n")
