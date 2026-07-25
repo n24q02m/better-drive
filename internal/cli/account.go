@@ -167,9 +167,12 @@ func runAccountRemove(cmd *cobra.Command, e accountEngine, cfg *config.Config, n
 			exitcode.ConfigError(fmt.Errorf("no Google Drive account named %q", name)),
 			"run: better-drive account list")
 	}
+	// As in driveCredentials.validate, --force is named in the message too:
+	// the remediation listing the pairs is only rendered for a --format json
+	// caller, and this command has no --format flag.
 	if pairs := pairsUsingRemote(cfg, name); len(pairs) > 0 && !force {
 		return exitcode.WithRemediation(
-			exitcode.ConfigError(fmt.Errorf("account %q is still used by %d configured pair(s)", name, len(pairs))),
+			exitcode.ConfigError(fmt.Errorf("account %q is still used by %d configured pair(s); re-run with --force to delete it anyway", name, len(pairs))),
 			fmt.Sprintf("edit %s to remove or repoint the [[pair]] block(s) for %s, or re-run with --force",
 				paths.ConfigFile(), strings.Join(pairs, ", ")))
 	}
@@ -252,8 +255,13 @@ func (c driveCredentials) validate(remote string) error {
 	if !c.nonInteractive || c.token != "" || c.serviceAccountFile != "" {
 		return nil
 	}
+	// The way out is named in the message as well as in the remediation:
+	// RenderError only prints the remediation for a --format json caller, and
+	// this command has no --format flag, so a hint kept solely there would
+	// never reach the person who has to act on it. remoteNotConfiguredErr
+	// repeats itself the same way, for the same reason.
 	return exitcode.WithRemediation(
-		exitcode.ConfigError(errors.New("--non-interactive needs --token or --service-account-file")),
+		exitcode.ConfigError(errors.New("--non-interactive needs --token or --service-account-file; get a token by running 'rclone authorize \"drive\"' on a machine with a browser")),
 		fmt.Sprintf("run 'rclone authorize \"drive\"' on a machine with a browser, then pass the printed token to: better-drive account add --remote %s --token '<token>'", remote))
 }
 

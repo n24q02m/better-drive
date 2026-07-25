@@ -562,6 +562,13 @@ func TestSetupNonInteractive_RequiresCredential(t *testing.T) {
 			t.Errorf("remediation = %q, want it to mention %q", hint, want)
 		}
 	}
+	// The message has to carry the way out too: RenderError prints the
+	// remediation only for a --format json caller, and this command has no
+	// --format flag, so a hint kept solely in the remediation is invisible to
+	// the person running the command.
+	if !strings.Contains(err.Error(), "rclone authorize") {
+		t.Errorf("Error() = %q, want the message itself to name how to get a token", err.Error())
+	}
 }
 
 // TestSetupNonInteractive_AcceptsServiceAccountFile verifies a service account
@@ -705,6 +712,11 @@ func TestAccountRemove_RefusesWhenPairUsesIt(t *testing.T) {
 	}
 	if !strings.Contains(hint, "--force") {
 		t.Errorf("remediation = %q, want it to mention the --force override", hint)
+	}
+	// See the matching assertion in TestSetupNonInteractive_RequiresCredential:
+	// the remediation is json-only, so the override has to be in the message.
+	if !strings.Contains(err.Error(), "--force") {
+		t.Errorf("Error() = %q, want the message itself to name the --force override", err.Error())
 	}
 }
 
