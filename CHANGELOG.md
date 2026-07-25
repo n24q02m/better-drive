@@ -2,6 +2,64 @@
 
 <!-- version list -->
 
+## v1.5.0-beta.4 (2026-07-25)
+
+### Bug Fixes
+
+- Document the sync --resync recovery path ([#40](https://github.com/n24q02m/better-drive/pull/40),
+  [`8824071`](https://github.com/n24q02m/better-drive/commit/8824071cb60dfec449e0b0eca22d94400b1e12c3))
+
+- Keep prereleases out of the scoop bucket and homebrew tap
+  ([#38](https://github.com/n24q02m/better-drive/pull/38),
+  [`a81ec55`](https://github.com/n24q02m/better-drive/commit/a81ec556952e857ad599a62036bf2f8749de4c77))
+
+- Key each pair's bisync workdir by identity and add sync --resync
+  ([#39](https://github.com/n24q02m/better-drive/pull/39),
+  [`40bd257`](https://github.com/n24q02m/better-drive/commit/40bd2576e37fe5ed48ed65067d59d51756956cce))
+
+- Key each pair's bisync workdir by identity instead of config position
+  ([#39](https://github.com/n24q02m/better-drive/pull/39),
+  [`40bd257`](https://github.com/n24q02m/better-drive/commit/40bd2576e37fe5ed48ed65067d59d51756956cce))
+
+- Let the installer smoke test actually run and drop the dead branch trigger
+  ([#37](https://github.com/n24q02m/better-drive/pull/37),
+  [`4715bbf`](https://github.com/n24q02m/better-drive/commit/4715bbf8e673512f924b45fdb52f13e269a4a892))
+
+- Pin ci.yml to the checkout and setup-go versions the other workflows use
+  ([#32](https://github.com/n24q02m/better-drive/pull/32),
+  [`e0ed2fa`](https://github.com/n24q02m/better-drive/commit/e0ed2fa33279e82cbd89b6304c0d1719773bb33f))
+
+- Recognise the lost-baseline bisync abort under --resilient
+  ([#39](https://github.com/n24q02m/better-drive/pull/39),
+  [`40bd257`](https://github.com/n24q02m/better-drive/commit/40bd2576e37fe5ed48ed65067d59d51756956cce))
+
+- Write the last two Vietnamese code comments in English
+  ([#31](https://github.com/n24q02m/better-drive/pull/31),
+  [`cfc3d00`](https://github.com/n24q02m/better-drive/commit/cfc3d0080b9c2891d14ff30390fb40c30da040fa))
+
+- **deps**: Update actions/checkout action to v7
+  ([#34](https://github.com/n24q02m/better-drive/pull/34),
+  [`7cd1b75`](https://github.com/n24q02m/better-drive/commit/7cd1b759a9e1fe2ffe10be465f3e54e19beb00c1))
+
+- **deps**: Update actions/setup-go action to v7
+  ([#35](https://github.com/n24q02m/better-drive/pull/35),
+  [`b86ed98`](https://github.com/n24q02m/better-drive/commit/b86ed98fb13b97b24c7d73f32d5e9aef167e9ee9))
+
+- **deps**: Update github/codeql-action action to v4
+  ([#36](https://github.com/n24q02m/better-drive/pull/36),
+  [`dd261c9`](https://github.com/n24q02m/better-drive/commit/dd261c9467329249ab890a792b2ab3ecc3930e93))
+
+- **deps**: Update go module directive to v1.26.5
+  ([#33](https://github.com/n24q02m/better-drive/pull/33),
+  [`ce21f6a`](https://github.com/n24q02m/better-drive/commit/ce21f6aed7ac9ecfb778374e400d651259def90f))
+
+### Features
+
+- Add sync --resync to rebuild a lost bisync baseline
+  ([#39](https://github.com/n24q02m/better-drive/pull/39),
+  [`40bd257`](https://github.com/n24q02m/better-drive/commit/40bd2576e37fe5ed48ed65067d59d51756956cce))
+
+
 ## v1.5.0-beta.3 (2026-07-25)
 
 ### Bug Fixes
