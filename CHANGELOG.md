@@ -2,6 +2,19 @@
 
 <!-- version list -->
 
+## v1.5.0-beta.2 (2026-07-25)
+
+### Bug Fixes
+
+- Skip the real resync mkdir under --dry-run so no changes are made
+  ([`23abbe1`](https://github.com/n24q02m/better-drive/commit/23abbe196e1e1489499b18458558e6964f56c565))
+
+### Features
+
+- Make the CLI agent-drivable (json output, exit codes, stderr hygiene, dry-run)
+  ([`4117b11`](https://github.com/n24q02m/better-drive/commit/4117b11de37846a3b1872b2dc3cfa2b3937b4f93))
+
+
 ## v1.5.0-beta.1 (2026-07-24)
 
 ### Bug Fixes
