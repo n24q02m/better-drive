@@ -2,6 +2,14 @@
 
 <!-- version list -->
 
+## v1.5.1 (2026-07-25)
+
+### Bug Fixes
+
+- Publish the homebrew tap as a cask instead of the retired brews config
+  ([`df7654c`](https://github.com/n24q02m/better-drive/commit/df7654c2ac491c027268e06a0a10621c0f79e20c))
+
+
 ## v1.5.0 (2026-07-25)
 
 
