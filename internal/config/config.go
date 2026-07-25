@@ -27,7 +27,8 @@ type Config struct {
 	Pairs        []Pair `toml:"pair"`
 }
 
-// tomlPair mirrors Pair nhưng Interval là string để toml decode "30s".
+// tomlPair mirrors Pair except Interval is a string, since that is the form
+// toml decodes (e.g. "30s") before Load parses it into a time.Duration.
 type tomlPair struct {
 	Local    string   `toml:"local"`
 	Remote   string   `toml:"remote"`

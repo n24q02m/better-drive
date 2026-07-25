@@ -90,7 +90,7 @@ func TestFirstRunResyncsThenNot(t *testing.T) {
 func TestNeedsResyncErrorSetsState(t *testing.T) {
 	f := &fakeSyncer{err: engine.ErrNeedsResync}
 	l := newLoop(f)
-	l.hasBaseline = true // giả lập đã có baseline để không auto-resync
+	l.hasBaseline = true // avoid the first-run auto-resync branch, not under test here
 	l.runOnce()
 	if l.State() != StateNeedsResync {
 		t.Fatalf("state=%v, want NeedsResync", l.State())
