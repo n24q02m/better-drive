@@ -337,6 +337,107 @@ func TestCreateDriveRemoteWithParams(t *testing.T) {
 	}
 }
 
+// TestListDriveRemotesFiltersByType verifies ListDriveRemotes parses `rclone
+// listremotes --json` and returns only the Drive remotes: a config can hold
+// remotes of any backend (s3, dropbox, ...), and better-drive only ever syncs
+// against Drive ones, so offering the rest as accounts would be misleading.
+func TestListDriveRemotesFiltersByType(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return `[
+{"name":"gdrive","type":"drive","source":"file","description":""},
+{"name":"work","type":"drive","source":"file","description":""},
+{"name":"backup","type":"s3","source":"file","description":""}
+]`, "", nil
+	})
+	got, err := e.ListDriveRemotes()
+	if err != nil {
+		t.Fatalf("ListDriveRemotes() error = %v", err)
+	}
+	want := []string{"gdrive", "work"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ListDriveRemotes() = %v, want %v (non-drive remotes must be filtered out)", got, want)
+	}
+	if !reflect.DeepEqual(gotArgv, []string{"listremotes", "--json"}) {
+		t.Errorf("argv = %v, want [listremotes --json]", gotArgv)
+	}
+}
+
+// TestListDriveRemotesEmptyConfig verifies an rclone config with no remotes at
+// all (the very first run, before any setup) is an empty result rather than an
+// error - `account list` has to work precisely then, to print its hint.
+func TestListDriveRemotesEmptyConfig(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "[]\n", "", nil
+	})
+	got, err := e.ListDriveRemotes()
+	if err != nil {
+		t.Fatalf("ListDriveRemotes() error = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("ListDriveRemotes() = %v, want empty", got)
+	}
+}
+
+// TestListDriveRemotesReportsUnparseableJSON verifies a body rclone did not
+// produce (a truncated pipe, a future format change) fails loudly instead of
+// being read as "this config has no Drive remote" - that silent reading would
+// tell a user their configured account had vanished.
+func TestListDriveRemotesReportsUnparseableJSON(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "not json at all", "", nil
+	})
+	if _, err := e.ListDriveRemotes(); err == nil {
+		t.Fatal("ListDriveRemotes() error = nil, want the parse failure surfaced")
+	}
+}
+
+// TestAboutParsesQuota verifies About calls `rclone about <name>: --json` and
+// fills Quota from the fields rclone reports (the trashed/other fields it also
+// returns are deliberately dropped - see Quota's doc).
+func TestAboutParsesQuota(t *testing.T) {
+	var gotArgv []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		gotArgv = args
+		return `{"total":5497558138880,"used":79762245855,"trashed":16055214801,"other":253151494371,"free":5164644398654}`, "", nil
+	})
+	got, err := e.About("gdrive")
+	if err != nil {
+		t.Fatalf("About() error = %v", err)
+	}
+	if got.Total != 5497558138880 || got.Used != 79762245855 || got.Free != 5164644398654 {
+		t.Errorf("About() = %+v, want total/used/free filled from the rclone json", got)
+	}
+	if !reflect.DeepEqual(gotArgv, []string{"about", "gdrive:", "--json"}) {
+		t.Errorf("argv = %v, want [about gdrive: --json]", gotArgv)
+	}
+}
+
+// TestAboutReportsRcloneFailure verifies a failing `rclone about` (an expired
+// token, no network) surfaces as an error rather than a zero-valued Quota,
+// which a caller would render as a real "0 B of 0 B" reading.
+func TestAboutReportsRcloneFailure(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "couldn't connect", errors.New("exit status 1")
+	})
+	if _, err := e.About("gdrive"); err == nil {
+		t.Fatal("About() error = nil, want the rclone failure surfaced")
+	}
+}
+
+// TestAboutReportsUnparseableJSON is About's counterpart to the
+// ListDriveRemotes parse-failure guard, for the same reason: an unreadable
+// body must not become a plausible-looking zero quota.
+func TestAboutReportsUnparseableJSON(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "<html>proxy error</html>", "", nil
+	})
+	if _, err := e.About("gdrive"); err == nil {
+		t.Fatal("About() error = nil, want the parse failure surfaced")
+	}
+}
+
 // TestBisyncDryRunPassesFlagToRclone verifies BisyncParams.DryRun appends
 // --dry-run to the rclone bisync argv, so a caller can preview a bisync cycle
 // (including its delete propagation) without applying any change.

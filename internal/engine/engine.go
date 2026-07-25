@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -164,6 +165,68 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 		names = append(names, strings.TrimSuffix(line, "/"))
 	}
 	return names, nil
+}
+
+// ListDriveRemotes returns the names of the Drive remotes in the rclone
+// config, in the order rclone reported them. It parses `rclone listremotes
+// --json` rather than the bare listing RemoteExists reads, because the bare
+// form carries only names: a user's config can hold s3, dropbox or sftp
+// remotes too, and an account command that offered those as Google Drive
+// accounts would be lying about what it can sync.
+func (e *Engine) ListDriveRemotes() ([]string, error) {
+	stdout, stderr, err := e.exec("listremotes", "--json")
+	if err != nil {
+		return nil, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	var remotes []struct {
+		Name string `json:"name"`
+		Type string `json:"type"`
+	}
+	// A body that does not parse is reported as a failure rather than as an
+	// empty list: "no Drive remote is configured" is a claim a caller acts on
+	// (it prints a first-run hint), and it must not be reachable by reading
+	// output rclone never produced.
+	if err := json.Unmarshal([]byte(stdout), &remotes); err != nil {
+		return nil, fmt.Errorf("rclone listremotes: parse json: %w", err)
+	}
+	names := make([]string, 0, len(remotes))
+	for _, r := range remotes {
+		if r.Type == "drive" {
+			names = append(names, r.Name)
+		}
+	}
+	return names, nil
+}
+
+// Quota is a remote's storage usage in bytes, as reported by `rclone about
+// --json`. rclone also breaks out "trashed" and "other"; both are dropped
+// because the only question a sync tool needs answered is how much room is
+// left before the next cycle starts failing.
+type Quota struct {
+	Total int64 `json:"total"`
+	Used  int64 `json:"used"`
+	Free  int64 `json:"free"`
+}
+
+// About reports a remote's storage quota via `rclone about <name>: --json`.
+// Quota is the only account-level fact obtainable for a Drive remote: the
+// Drive backend does not implement `config userinfo` (it answers "Google
+// drive root '' doesn't support UserInfo"), so rclone cannot tell us which
+// Google account a remote is signed in as, and the numbers here are what a
+// user has to tell two configured accounts apart by.
+func (e *Engine) About(name string) (Quota, error) {
+	stdout, stderr, err := e.exec("about", name+":", "--json")
+	if err != nil {
+		return Quota{}, fmt.Errorf("rclone about: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	var q Quota
+	// As in ListDriveRemotes, an unparseable body must not be mistaken for
+	// success: a zero-valued Quota renders as a legitimate-looking "0 B of
+	// 0 B", which reads as an empty account rather than as a broken read.
+	if err := json.Unmarshal([]byte(stdout), &q); err != nil {
+		return Quota{}, fmt.Errorf("rclone about: parse json: %w", err)
+	}
+	return q, nil
 }
 
 type BisyncParams struct {
