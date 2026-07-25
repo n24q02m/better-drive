@@ -421,7 +421,7 @@ func TestSetupOutput_Unchanged(t *testing.T) {
 		e := &fakeSetupEngine{configured: true}
 		cmd, out, _ := newAccountTestCmd()
 
-		if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+		if err := runAccountAdd(cmd, e, "gdrive", driveCredentials{}); err != nil {
 			t.Fatalf("runAccountAdd error = %v", err)
 		}
 
@@ -437,7 +437,7 @@ func TestSetupOutput_Unchanged(t *testing.T) {
 		e := &fakeSetupEngine{}
 		cmd, out, _ := newAccountTestCmd()
 
-		if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+		if err := runAccountAdd(cmd, e, "gdrive", driveCredentials{}); err != nil {
 			t.Fatalf("runAccountAdd error = %v", err)
 		}
 
@@ -455,7 +455,7 @@ func TestAccountAdd_RecreatesTokenlessRemote(t *testing.T) {
 	e := &fakeSetupEngine{exists: true}
 	cmd, _, _ := newAccountTestCmd()
 
-	if err := runAccountAdd(cmd, e, "gdrive"); err != nil {
+	if err := runAccountAdd(cmd, e, "gdrive", driveCredentials{}); err != nil {
 		t.Fatalf("runAccountAdd error = %v", err)
 	}
 
@@ -479,6 +479,192 @@ func TestAccountAdd_IsRegisteredUnderTheAccountGroup(t *testing.T) {
 	}
 	if !found {
 		t.Error("account command has no add subcommand")
+	}
+}
+
+// TestSetupHeadless_BuildsRcloneParams verifies the credential flags map onto
+// the rclone backend keys `rclone config create` expects, and that only the
+// flags actually set become params.
+func TestSetupHeadless_BuildsRcloneParams(t *testing.T) {
+	e := &fakeSetupEngine{}
+	cmd, _, _ := newAccountTestCmd()
+	creds := driveCredentials{token: "X", clientID: "Y"}
+
+	if err := runAccountAdd(cmd, e, "gdrive", creds); err != nil {
+		t.Fatalf("runAccountAdd error = %v", err)
+	}
+
+	if len(e.createdWith) != 1 {
+		t.Fatalf("CreateDriveRemote called %d times, want 1", len(e.createdWith))
+	}
+	got := e.createdWith[0]
+	want := map[string]string{"token": "X", "client_id": "Y"}
+	if len(got) != len(want) {
+		t.Fatalf("params = %v, want exactly %v", got, want)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("params[%q] = %q, want %q", key, got[key], value)
+		}
+	}
+}
+
+// TestSetupHeadless_MapsEveryCredentialFlag verifies each remaining flag
+// reaches its documented rclone key, so a service-account or custom-OAuth
+// setup is not silently dropped on the floor.
+func TestSetupHeadless_MapsEveryCredentialFlag(t *testing.T) {
+	creds := driveCredentials{
+		token:              "T",
+		clientID:           "CI",
+		clientSecret:       "CS",
+		serviceAccountFile: "C:/keys/sa.json",
+	}
+
+	got := creds.params()
+	want := map[string]string{
+		"token":                "T",
+		"client_id":            "CI",
+		"client_secret":        "CS",
+		"service_account_file": "C:/keys/sa.json",
+	}
+	if len(got) != len(want) {
+		t.Fatalf("params = %v, want exactly %v", got, want)
+	}
+	for key, value := range want {
+		if got[key] != value {
+			t.Errorf("params[%q] = %q, want %q", key, got[key], value)
+		}
+	}
+}
+
+// TestSetupNonInteractive_RequiresCredential verifies --non-interactive with
+// nothing to authenticate with fails before any rclone call. Reaching rclone
+// would leave it waiting for an OAuth answer nobody is there to give, and a
+// job that hangs is far worse than one that exits.
+func TestSetupNonInteractive_RequiresCredential(t *testing.T) {
+	e := &fakeSetupEngine{}
+	cmd, _, _ := newAccountTestCmd()
+	creds := driveCredentials{nonInteractive: true}
+
+	err := runAccountAdd(cmd, e, "gdrive", creds)
+	if err == nil {
+		t.Fatal("runAccountAdd error = nil, want --non-interactive rejected without a credential")
+	}
+	if got := exitcode.Code(err); got != exitcode.ConfigErrorCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.ConfigErrorCode)
+	}
+	if len(e.created) != 0 || len(e.deleted) != 0 {
+		t.Errorf("engine was called (created=%v deleted=%v), want the guard to fire first", e.created, e.deleted)
+	}
+	hint := exitcode.RemediationOf(err)
+	for _, want := range []string{"rclone authorize", "--token", "gdrive"} {
+		if !strings.Contains(hint, want) {
+			t.Errorf("remediation = %q, want it to mention %q", hint, want)
+		}
+	}
+}
+
+// TestSetupNonInteractive_AcceptsServiceAccountFile verifies a service account
+// key satisfies the same guard: it is a credential that needs no browser, so
+// requiring a token on top of it would reject a perfectly valid CI setup.
+func TestSetupNonInteractive_AcceptsServiceAccountFile(t *testing.T) {
+	e := &fakeSetupEngine{}
+	cmd, _, _ := newAccountTestCmd()
+	creds := driveCredentials{nonInteractive: true, serviceAccountFile: "C:/keys/sa.json"}
+
+	if err := runAccountAdd(cmd, e, "gdrive", creds); err != nil {
+		t.Fatalf("runAccountAdd error = %v, want a service account to satisfy the guard", err)
+	}
+	if len(e.created) != 1 {
+		t.Errorf("created = %v, want the remote created", e.created)
+	}
+}
+
+// TestSetupNonInteractive_AddsConfigIsLocalFalse verifies --non-interactive
+// reaches rclone as config_is_local=false, which is what stops the backend
+// from trying to open a browser.
+func TestSetupNonInteractive_AddsConfigIsLocalFalse(t *testing.T) {
+	e := &fakeSetupEngine{}
+	cmd, _, _ := newAccountTestCmd()
+	creds := driveCredentials{nonInteractive: true, token: "X"}
+
+	if err := runAccountAdd(cmd, e, "gdrive", creds); err != nil {
+		t.Fatalf("runAccountAdd error = %v", err)
+	}
+
+	if len(e.createdWith) != 1 {
+		t.Fatalf("CreateDriveRemote called %d times, want 1", len(e.createdWith))
+	}
+	if got := e.createdWith[0]["config_is_local"]; got != "false" {
+		t.Errorf("params[config_is_local] = %q, want %q", got, "false")
+	}
+}
+
+// TestSetup_TokenNeverEchoed verifies the token value never reaches stdout,
+// stderr or an error string. A token is a live credential, and stderr is
+// exactly what a CI job archives, so echoing it once would leak it into a log
+// that outlives the run.
+func TestSetup_TokenNeverEchoed(t *testing.T) {
+	const secret = "SECRET-TOKEN-DO-NOT-PRINT"
+
+	t.Run("create fails", func(t *testing.T) {
+		e := &fakeSetupEngine{createErr: errors.New("rclone config create: exit status 1")}
+		cmd, out, errOut := newAccountTestCmd()
+
+		err := runAccountAdd(cmd, e, "gdrive", driveCredentials{token: secret, nonInteractive: true})
+		if err == nil {
+			t.Fatal("runAccountAdd error = nil, want the create failure surfaced")
+		}
+		for name, got := range map[string]string{"stdout": out.String(), "stderr": errOut.String(), "error": err.Error()} {
+			if strings.Contains(got, secret) {
+				t.Errorf("%s leaked the token value: %q", name, got)
+			}
+		}
+	})
+
+	t.Run("create succeeds", func(t *testing.T) {
+		e := &fakeSetupEngine{}
+		cmd, out, errOut := newAccountTestCmd()
+
+		if err := runAccountAdd(cmd, e, "gdrive", driveCredentials{token: secret}); err != nil {
+			t.Fatalf("runAccountAdd error = %v", err)
+		}
+		if strings.Contains(out.String(), secret) || strings.Contains(errOut.String(), secret) {
+			t.Errorf("the token value was echoed; stdout=%q stderr=%q", out.String(), errOut.String())
+		}
+	})
+}
+
+// TestSetup_NoFlagsKeepsParamsNil is the regression guard for the pre-existing
+// path: with no credential flag set, `rclone config create` must receive the
+// same nil params it always has, so the browser-driven setup an existing user
+// runs is bit-for-bit the command it was before.
+func TestSetup_NoFlagsKeepsParamsNil(t *testing.T) {
+	e := &fakeSetupEngine{}
+	cmd, _, _ := newAccountTestCmd()
+
+	if err := runAccountAdd(cmd, e, "gdrive", driveCredentials{}); err != nil {
+		t.Fatalf("runAccountAdd error = %v", err)
+	}
+
+	if len(e.createdWith) != 1 {
+		t.Fatalf("CreateDriveRemote called %d times, want 1", len(e.createdWith))
+	}
+	if e.createdWith[0] != nil {
+		t.Errorf("params = %v, want nil with no credential flag set", e.createdWith[0])
+	}
+}
+
+// TestSetupAndAccountAdd_HaveEveryCredentialFlag verifies the flags are
+// actually registered on the commands (not merely supported by the struct
+// behind them), under both names.
+func TestSetupAndAccountAdd_HaveEveryCredentialFlag(t *testing.T) {
+	for _, c := range []*cobra.Command{setupCmd(), accountAddCmd()} {
+		for _, name := range []string{"remote", "token", "client-id", "client-secret", "service-account-file", "non-interactive"} {
+			if c.Flags().Lookup(name) == nil {
+				t.Errorf("command %q has no --%s flag", c.Name(), name)
+			}
+		}
 	}
 }
 

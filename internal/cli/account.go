@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -10,6 +11,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 )
 
 // accountEngine is the slice of engine.Engine the account commands use. It is
@@ -192,6 +194,69 @@ func accountAddCmd() *cobra.Command {
 			"  better-drive account add --remote gdrive-work")
 }
 
+// driveCredentials holds the credential flags shared by `setup` and `account
+// add`. They exist so an account can be added where no browser can run - a CI
+// job, a headless server, an agent - by supplying up front the answers
+// rclone's interactive OAuth flow would otherwise stop to ask for.
+type driveCredentials struct {
+	token              string
+	clientID           string
+	clientSecret       string
+	serviceAccountFile string
+	nonInteractive     bool
+}
+
+// register binds the credential flags onto flags. Both names of the command
+// go through here, so neither can end up with a flag the other lacks.
+func (c *driveCredentials) register(flags *pflag.FlagSet) {
+	flags.StringVar(&c.token, "token", "", "OAuth token JSON from `rclone authorize \"drive\"` (a credential - prefer an environment variable over shell history)")
+	flags.StringVar(&c.clientID, "client-id", "", "Google OAuth client id to use instead of rclone's shared one")
+	flags.StringVar(&c.clientSecret, "client-secret", "", "Google OAuth client secret paired with --client-id")
+	flags.StringVar(&c.serviceAccountFile, "service-account-file", "", "path to a Google service account JSON key file")
+	flags.BoolVar(&c.nonInteractive, "non-interactive", false, "never prompt or open a browser; needs --token or --service-account-file")
+}
+
+// params maps the flags that were actually set onto the backend keys `rclone
+// config create` expects. It returns nil when none were, so the default,
+// browser-driven path passes exactly the nil map it always passed and its
+// behaviour is untouched by this feature existing.
+func (c driveCredentials) params() map[string]string {
+	params := map[string]string{}
+	set := func(key, value string) {
+		if value != "" {
+			params[key] = value
+		}
+	}
+	set("token", c.token)
+	set("client_id", c.clientID)
+	set("client_secret", c.clientSecret)
+	set("service_account_file", c.serviceAccountFile)
+	if c.nonInteractive {
+		// config_is_local=false tells the drive backend that the config is
+		// being written somewhere without a browser to open, so it prints the
+		// authorize instructions instead of trying to launch one.
+		params["config_is_local"] = "false"
+	}
+	if len(params) == 0 {
+		return nil
+	}
+	return params
+}
+
+// validate rejects --non-interactive with nothing to authenticate with,
+// before any rclone call is made. Letting the run reach `rclone config create`
+// would leave it waiting for an OAuth answer nobody is present to give, and a
+// job that hangs forever is a worse failure than one that exits: the CI runner
+// or agent this flag exists for has no way to notice, let alone recover.
+func (c driveCredentials) validate(remote string) error {
+	if !c.nonInteractive || c.token != "" || c.serviceAccountFile != "" {
+		return nil
+	}
+	return exitcode.WithRemediation(
+		exitcode.ConfigError(errors.New("--non-interactive needs --token or --service-account-file")),
+		fmt.Sprintf("run 'rclone authorize \"drive\"' on a machine with a browser, then pass the printed token to: better-drive account add --remote %s --token '<token>'", remote))
+}
+
 // newAccountAddCmd builds the one command that both `setup` and `account add`
 // are names for. `setup` is what the README, the scoop and homebrew package
 // descriptions, and every existing user's habit point at, so renaming it would
@@ -200,6 +265,7 @@ func accountAddCmd() *cobra.Command {
 // a flag or behaviour change cannot land on only one of the two names.
 func newAccountAddCmd(use, short, long, example string) *cobra.Command {
 	var remote string
+	var creds driveCredentials
 	c := &cobra.Command{
 		Use:     use,
 		Short:   short,
@@ -209,17 +275,21 @@ func newAccountAddCmd(use, short, long, example string) *cobra.Command {
 			cfg := loadConfigBestEffort()
 			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
 			defer e.Close()
-			return runAccountAdd(cmd, e, remote)
+			return runAccountAdd(cmd, e, remote, creds)
 		},
 	}
 	c.Flags().StringVar(&remote, "remote", "gdrive", "rclone remote name to create")
+	creds.register(c.Flags())
 	return c
 }
 
 // runAccountAdd is the add/setup body, taking its engine as a parameter so the
 // output-parity test can drive it with a double instead of opening a real
 // browser against a real Google account.
-func runAccountAdd(cmd *cobra.Command, e setupEngine, remote string) error {
+func runAccountAdd(cmd *cobra.Command, e setupEngine, remote string, creds driveCredentials) error {
+	if err := creds.validate(remote); err != nil {
+		return err
+	}
 	// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
 	// the remote's config stanza to disk BEFORE OAuth completes, so an
 	// interrupted run leaves behind a remote that "exists" by name but has no
@@ -232,7 +302,10 @@ func runAccountAdd(cmd *cobra.Command, e setupEngine, remote string) error {
 	if exists, _ := e.RemoteExists(remote); exists {
 		_ = e.DeleteRemote(remote) // clear broken, token-less stanza before recreating
 	}
-	if err := e.CreateDriveRemote(remote, nil); err != nil {
+	// rclone's error is returned exactly as it came back. It must never be
+	// wrapped with the params that produced it: --token's value is a live
+	// credential, and stderr is precisely what a CI job archives.
+	if err := e.CreateDriveRemote(remote, creds.params()); err != nil {
 		return err
 	}
 	fmt.Fprintf(cmd.OutOrStdout(), "remote %q created\n", remote)
