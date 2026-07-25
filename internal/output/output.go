@@ -35,6 +35,28 @@ type PairResult struct {
 	DryRun bool `json:"dry_run,omitempty"`
 }
 
+// Quota is a remote's storage usage in bytes, as reported by `account list
+// --quota`. It mirrors engine.Quota by value rather than embedding it, for
+// the same reason PairStatus mirrors config.Pair: this package renders what
+// commands report and stays free of the domain packages that produce it, so
+// the wire shape can never drift because an internal type was refactored.
+type Quota struct {
+	Total int64 `json:"total"`
+	Used  int64 `json:"used"`
+	Free  int64 `json:"free"`
+}
+
+// AccountStatus is one Google Drive remote, as reported by `account list`.
+// Quota is a pointer so it disappears from the JSON entirely when it was not
+// requested or could not be read - a zero-valued object inline would be
+// indistinguishable from a genuinely empty Drive.
+type AccountStatus struct {
+	Name       string   `json:"name"`
+	Configured bool     `json:"configured"`
+	Pairs      []string `json:"pairs"`
+	Quota      *Quota   `json:"quota,omitempty"`
+}
+
 // AddFormatFlag registers --format on cmd, defaulting to the table format.
 func AddFormatFlag(cmd *cobra.Command, target *string) {
 	cmd.Flags().StringVar(target, "format", FormatTable, "output format: table|json")

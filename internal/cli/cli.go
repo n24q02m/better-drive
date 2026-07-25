@@ -67,7 +67,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
@@ -149,51 +149,20 @@ func uninstallCmd() *cobra.Command {
 	}
 }
 
+// setupCmd is `better-drive setup`, the published name of the command that
+// creates a Drive account. It is built by newAccountAddCmd, the same
+// constructor `account add` uses, so the two names can never drift apart -
+// see that function for why both exist.
 func setupCmd() *cobra.Command {
-	var remote string
-	c := &cobra.Command{
-		Use:   "setup",
-		Short: "Create the rclone Google Drive remote (opens browser for OAuth)",
-		Long: "Create (or repair) an rclone Google Drive remote via `rclone config\n" +
-			"create`, which opens a browser for OAuth. Idempotent: a remote that is\n" +
-			"already configured with a valid token is left alone; a broken, token-less\n" +
-			"remote left behind by an interrupted setup is deleted and recreated.",
-		Example: "  better-drive setup\n" +
-			"  better-drive setup --remote gdrive-work",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			// setup can run before a config.toml exists yet (first-run before any
-			// [[pair]] is defined), so a missing/unloadable config is not fatal
-			// here - fall back to "" (auto-detect) rather than cfg.RcloneConfig.
-			rcloneConfigPath := ""
-			if cfg, err := config.Load(paths.ConfigFile()); err == nil {
-				rcloneConfigPath = cfg.RcloneConfig
-			}
-			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPath))
-			defer e.Close()
-			// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
-			// the remote's config stanza to disk BEFORE OAuth completes, so an
-			// interrupted `setup` leaves behind a remote that "exists" by name but has
-			// no token. Treat that as broken and self-heal instead of silently skipping.
-			configured, _ := e.RemoteConfigured(remote)
-			if configured {
-				fmt.Fprintf(cmd.OutOrStdout(), "remote %q already set up\n", remote)
-				return nil
-			}
-			if exists, _ := e.RemoteExists(remote); exists {
-				_ = e.DeleteRemote(remote) // clear broken, token-less stanza before recreating
-			}
-			// PLAN-TIME VERIFY (spec §3): config/create với backend drive tự mở browser OAuth
-			// qua librclone in-process. Nếu librclone không trigger browser → fallback delegate
-			// `rclone authorize "drive"` rồi truyền token. Xác nhận lúc impl step này.
-			if err := e.CreateDriveRemote(remote, nil); err != nil {
-				return err
-			}
-			fmt.Fprintf(cmd.OutOrStdout(), "remote %q created\n", remote)
-			return nil
-		},
-	}
-	c.Flags().StringVar(&remote, "remote", "gdrive", "rclone remote name to create")
-	return c
+	return newAccountAddCmd("setup",
+		"Create the rclone Google Drive remote (opens browser for OAuth)",
+		"Create (or repair) an rclone Google Drive remote via `rclone config\n"+
+			"create`, which opens a browser for OAuth. Idempotent: a remote that is\n"+
+			"already configured with a valid token is left alone; a broken, token-less\n"+
+			"remote left behind by an interrupted setup is deleted and recreated.\n"+
+			"`better-drive account add` is the same command under its other name.",
+		"  better-drive setup\n"+
+			"  better-drive setup --remote gdrive-work")
 }
 
 func runCmd() *cobra.Command {
