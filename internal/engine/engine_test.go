@@ -499,6 +499,9 @@ func TestSyncDryRunPassesFlagToRclone(t *testing.T) {
 // run a REAL `rclone mkdir` against the remote (nor os.MkdirAll on the local
 // side) - the --resync setup step is a genuine write, so "no changes will be
 // made" must skip it, not just append --dry-run to the bisync argv itself.
+// The two flags must also both survive onto the bisync argv: this is what a
+// user previewing the `sync --resync` recovery path actually runs, and a
+// resync that quietly dropped --dry-run would rebuild the baseline for real.
 func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
 	path1 := filepath.Join(t.TempDir(), "not-yet-created")
 	var calls [][]string
@@ -510,10 +513,17 @@ func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var bisyncArgv []string
 	for _, argv := range calls {
 		if len(argv) > 0 && argv[0] == "mkdir" {
 			t.Fatalf("unexpected real `rclone mkdir` call under DryRun: %v", argv)
 		}
+		if len(argv) > 0 && argv[0] == "bisync" {
+			bisyncArgv = argv
+		}
+	}
+	if !containsArg(bisyncArgv, "--resync") || !containsArg(bisyncArgv, "--dry-run") {
+		t.Errorf("argv %v, want both --resync and --dry-run", bisyncArgv)
 	}
 	if _, statErr := os.Stat(path1); !os.IsNotExist(statErr) {
 		t.Errorf("Path1 %q was created on disk under DryRun, want left absent", path1)

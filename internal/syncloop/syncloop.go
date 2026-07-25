@@ -58,6 +58,7 @@ type Loop struct {
 	hasBaseline bool
 	running     bool
 	dryRun      bool
+	forceResync bool
 	onChange    func(State)
 	onResult    func(error)
 }
@@ -118,6 +119,24 @@ func (l *Loop) SetDryRun(v bool) {
 	l.mu.Unlock()
 }
 
+// SetForceResync makes the next (and subsequent) bisync cycles rebuild the
+// baseline via rclone's --resync even when listing files already exist in the
+// workdir. It backs the `sync` CLI command's --resync flag, which is the
+// escape hatch for listings that are present but unusable - they belong to a
+// different path1/path2 session, or rclone abandoned them mid-run - a state
+// rclone reports as ErrNeedsResync and that no amount of re-running fixes.
+//
+// It is deliberately a user-driven flag rather than an automatic reaction to
+// ErrNeedsResync: rclone bisync --resync does not propagate deletions, so an
+// automatic rebuild would resurrect files deleted while the daemon was off,
+// which is the same hazard baselineExists guards against. The continuous
+// daemon (`run`) therefore never sets it.
+func (l *Loop) SetForceResync(v bool) {
+	l.mu.Lock()
+	l.forceResync = v
+	l.mu.Unlock()
+}
+
 func (l *Loop) setState(st State) {
 	l.mu.Lock()
 	l.state = st
@@ -146,7 +165,9 @@ func (l *Loop) runOnce() (err error) {
 		return nil
 	}
 	l.running = true
-	resync := l.mode == "bisync" && !l.hasBaseline
+	// A bisync cycle resyncs when this pair has no baseline of its own yet, or
+	// when the caller explicitly asked for one to be rebuilt (SetForceResync).
+	resync := l.mode == "bisync" && (!l.hasBaseline || l.forceResync)
 	dryRun := l.dryRun
 	l.mu.Unlock()
 

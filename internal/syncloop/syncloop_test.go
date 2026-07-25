@@ -519,6 +519,85 @@ func TestDryRunFalseByDefault(t *testing.T) {
 	}
 }
 
+// TestSetForceResyncRebuildsAnExistingBaseline verifies SetForceResync(true)
+// asks for --resync even when the workdir already holds listing files, which
+// is the whole point of the `sync --resync` escape hatch: the listings can be
+// present and still be unusable (they belong to another path1/path2 session,
+// or rclone abandoned them mid-run), and that state is otherwise unrecoverable
+// without deleting the workdir by hand.
+func TestSetForceResyncRebuildsAnExistingBaseline(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "foo.lst"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeSyncer{}
+	l := New(f, "C:/x", "gdrive:x", workdir, "bisync", func() ([]string, error) { return nil, nil })
+	if !l.hasBaseline {
+		t.Fatal("fixture is wrong: the loop must start with a baseline for this test to mean anything")
+	}
+	l.SetForceResync(true)
+	l.runOnce()
+	if len(f.calls) != 1 || !f.calls[0].Resync {
+		t.Fatalf("calls=%+v, want exactly 1 call with Resync=true", f.calls)
+	}
+}
+
+// TestForceResyncKeepsDryRunNonDestructive verifies the two flags compose:
+// forcing a baseline rebuild under --dry-run must still preview only. Both
+// reach the Syncer, where engine.Bisync's own guard skips the real mkdir /
+// remote-mkdir that a resync would otherwise perform.
+func TestForceResyncKeepsDryRunNonDestructive(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	l.SetForceResync(true)
+	l.SetDryRun(true)
+	l.runOnce()
+	if len(f.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(f.calls))
+	}
+	if !f.calls[0].Resync || !f.calls[0].DryRun {
+		t.Errorf("params = %+v, want both Resync and DryRun true", f.calls[0])
+	}
+}
+
+// TestForceResyncIsOptIn verifies a Loop that never called SetForceResync
+// keeps its baseline behaviour: no resync once listings exist. An unconditional
+// resync would silently stop propagating deletions.
+func TestForceResyncIsOptIn(t *testing.T) {
+	workdir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(workdir, "foo.lst"), []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	f := &fakeSyncer{}
+	l := New(f, "C:/x", "gdrive:x", workdir, "bisync", func() ([]string, error) { return nil, nil })
+	l.runOnce()
+	if len(f.calls) != 1 || f.calls[0].Resync {
+		t.Fatalf("calls=%+v, want exactly 1 call with Resync=false", f.calls)
+	}
+}
+
+// TestNeedsResyncErrorDoesNotAutoResyncNextRun is the guard against "fixing"
+// a lost baseline by retrying with --resync automatically: rclone bisync
+// --resync does not propagate deletions, so an automatic rebuild would
+// resurrect files the user deleted while the daemon was off. Recovery stays
+// explicit (`better-drive sync --resync`), so a second cycle after
+// ErrNeedsResync must still ask for a plain, non-resync bisync.
+func TestNeedsResyncErrorDoesNotAutoResyncNextRun(t *testing.T) {
+	f := &fakeSyncer{err: engine.ErrNeedsResync}
+	l := newLoop(f)
+	l.hasBaseline = true // a baseline exists on disk; rclone just rejected it
+	l.runOnce()
+	l.runOnce()
+	if len(f.calls) != 2 {
+		t.Fatalf("calls=%d, want 2", len(f.calls))
+	}
+	for i, c := range f.calls {
+		if c.Resync {
+			t.Errorf("call %d resynced on its own; recovery must stay explicit", i)
+		}
+	}
+}
+
 // TestModeDefaultsToBisyncWhenEmpty verifies New("") behaves like
 // New("bisync") for backward compatibility (config.Load already defaults an
 // empty toml mode to "bisync", but Loop itself must be defensive too).

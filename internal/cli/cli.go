@@ -110,6 +110,32 @@ func remoteNotConfiguredErr(remoteName string) error {
 		fmt.Sprintf("run: better-drive setup --remote %s", remoteName))
 }
 
+// resyncCommand is the exact command that rebuilds a lost bisync baseline.
+// It is named in the failure's MESSAGE, not just in its remediation hint,
+// because RenderError prints a remediation only for a --format json caller: a
+// hint kept solely in that field never reaches a terminal user, who would then
+// be told the baseline is unusable without being told what to do about it.
+const resyncCommand = "better-drive sync --resync"
+
+// syncFailedErr reports that at least one pair failed. needsResync marks that
+// at least one of them failed with engine.ErrNeedsResync, i.e. rclone has no
+// usable baseline listing for that pair's session. That failure is not
+// transient - it repeats identically on every subsequent run - so it earns a
+// message and a remediation naming the command that rebuilds the baseline,
+// rather than the generic "re-run: better-drive sync" that would loop forever.
+// The rebuild stays an explicit user action because a --resync does not
+// propagate deletions and would resurrect anything deleted since the baseline
+// broke.
+func syncFailedErr(needsResync bool) error {
+	msg := "sync: one or more pairs failed"
+	hint := "see the FAILED line(s) on stderr above for per-pair detail (or the \"error\" field of each --format json result), then re-run: better-drive sync"
+	if needsResync {
+		msg += "; a bisync pair has no usable baseline - rebuild it with: " + resyncCommand
+		hint = "run: " + resyncCommand + " (rebuilds the bisync baseline; deletions made since it broke are not propagated)"
+	}
+	return exitcode.WithRemediation(exitcode.SyncFailed(errors.New(msg)), hint)
+}
+
 func installCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "install",
@@ -292,6 +318,7 @@ func statusCmd() *cobra.Command {
 func syncCmd() *cobra.Command {
 	var format string
 	var dryRun bool
+	var resync bool
 	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
@@ -299,9 +326,15 @@ func syncCmd() *cobra.Command {
 			"no ticker. A pair whose local path does not exist is SKIPPED (not a\n" +
 			"failure). Successful pairs are reported on stdout; SKIPPED and FAILED\n" +
 			"pairs go to stderr. Use --format json for machine-readable output and\n" +
-			"--dry-run to preview changes without applying them.",
+			"--dry-run to preview changes without applying them.\n\n" +
+			"--resync rebuilds the bisync baseline of every bisync-mode pair. It is\n" +
+			"the recovery path for a pair reporting that its baseline is missing or\n" +
+			"unusable. Use it only when that happens: a resync does NOT propagate\n" +
+			"deletions, so files deleted on one side since the baseline broke come\n" +
+			"back from the other. Combine it with --dry-run to preview first.",
 		Example: "  better-drive sync\n" +
 			"  better-drive sync --dry-run\n" +
+			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
@@ -314,12 +347,13 @@ func syncCmd() *cobra.Command {
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
 			defer e.Close()
-			_, err = runSyncOnce(cmd, e, cfg, format, dryRun)
+			_, err = runSyncOnce(cmd, e, cfg, format, dryRun, resync)
 			return err
 		},
 	}
 	output.AddFormatFlag(c, &format)
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without modifying anything")
+	c.Flags().BoolVar(&resync, "resync", false, "rebuild the bisync baseline of every bisync pair (recovery; does not propagate deletions)")
 	return c
 }
 
@@ -333,12 +367,17 @@ func syncCmd() *cobra.Command {
 // per-pair results (for callers/tests that need the outcome directly) and a
 // non-nil error if any pair failed. The Syncer is a parameter (rather than
 // constructed here) so tests can inject a fake instead of a real
-// engine.Engine, which would make a real Drive rc call.
-func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, format string, dryRun bool) ([]output.PairResult, error) {
+// engine.Engine, which would make a real Drive rc call. forceResync backs the
+// --resync flag; it applies to bisync-mode pairs only, the other modes keeping
+// no baseline to rebuild.
+func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, format string, dryRun, forceResync bool) ([]output.PairResult, error) {
 	if dryRun {
 		fmt.Fprintln(cmd.ErrOrStderr(), "dry-run: no changes will be made")
 	}
 	failed := false
+	// Whether any pair failed because rclone has no usable baseline for it,
+	// which changes what the aggregate failure tells the user to do next.
+	needsResync := false
 	results := make([]output.PairResult, 0, len(cfg.Pairs))
 	for _, p := range cfg.Pairs {
 		p := p
@@ -353,8 +392,10 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(p.Local, p.Remote), p.Mode,
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		loop.SetDryRun(dryRun)
+		loop.SetForceResync(forceResync)
 		if err := loop.RunOnce(); err != nil {
 			failed = true
+			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)
 			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
 			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "failed", Error: err.Error(), DryRun: dryRun})
 			continue
@@ -370,9 +411,7 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		}
 	}
 	if failed {
-		return results, exitcode.WithRemediation(
-			exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed")),
-			"see the FAILED line(s) on stderr above for per-pair detail (or the \"error\" field of each --format json result), then re-run: better-drive sync")
+		return results, syncFailedErr(needsResync)
 	}
 	return results, nil
 }
