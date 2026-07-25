@@ -121,6 +121,8 @@ exclude = ["node_modules/", ".venv/", "__pycache__/", ".git/"]
 - `copy`: 1-way, local -> remote. Nothing on remote is ever deleted (safe backup semantics — mirrors a no-delete `rclone copy` cron).
 - `sync`: 1-way, remote is made to exactly mirror local, including deleting anything on remote not present locally.
 
+Each pair's bisync baseline lives in its own workdir subdirectory, keyed by that pair's local and remote identity — reordering, adding, or removing `[[pair]]` blocks never disturbs another pair's baseline. If a bisync pair's baseline is missing or unusable, `sync` reports it as failed and names the fix: `better-drive sync --resync` rebuilds the baseline for every bisync-mode pair. This is a recovery command, not something to run routinely — a resync does not propagate deletions, so any file deleted on one side since the baseline broke reappears from the other side. Combine it with `--dry-run` to preview the rebuild first.
+
 ## .driveignore + config excludes
 
 Two ways to filter what a pair syncs, and they combine (gitignore syntax, both optional):
