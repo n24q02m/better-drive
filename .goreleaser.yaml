@@ -99,6 +99,13 @@ brews:
       name: goreleaser-bot
       email: bot@goreleaser.com
     commit_msg_template: "feat: bump better-drive to {{ .Tag }}"
+    # homebrew-tap is the stable channel: anyone running
+    # `brew install n24q02m/homebrew-tap/better-drive` expects the latest
+    # stable release, not a beta they never asked for. release.prerelease:
+    # auto above already keeps prerelease tags out of GitHub's "Latest" slot;
+    # skip_upload: auto applies that same policy one layer down, by skipping
+    # this formula bump whenever the current tag is a prerelease.
+    skip_upload: "auto"
 
 scoops:
   - repository:
@@ -116,6 +123,12 @@ scoops:
       name: goreleaser-bot
       email: bot@goreleaser.com
     commit_msg_template: "feat: bump better-drive to {{ .Tag }}"
+    # Same reasoning as the skip_upload above the brews entry: scoop-bucket is
+    # the stable channel for `scoop install better-drive`, so a prerelease
+    # build must never overwrite the manifest there. skip_upload: auto keeps
+    # this layer in step with release.prerelease: auto, so betas stay out of
+    # both the GitHub "Latest" slot and the scoop bucket.
+    skip_upload: "auto"
 
 sboms:
   - artifacts: archive
