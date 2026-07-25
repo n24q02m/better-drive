@@ -44,6 +44,30 @@ builds:
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
           - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      # The darwin tray needs fyne.io/systray's cgo implementation, so these
+      # two overrides turn cgo on for darwin only; every other goos/goarch
+      # combination stays on the CGO_ENABLED=0 base build above. The
+      # goreleaser host (macos-latest) is arm64, so darwin/amd64 needs an
+      # explicit cross-compiler; Go accepts a CC value carrying arguments.
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+        ldflags:
+          - -s -w
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=clang -arch x86_64
+        ldflags:
+          - -s -w
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
 
 archives:
   - id: default
