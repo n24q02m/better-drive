@@ -482,6 +482,148 @@ func TestAccountAdd_IsRegisteredUnderTheAccountGroup(t *testing.T) {
 	}
 }
 
+// removeFixture builds the shared starting point for the removal tests: one
+// configured account with a single pair pointing at it.
+func removeFixture() (*fakeAccountEngine, *config.Config) {
+	e := &fakeAccountEngine{
+		remotes:    []string{"gdrive"},
+		configured: map[string]bool{"gdrive": true},
+	}
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: "C:/pair0", Remote: "gdrive:Backups", Interval: time.Second, Mode: "bisync"},
+	}}
+	return e, cfg
+}
+
+// TestAccountRemove_RefusesWhenPairUsesIt verifies deleting an account a pair
+// still syncs against is refused rather than performed. Deleting the remote
+// would leave that pair permanently failing with an error naming a remote the
+// user can no longer see, so the guard names the pair instead.
+func TestAccountRemove_RefusesWhenPairUsesIt(t *testing.T) {
+	e, cfg := removeFixture()
+	cmd, _, _ := newAccountTestCmd()
+
+	err := runAccountRemove(cmd, e, cfg, "gdrive", false)
+	if err == nil {
+		t.Fatal("runAccountRemove error = nil, want a refusal")
+	}
+	if got := exitcode.Code(err); got != exitcode.ConfigErrorCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.ConfigErrorCode)
+	}
+	if len(e.deleted) != 0 {
+		t.Errorf("DeleteRemote called %v, want no call when the removal is refused", e.deleted)
+	}
+	hint := exitcode.RemediationOf(err)
+	if !strings.Contains(hint, "C:/pair0") {
+		t.Errorf("remediation = %q, want it to name the pair holding the account", hint)
+	}
+	if !strings.Contains(hint, "--force") {
+		t.Errorf("remediation = %q, want it to mention the --force override", hint)
+	}
+}
+
+// TestAccountRemove_ForceDeletesAnyway verifies --force is a real override:
+// the same situation that is refused above goes through when the user has
+// said they mean it.
+func TestAccountRemove_ForceDeletesAnyway(t *testing.T) {
+	e, cfg := removeFixture()
+	cmd, _, _ := newAccountTestCmd()
+
+	if err := runAccountRemove(cmd, e, cfg, "gdrive", true); err != nil {
+		t.Fatalf("runAccountRemove error = %v, want nil under --force", err)
+	}
+	if len(e.deleted) != 1 || e.deleted[0] != "gdrive" {
+		t.Errorf("deleted = %v, want exactly [gdrive]", e.deleted)
+	}
+}
+
+// TestAccountRemove_UnknownRemoteErrors verifies naming an account that does
+// not exist fails instead of reporting a removal that never happened - even
+// under --force, which overrides the pair guard and not reality.
+func TestAccountRemove_UnknownRemoteErrors(t *testing.T) {
+	for _, force := range []bool{false, true} {
+		e := &fakeAccountEngine{}
+		cmd, _, _ := newAccountTestCmd()
+
+		err := runAccountRemove(cmd, e, nil, "gdrive", force)
+		if err == nil {
+			t.Fatalf("force=%v: runAccountRemove error = nil, want an error for an unknown account", force)
+		}
+		if got := exitcode.Code(err); got != exitcode.ConfigErrorCode {
+			t.Errorf("force=%v: Code = %d, want %d", force, got, exitcode.ConfigErrorCode)
+		}
+		if len(e.deleted) != 0 {
+			t.Errorf("force=%v: DeleteRemote called %v, want no call", force, e.deleted)
+		}
+	}
+}
+
+// TestAccountRemove_SuccessMessageOnStdout verifies the success path reports
+// on stdout (it is a result, not a diagnostic) and calls through to rclone.
+func TestAccountRemove_SuccessMessageOnStdout(t *testing.T) {
+	e := &fakeAccountEngine{remotes: []string{"gdrive"}, configured: map[string]bool{"gdrive": true}}
+	cmd, out, errOut := newAccountTestCmd()
+
+	if err := runAccountRemove(cmd, e, nil, "gdrive", false); err != nil {
+		t.Fatalf("runAccountRemove error = %v", err)
+	}
+
+	if got, want := out.String(), "account \"gdrive\" removed\n"; got != want {
+		t.Errorf("stdout = %q, want %q", got, want)
+	}
+	if errOut.String() != "" {
+		t.Errorf("stderr = %q, want empty on success", errOut.String())
+	}
+	if len(e.deleted) != 1 || e.deleted[0] != "gdrive" {
+		t.Errorf("deleted = %v, want exactly [gdrive]", e.deleted)
+	}
+}
+
+// TestAccountRemove_ReportsDeleteFailure verifies a failing `rclone config
+// delete` surfaces instead of printing the success line anyway.
+func TestAccountRemove_ReportsDeleteFailure(t *testing.T) {
+	e := &fakeAccountEngine{
+		remotes:    []string{"gdrive"},
+		configured: map[string]bool{"gdrive": true},
+		deleteErr:  errors.New("config file is read-only"),
+	}
+	cmd, out, _ := newAccountTestCmd()
+
+	if err := runAccountRemove(cmd, e, nil, "gdrive", false); err == nil {
+		t.Fatal("runAccountRemove error = nil, want the delete failure surfaced")
+	}
+	if strings.Contains(out.String(), "removed") {
+		t.Errorf("stdout claims a removal that failed; got:\n%s", out.String())
+	}
+}
+
+// TestAccountRemoveCmd_TakesExactlyOneNameAndHasForce verifies the command is
+// wired to require the account name as a positional argument and to expose
+// --force, which the guard's remediation tells users to reach for.
+func TestAccountRemoveCmd_TakesExactlyOneNameAndHasForce(t *testing.T) {
+	var remove *cobra.Command
+	for _, sub := range accountCmd().Commands() {
+		if sub.Name() == "remove" {
+			remove = sub
+		}
+	}
+	if remove == nil {
+		t.Fatal("account command has no remove subcommand")
+	}
+	if remove.Flags().Lookup("force") == nil {
+		t.Error("account remove has no --force flag")
+	}
+	if remove.Args == nil {
+		t.Fatal("account remove accepts any number of args, want exactly one account name")
+	}
+	if err := remove.Args(remove, []string{}); err == nil {
+		t.Error("account remove accepted zero args, want exactly one account name")
+	}
+	if err := remove.Args(remove, []string{"a", "b"}); err == nil {
+		t.Error("account remove accepted two args, want exactly one account name")
+	}
+}
+
 // TestAccountList_BadFormatFlag_ErrorHasRemediation verifies an unknown
 // --format value is rejected with the same actionable hint status and sync
 // give, rather than silently falling back to the table format.

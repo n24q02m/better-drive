@@ -6,6 +6,7 @@ import (
 
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/spf13/cobra"
@@ -110,8 +111,71 @@ func accountCmd() *cobra.Command {
 			"  better-drive account add --remote gdrive-work\n" +
 			"  better-drive account remove gdrive-work",
 	}
-	c.AddCommand(accountListCmd(), accountAddCmd())
+	c.AddCommand(accountListCmd(), accountAddCmd(), accountRemoveCmd())
 	return c
+}
+
+func accountRemoveCmd() *cobra.Command {
+	var force bool
+	c := &cobra.Command{
+		Use:   "remove NAME",
+		Short: "Delete a Google Drive account's rclone remote",
+		Long: "Delete the rclone remote for a Google Drive account. Refused while any\n" +
+			"[[pair]] in config.toml still syncs against it, since removing it would\n" +
+			"leave that pair failing every cycle; the refusal names the pairs holding\n" +
+			"it. Pass --force to delete anyway. Local files are never touched - this\n" +
+			"only removes the stored credentials.",
+		Example: "  better-drive account remove gdrive-work\n" +
+			"  better-drive account remove gdrive-work --force",
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			cfg := loadConfigBestEffort()
+			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
+			defer e.Close()
+			return runAccountRemove(cmd, e, cfg, args[0], force)
+		},
+	}
+	c.Flags().BoolVar(&force, "force", false, "delete even while a configured pair still syncs against the account")
+	return c
+}
+
+// runAccountRemove is the remove command's body, taking its engine and config
+// as parameters for the same reason runAccountList does: the guard it
+// implements is the part worth testing, and it must be testable without a real
+// rclone config to delete from.
+func runAccountRemove(cmd *cobra.Command, e accountEngine, cfg *config.Config, name string, force bool) error {
+	names, err := e.ListDriveRemotes()
+	if err != nil {
+		return err
+	}
+	known := false
+	for _, n := range names {
+		if n == name {
+			known = true
+			break
+		}
+	}
+	// An account that is not there is reported rather than treated as an
+	// already-satisfied request: the user asked for a removal, and answering
+	// "done" would hide a typo in the name until the account they meant to
+	// delete turned up again in the next `account list`. --force does not
+	// apply here - it overrides the pair guard below, not reality.
+	if !known {
+		return exitcode.WithRemediation(
+			exitcode.ConfigError(fmt.Errorf("no Google Drive account named %q", name)),
+			"run: better-drive account list")
+	}
+	if pairs := pairsUsingRemote(cfg, name); len(pairs) > 0 && !force {
+		return exitcode.WithRemediation(
+			exitcode.ConfigError(fmt.Errorf("account %q is still used by %d configured pair(s)", name, len(pairs))),
+			fmt.Sprintf("edit %s to remove or repoint the [[pair]] block(s) for %s, or re-run with --force",
+				paths.ConfigFile(), strings.Join(pairs, ", ")))
+	}
+	if err := e.DeleteRemote(name); err != nil {
+		return err
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "account %q removed\n", name)
+	return nil
 }
 
 // accountAddCmd is `better-drive account add`, the account group's name for
