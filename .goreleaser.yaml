@@ -79,22 +79,20 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
-brews:
+homebrew_casks:
   - repository:
       owner: n24q02m
       name: homebrew-tap
       branch: main
       token: "{{ .Env.TAP_GITHUB_TOKEN }}"
-    directory: Formula
+    directory: Casks
     homepage: "https://github.com/n24q02m/better-drive"
     description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
     license: "MIT"
+    binaries:
+      - better-drive
     dependencies:
-      - name: rclone
-    install: |
-      bin.install "better-drive"
-    test: |
-      assert_match "better-drive version", shell_output("#{bin}/better-drive --version")
+      - formula: rclone
     commit_author:
       name: goreleaser-bot
       email: bot@goreleaser.com
@@ -104,7 +102,7 @@ brews:
     # stable release, not a beta they never asked for. release.prerelease:
     # auto above already keeps prerelease tags out of GitHub's "Latest" slot;
     # skip_upload: auto applies that same policy one layer down, by skipping
-    # this formula bump whenever the current tag is a prerelease.
+    # this cask bump whenever the current tag is a prerelease.
     skip_upload: "auto"
 
 scoops:
