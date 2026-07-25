@@ -74,7 +74,12 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("rclone listremotes: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	for _, line := range strings.Split(stdout, "\n") {
+	// Cut walks the output one line at a time instead of splitting it into a
+	// []string up front, so a single pass never materializes lines it won't
+	// need beyond the first match.
+	for stdout != "" {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
@@ -98,7 +103,9 @@ func (e *Engine) RemoteConfigured(name string) (bool, error) {
 	if err != nil {
 		return false, nil
 	}
-	for _, line := range strings.Split(stdout, "\n") {
+	for stdout != "" {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		key, value, found := strings.Cut(line, "=")
 		if !found {
 			continue
@@ -154,9 +161,10 @@ func (e *Engine) ListRemote(remotePath string) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("rclone lsf: %w: %s", err, strings.TrimSpace(stderr))
 	}
-	lines := strings.Split(stdout, "\n")
-	names := make([]string, 0, len(lines))
-	for _, line := range lines {
+	names := make([]string, 0, strings.Count(stdout, "\n"))
+	for stdout != "" {
+		var line string
+		line, stdout, _ = strings.Cut(stdout, "\n")
 		line = strings.TrimSpace(line)
 		if line == "" {
 			continue
