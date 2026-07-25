@@ -257,7 +257,7 @@ func (l *Loop) Resume() {
 }
 
 func (l *Loop) Start(ctx context.Context, interval time.Duration) {
-	l.runOnce()
+	_ = l.runOnce()
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -265,7 +265,7 @@ func (l *Loop) Start(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			l.runOnce()
+			_ = l.runOnce()
 		}
 	}
 }

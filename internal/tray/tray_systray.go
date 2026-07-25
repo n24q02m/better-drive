@@ -80,6 +80,7 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 
 func openFolder(path string) {
 	if runtime.GOOS == "windows" {
+		// #nosec G204 -- Path is sourced from trusted local configuration
 		_ = exec.Command("explorer", path).Start()
 	}
 }

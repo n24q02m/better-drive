@@ -15,6 +15,7 @@ type runner func(args ...string) (stdout string, stderr string, err error)
 // os/exec, capturing stdout and stderr into separate buffers.
 func execRunner(bin string) runner {
 	return func(args ...string) (string, string, error) {
+		// #nosec G204 -- Binary and arguments are strictly controlled by the application
 		cmd := exec.Command(bin, args...)
 		hideConsole(cmd) // Windows: no console window flash per rclone invocation
 		var stdout, stderr bytes.Buffer

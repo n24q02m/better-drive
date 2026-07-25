@@ -1,0 +1,23 @@
+--- internal/engine/engine.go
++++ internal/engine/engine.go
+@@ -407,10 +407,10 @@
+	path := f.Name()
+	cleanup = func() { os.Remove(path) }
+	if _, err := f.WriteString(strings.Join(filters, "\n") + "\n"); err != nil {
+-		f.Close()
++		_ = f.Close()
+		cleanup()
+		return nil, func() {}, err
+	}
+	if err := f.Close(); err != nil {
+		cleanup()
+--- internal/cli/cli.go
++++ internal/cli/cli.go
+@@ -263,7 +263,7 @@
+			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
+			e.Close() // safe to Finalize the engine now that no goroutine can touch it
+			if logFile != nil {
+-				logFile.Close()
++				_ = logFile.Close()
+			}
+			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray

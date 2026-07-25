@@ -27,6 +27,7 @@ func resolveFrom(explicit string, candidates []string) string {
 		return explicit
 	}
 	for _, c := range candidates {
+		// #nosec G703 -- Candidates are safely constructed system paths
 		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
 			return c
 		}
