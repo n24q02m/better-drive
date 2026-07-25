@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/n24q02m/better-drive/internal/cli"
@@ -10,8 +9,9 @@ import (
 
 func main() {
 	attachParentConsole()
-	if err := cli.Execute(); err != nil {
-		fmt.Fprintln(os.Stderr, "error:", err)
+	format, err := cli.Execute()
+	if err != nil {
+		cli.RenderError(os.Stderr, err, format)
 		os.Exit(exitcode.Code(err))
 	}
 }
