@@ -18,6 +18,10 @@ scoop install better-drive
 # macOS / Linux (Homebrew) — pulls rclone as a dependency
 brew install n24q02m/homebrew-tap/better-drive
 
+# Installed before 1.5.1? The tap now ships a cask instead of a formula
+# (goreleaser retired the formula generator). Reinstall once to switch:
+#   brew uninstall better-drive && brew install n24q02m/homebrew-tap/better-drive
+
 # or one-shot installer (Linux/macOS)
 curl -fsSL https://raw.githubusercontent.com/n24q02m/better-drive/main/install.sh | sh
 
