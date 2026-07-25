@@ -315,12 +315,36 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 
 	_, stderr, err := e.exec(argv...)
 	if err != nil {
-		if strings.Contains(strings.ToLower(stderr), "must run --resync") {
+		if needsResync(stderr) {
 			return BisyncResult{}, ErrNeedsResync
 		}
 		return BisyncResult{}, fmt.Errorf("rclone bisync: %w: %s", err, strings.TrimSpace(stderr))
 	}
 	return BisyncResult{}, nil
+}
+
+// needsResync reports whether rclone's stderr describes an abort that only a
+// --resync can clear. Two wordings mean the same thing, and both are matched
+// because which one appears depends on a flag Bisync itself always passes:
+//
+//   - "must run --resync" is rclone's own instruction, printed when it aborts
+//     WITHOUT --resilient.
+//   - "cannot find prior path1 or path2 listings" is the critical error raised
+//     when the baseline for this path1/path2 session is missing, and it is
+//     printed in both modes. Under --resilient - which every Bisync call here
+//     sets - rclone replaces the instruction above with "Bisync aborted. Error
+//     is retryable without --resync due to --resilient mode.", so matching the
+//     instruction alone would miss the lost-baseline case entirely.
+//
+// rclone calling that error "retryable" is not true for this particular
+// failure: the prior listings do not exist, so a plain retry reproduces it
+// byte for byte (verified end to end) until a --resync rebuilds them. Reporting
+// it as ErrNeedsResync is what lets the caller say so instead of printing a
+// raw rclone dump and repeating the identical failure on the next run.
+func needsResync(stderr string) bool {
+	s := strings.ToLower(stderr)
+	return strings.Contains(s, "must run --resync") ||
+		strings.Contains(s, "cannot find prior path1 or path2 listings")
 }
 
 // CopyParams configures a 1-way `rclone copy` or `rclone sync` call. Unlike

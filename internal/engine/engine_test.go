@@ -209,6 +209,27 @@ func TestBisyncNeedsResyncMappedFromStderr(t *testing.T) {
 	}
 }
 
+// TestBisyncNeedsResyncUnderResilientMode verifies the lost-baseline abort is
+// recognised even though --resilient suppresses rclone's "Must run --resync to
+// recover." instruction. The stderr below is the real output of rclone v1.74.2
+// for a pair whose listings are gone, reproduced end to end; because Bisync
+// always passes --resilient, this - not the instruction wording - is what
+// better-drive actually sees. rclone calls the error "retryable", but for this
+// particular error it is not: the prior listings do not exist, so every retry
+// fails identically until a --resync rebuilds them.
+func TestBisyncNeedsResyncUnderResilientMode(t *testing.T) {
+	const stderr = `ERROR : Bisync critical error: cannot find prior Path1 or Path2 listings, likely due to critical error on prior run
+ERROR : Bisync aborted. Error is retryable without --resync due to --resilient mode.
+NOTICE: Failed to bisync: bisync aborted`
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", stderr, errors.New("exit status 7")
+	})
+	_, err := e.Bisync(BisyncParams{Path1: "a", Path2: "b", Workdir: t.TempDir()})
+	if !errors.Is(err, ErrNeedsResync) {
+		t.Fatalf("want ErrNeedsResync, got %v", err)
+	}
+}
+
 // TestRemoteExists verifies RemoteExists parses `rclone listremotes` output
 // (one "name:" per line) and matches by name with the trailing colon stripped.
 func TestRemoteExists(t *testing.T) {
