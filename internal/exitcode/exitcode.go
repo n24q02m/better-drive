@@ -47,3 +47,37 @@ func Code(err error) int {
 	}
 	return GenericError
 }
+
+// remediated wraps an error with a one-line, copy-pasteable fix hint (e.g.
+// "run: better-drive setup --remote gdrive"). Kept as a separate wrapper
+// (rather than a field on coded) so a hint can be attached independently of
+// -- and in either order around -- the exit-code classification: Code and
+// RemediationOf each unwrap past the other via errors.As.
+type remediated struct {
+	err  error
+	hint string
+}
+
+func (r *remediated) Error() string { return r.err.Error() }
+func (r *remediated) Unwrap() error { return r.err }
+
+// WithRemediation attaches hint to err, to be surfaced by a --format json
+// caller (see cli.RenderError) as the "remediation" field. Returns err
+// unchanged if err is nil or hint is empty, so a bare error never renders a
+// useless empty hint.
+func WithRemediation(err error, hint string) error {
+	if err == nil || hint == "" {
+		return err
+	}
+	return &remediated{err: err, hint: hint}
+}
+
+// RemediationOf returns the hint attached to err via WithRemediation, or ""
+// if none was attached.
+func RemediationOf(err error) string {
+	var r *remediated
+	if errors.As(err, &r) {
+		return r.hint
+	}
+	return ""
+}

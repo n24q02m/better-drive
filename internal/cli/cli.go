@@ -21,17 +21,93 @@ import (
 	"github.com/spf13/cobra"
 )
 
-func Execute() error { return newRootCmd().Execute() }
+// Execute runs the CLI against the real process args and reports the
+// resolved --format alongside the error, so main can render a failure (see
+// RenderError) in the format the user asked for instead of always printing
+// plain text.
+func Execute() (string, error) { return execute(nil) }
+
+// execute is Execute's args-injectable body: nil means "use the real
+// os.Args[1:]" (cobra's own default, for the production binary); a non-nil
+// (possibly empty) slice pins the args explicitly, which is what tests use -
+// SetArgs(nil) would instead leak the test binary's own -test.* flags into
+// pflag (see the SetArgs([]string{}) comment on
+// TestStatusCmd_TableFormatUnchanged for the same hazard one layer down).
+//
+// The format is read off whichever command actually ran (cmd, returned by
+// ExecuteC), not a shared package variable: only status/sync register a
+// local --format flag, so cmd.Flags().Lookup("format") returns nil - and
+// this defaults to the table format - for every other command (and for an
+// unrecognized subcommand, where cmd resolves to the root command itself).
+func execute(args []string) (string, error) {
+	root := newRootCmd()
+	if args != nil {
+		root.SetArgs(args)
+	}
+	cmd, err := root.ExecuteC()
+	format := output.FormatTable
+	if cmd != nil {
+		if f := cmd.Flags().Lookup("format"); f != nil {
+			format = f.Value.String()
+		}
+	}
+	return format, err
+}
 
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "better-drive",
 		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
 		Version: version.Version,
+		// cli.RenderError (via Execute) owns error rendering now, in whatever
+		// format the caller asked for - cobra's own default "Error: ..." +
+		// Usage: auto-print on a failing RunE must not also fire, or a
+		// --format json caller would get that plain text ahead of (or
+		// instead of) the JSON envelope.
+		SilenceErrors: true,
+		SilenceUsage:  true,
 	}
 	root.AddCommand(setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
+}
+
+// loadConfig reads and validates config.toml (the same two-step Load +
+// Validate that run/status/sync all did inline), wrapping either failure as
+// an exitcode.ConfigError with a remediation hint that names the resolved
+// config path - so all three commands report the same actionable hint
+// instead of each carrying its own copy of the wrapping.
+func loadConfig() (*config.Config, error) {
+	path := paths.ConfigFile()
+	cfg, err := config.Load(path)
+	if err != nil {
+		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
+			fmt.Sprintf("create or fix %s (TOML syntax) - see README for the [[pair]] schema", path))
+	}
+	if err := cfg.Validate(); err != nil {
+		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
+			fmt.Sprintf("edit %s and fix the pair(s) reported above", path))
+	}
+	return cfg, nil
+}
+
+// badFormatErr wraps an invalid --format value (output.Validate's error) as
+// an exitcode.ConfigError with a remediation hint, shared by status and sync
+// - the two commands with a --format flag.
+func badFormatErr(err error) error {
+	return exitcode.WithRemediation(exitcode.ConfigError(err),
+		fmt.Sprintf("use --format %s or --format %s", output.FormatTable, output.FormatJSON))
+}
+
+// remoteNotConfiguredErr reports remoteName as missing or token-less, with a
+// remediation hint that is the exact command to fix it. Extracted out of
+// runCmd's RunE (its only call site) so it can be unit-tested without a real
+// engine.Engine/rclone binary - the same reasoning runSyncOnce's doc comment
+// gives for taking a syncloop.Syncer parameter instead of constructing one.
+func remoteNotConfiguredErr(remoteName string) error {
+	err := fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName)
+	return exitcode.WithRemediation(exitcode.RemoteNotConfiguredError(err),
+		fmt.Sprintf("run: better-drive setup --remote %s", remoteName))
 }
 
 func installCmd() *cobra.Command {
@@ -130,12 +206,9 @@ func runCmd() *cobra.Command {
 			"by a pair must already be set up (`better-drive setup`).",
 		Example: "  better-drive run",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := config.Load(paths.ConfigFile())
+			cfg, err := loadConfig()
 			if err != nil {
-				return exitcode.ConfigError(err)
-			}
-			if err := cfg.Validate(); err != nil {
-				return exitcode.ConfigError(err)
+				return err
 			}
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
@@ -143,7 +216,7 @@ func runCmd() *cobra.Command {
 				remoteName, _, _ := strings.Cut(p.Remote, ":")
 				if configured, _ := e.RemoteConfigured(remoteName); !configured {
 					e.Close()
-					return exitcode.RemoteNotConfiguredError(fmt.Errorf("remote %q is not set up; run: better-drive setup", remoteName))
+					return remoteNotConfiguredErr(remoteName)
 				}
 			}
 
@@ -218,14 +291,11 @@ func statusCmd() *cobra.Command {
 			"  better-drive status --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
-				return exitcode.ConfigError(err)
+				return badFormatErr(err)
 			}
-			cfg, err := config.Load(paths.ConfigFile())
+			cfg, err := loadConfig()
 			if err != nil {
-				return exitcode.ConfigError(err)
-			}
-			if err := cfg.Validate(); err != nil {
-				return exitcode.ConfigError(err)
+				return err
 			}
 			if format == output.FormatJSON {
 				pairs := make([]output.PairStatus, 0, len(cfg.Pairs))
@@ -266,14 +336,11 @@ func syncCmd() *cobra.Command {
 			"  better-drive sync --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
-				return exitcode.ConfigError(err)
+				return badFormatErr(err)
 			}
-			cfg, err := config.Load(paths.ConfigFile())
+			cfg, err := loadConfig()
 			if err != nil {
-				return exitcode.ConfigError(err)
-			}
-			if err := cfg.Validate(); err != nil {
-				return exitcode.ConfigError(err)
+				return err
 			}
 
 			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
@@ -334,7 +401,9 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		}
 	}
 	if failed {
-		return results, exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed"))
+		return results, exitcode.WithRemediation(
+			exitcode.SyncFailed(fmt.Errorf("sync: one or more pairs failed")),
+			"see the FAILED line(s) on stderr above for per-pair detail (or the \"error\" field of each --format json result), then re-run: better-drive sync")
 	}
 	return results, nil
 }

@@ -13,6 +13,7 @@ import (
 
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/spf13/cobra"
 )
@@ -179,6 +180,194 @@ func TestStatusCmd_JSONFormat(t *testing.T) {
 	}
 	if got[0].Local == "" {
 		t.Error("want a non-empty Local field")
+	}
+}
+
+// TestStatusCmd_BadConfigTOML_ErrorHasRemediation verifies an unparseable
+// config.toml fails with a ConfigError (code 2) carrying a remediation hint
+// that names the resolved config path, so a --format json caller gets an
+// actionable "remediation" field instead of just the raw decode error.
+func TestStatusCmd_BadConfigTOML_ErrorHasRemediation(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte("not valid toml [["), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", cfgPath)
+
+	cmd := statusCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	// statusCmd() alone (not the full newRootCmd() tree) has no SilenceErrors
+	// of its own - that's set once on root in newRootCmd() - so without
+	// capturing stderr here, cobra's own default error print would leak onto
+	// this test process's real stderr instead of just returning err.
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for unparseable config.toml")
+	}
+	if got := exitcode.Code(err); got != exitcode.ConfigErrorCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.ConfigErrorCode)
+	}
+	hint := exitcode.RemediationOf(err)
+	if hint == "" {
+		t.Fatal("want a non-empty remediation hint")
+	}
+	if !strings.Contains(hint, cfgPath) {
+		t.Errorf("remediation %q does not mention the config path %q", hint, cfgPath)
+	}
+}
+
+// TestSyncCmd_InvalidConfig_ErrorHasRemediation verifies cfg.Validate()
+// failures (e.g. 0 pairs) also carry a remediation hint pointing at the
+// config path, mirroring the config.Load failure case above.
+func TestSyncCmd_InvalidConfig_ErrorHasRemediation(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	if err := os.WriteFile(cfgPath, []byte(""), 0o600); err != nil { // 0 pairs
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", cfgPath)
+
+	cmd := syncCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{}) // see the matching comment in the statusCmd test above
+	cmd.SetArgs([]string{})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error: config has 0 pairs")
+	}
+	if got := exitcode.Code(err); got != exitcode.ConfigErrorCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.ConfigErrorCode)
+	}
+	if hint := exitcode.RemediationOf(err); hint == "" || !strings.Contains(hint, cfgPath) {
+		t.Errorf("remediation = %q, want a hint mentioning %q", hint, cfgPath)
+	}
+}
+
+// TestStatusCmd_BadFormatFlag_ErrorHasRemediation and its sync counterpart
+// verify an unknown --format value fails with a remediation hint naming the
+// two accepted values, so a caller doesn't have to guess.
+func TestStatusCmd_BadFormatFlag_ErrorHasRemediation(t *testing.T) {
+	statusFixtureConfig(t)
+	cmd := statusCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{}) // see the matching comment in TestStatusCmd_BadConfigTOML_ErrorHasRemediation
+	cmd.SetArgs([]string{"--format", "yaml"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for unknown --format value")
+	}
+	hint := exitcode.RemediationOf(err)
+	if !strings.Contains(hint, "table") || !strings.Contains(hint, "json") {
+		t.Errorf("remediation = %q, want it to mention both table and json", hint)
+	}
+}
+
+func TestSyncCmd_BadFormatFlag_ErrorHasRemediation(t *testing.T) {
+	statusFixtureConfig(t)
+	cmd := syncCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--format", "yaml"})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error for unknown --format value")
+	}
+	hint := exitcode.RemediationOf(err)
+	if !strings.Contains(hint, "table") || !strings.Contains(hint, "json") {
+		t.Errorf("remediation = %q, want it to mention both table and json", hint)
+	}
+}
+
+// TestRemoteNotConfiguredErr verifies the helper behind runCmd's
+// remote-configured gate: code 3, and a remediation hint that is the exact
+// command to fix it (not just a description) -- extracted to a pure function
+// so this doesn't need a real engine.Engine/rclone binary to test, the same
+// reasoning runSyncOnce documents for its own Syncer injection.
+func TestRemoteNotConfiguredErr(t *testing.T) {
+	err := remoteNotConfiguredErr("gdrive-work")
+	if got := exitcode.Code(err); got != exitcode.RemoteNotConfigured {
+		t.Errorf("Code = %d, want %d", got, exitcode.RemoteNotConfigured)
+	}
+	if !strings.Contains(err.Error(), "gdrive-work") {
+		t.Errorf("Error() = %q, want it to mention the remote name", err.Error())
+	}
+	if want := "run: better-drive setup --remote gdrive-work"; exitcode.RemediationOf(err) != want {
+		t.Errorf("remediation = %q, want %q", exitcode.RemediationOf(err), want)
+	}
+}
+
+// TestRunSyncOnce_SyncFailedErrorHasRemediation verifies the error
+// runSyncOnce returns when a pair fails carries a remediation hint (not just
+// the bare "one or more pairs failed" message).
+func TestRunSyncOnce_SyncFailedErrorHasRemediation(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "copy"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
+	if err == nil {
+		t.Fatal("want non-nil error")
+	}
+	if got := exitcode.Code(err); got != exitcode.SyncFailedCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.SyncFailedCode)
+	}
+	if exitcode.RemediationOf(err) == "" {
+		t.Error("want a non-empty remediation hint")
+	}
+}
+
+// TestNewRootCmd_SilencesCobraDefaultErrorOutput verifies the root command
+// disables cobra's own "Error: ..." + Usage auto-print on a failing RunE, so
+// cli.RenderError (via Execute) is the ONLY thing that writes to stderr on
+// failure -- otherwise a --format json caller would see cobra's plain-text
+// "Error: ..." + a full Usage: block ahead of (or instead of) the JSON
+// envelope, exactly as reproduced manually before this change:
+// `better-drive status --format json` with a bad config printed cobra's
+// "Error: ..." + Usage, THEN main.go's own "error: ..." line - never JSON.
+func TestNewRootCmd_SilencesCobraDefaultErrorOutput(t *testing.T) {
+	root := newRootCmd()
+	if !root.SilenceErrors {
+		t.Error("SilenceErrors = false, want true")
+	}
+	if !root.SilenceUsage {
+		t.Error("SilenceUsage = false, want true")
+	}
+}
+
+// TestExecute_ReadsFormatOffTheCommandThatRan verifies execute() (the
+// unexported, args-injectable body behind Execute()) returns the --format
+// value actually parsed for the subcommand that ran, using a controlled args
+// slice rather than SetArgs(nil) -- see the os.Args[1:] hazard noted on
+// TestStatusCmd_TableFormatUnchanged's SetArgs([]string{}) comment above:
+// bare os.Args[1:] under `go test` carries -test.* flags that pflag would
+// choke on.
+func TestExecute_ReadsFormatOffTheCommandThatRan(t *testing.T) {
+	statusFixtureConfig(t)
+	format, err := execute([]string{"status", "--format", "json"})
+	if err != nil {
+		t.Fatalf("execute: %v", err)
+	}
+	if format != output.FormatJSON {
+		t.Errorf("format = %q, want %q", format, output.FormatJSON)
+	}
+}
+
+// TestExecute_FormatDefaultsToTableWithoutAFormatFlag verifies a command with
+// no --format flag at all (or one that never resolved to a real subcommand)
+// reports "table" rather than leaving format empty, since RenderError treats
+// anything other than "json" as the table format.
+func TestExecute_FormatDefaultsToTableWithoutAFormatFlag(t *testing.T) {
+	format, err := execute([]string{"not-a-real-subcommand"})
+	if err == nil {
+		t.Fatal("want an error for an unknown subcommand")
+	}
+	if format != output.FormatTable {
+		t.Errorf("format = %q, want %q", format, output.FormatTable)
 	}
 }
 
