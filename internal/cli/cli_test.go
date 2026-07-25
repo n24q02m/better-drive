@@ -15,6 +15,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/engine"
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
+	"github.com/n24q02m/better-drive/internal/paths"
 	"github.com/spf13/cobra"
 )
 
@@ -309,7 +310,7 @@ func TestRunSyncOnce_SyncFailedErrorHasRemediation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
 	if err == nil {
 		t.Fatal("want non-nil error")
 	}
@@ -411,7 +412,7 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -439,7 +440,7 @@ func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -463,7 +464,7 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -473,6 +474,47 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Status != "ok" || results[1].Status != "ok" {
 		t.Errorf("results = %#v, want 2 ok results", results)
+	}
+}
+
+// TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder verifies each pair
+// keeps its own bisync workdir when the [[pair]] blocks are reordered. This is
+// the regression test for a pair that syncs once and then fails forever:
+// workdirs used to be keyed by a pair's index in the config, so swapping two
+// blocks (or inserting/deleting one) pointed a pair at another pair's baseline
+// listings - which rclone rejects with "must run --resync", while the loop, in
+// turn, saw *.lst files present and never asked for one.
+func TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder(t *testing.T) {
+	a := config.Pair{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"}
+	b := config.Pair{Local: t.TempDir(), Remote: "gdrive:b", Interval: time.Second, Mode: "bisync"}
+
+	// workdirs runs one full sync pass over pairs (in the given order) and
+	// reports the workdir each pair's Bisync call received, keyed by remote.
+	workdirs := func(pairs ...config.Pair) map[string]string {
+		t.Helper()
+		s := &fakeCLISyncer{}
+		cmd := &cobra.Command{}
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		if _, err := runSyncOnce(cmd, s, &config.Config{Pairs: pairs}, output.FormatTable, false, false); err != nil {
+			t.Fatalf("runSyncOnce: %v", err)
+		}
+		got := make(map[string]string, len(s.bisyncParams))
+		for _, p := range s.bisyncParams {
+			got[p.Path2] = p.Workdir
+		}
+		return got
+	}
+
+	inOrder := workdirs(a, b)
+	swapped := workdirs(b, a)
+	for _, remote := range []string{"gdrive:a", "gdrive:b"} {
+		if inOrder[remote] != swapped[remote] {
+			t.Errorf("pair %s changed workdir when the config was reordered: %q -> %q", remote, inOrder[remote], swapped[remote])
+		}
+	}
+	if inOrder["gdrive:a"] == inOrder["gdrive:b"] {
+		t.Errorf("both pairs share workdir %q; per-pair baselines would corrupt each other", inOrder["gdrive:a"])
 	}
 }
 
@@ -489,7 +531,7 @@ func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, false, false)
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -523,7 +565,7 @@ func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false)
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -535,6 +577,129 @@ func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
 	}
 	if len(results) != 1 || !results[0].DryRun {
 		t.Errorf("results = %+v, want DryRun=true", results)
+	}
+}
+
+// TestRunSyncOnce_ResyncForcesABaselineRebuild verifies the --resync flag
+// reaches every bisync pair as BisyncParams.Resync, so a user whose baseline
+// was lost or replaced can rebuild it from the CLI instead of deleting the
+// workdir by hand.
+func TestRunSyncOnce_ResyncForcesABaselineRebuild(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, true); err != nil {
+		t.Fatalf("runSyncOnce err = %v, want nil", err)
+	}
+	if len(s.bisyncParams) != 1 || !s.bisyncParams[0].Resync {
+		t.Fatalf("bisyncParams = %+v, want exactly 1 call with Resync=true", s.bisyncParams)
+	}
+}
+
+// TestRunSyncOnce_ResyncWithDryRunWritesNothing verifies the two flags compose
+// rather than cancel: both reach the Syncer, and the CLI layer itself creates
+// nothing on disk - not even the pair's workdir, which a real resync would
+// otherwise populate with a fresh baseline. (engine.Bisync's own guard on the
+// resync mkdir/ensureRemoteDir step is pinned by
+// TestBisyncResyncDryRunSkipsRealMkdir.)
+func TestRunSyncOnce_ResyncWithDryRunWritesNothing(t *testing.T) {
+	local := t.TempDir() // unique per run, so the pair's workdir cannot pre-exist
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: local, Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, true); err != nil {
+		t.Fatalf("runSyncOnce err = %v, want nil", err)
+	}
+	if len(s.bisyncParams) != 1 {
+		t.Fatalf("bisyncParams = %+v, want exactly 1 call", s.bisyncParams)
+	}
+	if !s.bisyncParams[0].Resync || !s.bisyncParams[0].DryRun {
+		t.Errorf("params = %+v, want both Resync and DryRun true", s.bisyncParams[0])
+	}
+	if _, err := os.Stat(paths.PairWorkdir(local, "gdrive:a")); !os.IsNotExist(err) {
+		t.Errorf("workdir %q exists after a dry-run resync, want nothing written", paths.PairWorkdir(local, "gdrive:a"))
+	}
+}
+
+// TestRunSyncOnce_NeedsResyncFailureNamesTheRecoveryCommand verifies a pair
+// that fails with engine.ErrNeedsResync produces an error naming
+// `better-drive sync --resync`. The command has to be in the error MESSAGE,
+// not only in the remediation field: RenderError prints a remediation for a
+// --format json caller only, so a terminal user would otherwise be told the
+// baseline is lost and never told how to rebuild it - and the pair would fail
+// identically on every subsequent run.
+func TestRunSyncOnce_NeedsResyncFailureNamesTheRecoveryCommand(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:stuck", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:stuck": engine.ErrNeedsResync}}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	if err == nil {
+		t.Fatal("want non-nil error when a pair needs a resync")
+	}
+	const want = "better-drive sync --resync"
+	if !strings.Contains(err.Error(), want) {
+		t.Errorf("error message = %q, want it to name %q", err.Error(), want)
+	}
+	if hint := exitcode.RemediationOf(err); !strings.Contains(hint, want) {
+		t.Errorf("remediation = %q, want it to name %q", hint, want)
+	}
+	if got := exitcode.Code(err); got != exitcode.SyncFailedCode {
+		t.Errorf("Code = %d, want %d", got, exitcode.SyncFailedCode)
+	}
+}
+
+// TestRunSyncOnce_OrdinaryFailureKeepsItsOwnRemediation verifies the resync
+// hint is specific to the lost-baseline failure: an ordinary pair failure must
+// keep pointing at the per-pair diagnostics instead of telling the user to
+// rebuild a baseline that is not the problem (and whose rebuild does not
+// propagate deletions).
+func TestRunSyncOnce_OrdinaryFailureKeepsItsOwnRemediation(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "bisync"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	if err == nil {
+		t.Fatal("want non-nil error when a pair fails")
+	}
+	if strings.Contains(err.Error(), "--resync") || strings.Contains(exitcode.RemediationOf(err), "--resync") {
+		t.Errorf("a generic failure must not advise a resync; error = %q, remediation = %q", err.Error(), exitcode.RemediationOf(err))
+	}
+}
+
+// TestSyncCmd_HasResyncFlag verifies the `sync` command registers --resync
+// (defaulting to false, so a plain `sync` keeps honouring existing baselines
+// and therefore keeps propagating deletions).
+func TestSyncCmd_HasResyncFlag(t *testing.T) {
+	c := syncCmd()
+	f := c.Flags().Lookup("resync")
+	if f == nil {
+		t.Fatal("sync command has no --resync flag")
+	}
+	if f.DefValue != "false" {
+		t.Errorf("--resync default = %q, want %q", f.DefValue, "false")
+	}
+	if f.Usage == "" {
+		t.Error("--resync needs a usage string: it is the documented recovery path for a lost baseline")
 	}
 }
 

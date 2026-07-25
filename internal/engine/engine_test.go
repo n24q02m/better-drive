@@ -209,6 +209,27 @@ func TestBisyncNeedsResyncMappedFromStderr(t *testing.T) {
 	}
 }
 
+// TestBisyncNeedsResyncUnderResilientMode verifies the lost-baseline abort is
+// recognised even though --resilient suppresses rclone's "Must run --resync to
+// recover." instruction. The stderr below is the real output of rclone v1.74.2
+// for a pair whose listings are gone, reproduced end to end; because Bisync
+// always passes --resilient, this - not the instruction wording - is what
+// better-drive actually sees. rclone calls the error "retryable", but for this
+// particular error it is not: the prior listings do not exist, so every retry
+// fails identically until a --resync rebuilds them.
+func TestBisyncNeedsResyncUnderResilientMode(t *testing.T) {
+	const stderr = `ERROR : Bisync critical error: cannot find prior Path1 or Path2 listings, likely due to critical error on prior run
+ERROR : Bisync aborted. Error is retryable without --resync due to --resilient mode.
+NOTICE: Failed to bisync: bisync aborted`
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", stderr, errors.New("exit status 7")
+	})
+	_, err := e.Bisync(BisyncParams{Path1: "a", Path2: "b", Workdir: t.TempDir()})
+	if !errors.Is(err, ErrNeedsResync) {
+		t.Fatalf("want ErrNeedsResync, got %v", err)
+	}
+}
+
 // TestRemoteExists verifies RemoteExists parses `rclone listremotes` output
 // (one "name:" per line) and matches by name with the trailing colon stripped.
 func TestRemoteExists(t *testing.T) {
@@ -499,6 +520,9 @@ func TestSyncDryRunPassesFlagToRclone(t *testing.T) {
 // run a REAL `rclone mkdir` against the remote (nor os.MkdirAll on the local
 // side) - the --resync setup step is a genuine write, so "no changes will be
 // made" must skip it, not just append --dry-run to the bisync argv itself.
+// The two flags must also both survive onto the bisync argv: this is what a
+// user previewing the `sync --resync` recovery path actually runs, and a
+// resync that quietly dropped --dry-run would rebuild the baseline for real.
 func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
 	path1 := filepath.Join(t.TempDir(), "not-yet-created")
 	var calls [][]string
@@ -510,10 +534,17 @@ func TestBisyncResyncDryRunSkipsRealMkdir(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	var bisyncArgv []string
 	for _, argv := range calls {
 		if len(argv) > 0 && argv[0] == "mkdir" {
 			t.Fatalf("unexpected real `rclone mkdir` call under DryRun: %v", argv)
 		}
+		if len(argv) > 0 && argv[0] == "bisync" {
+			bisyncArgv = argv
+		}
+	}
+	if !containsArg(bisyncArgv, "--resync") || !containsArg(bisyncArgv, "--dry-run") {
+		t.Errorf("argv %v, want both --resync and --dry-run", bisyncArgv)
 	}
 	if _, statErr := os.Stat(path1); !os.IsNotExist(statErr) {
 		t.Errorf("Path1 %q was created on disk under DryRun, want left absent", path1)
