@@ -1,0 +1,3 @@
+## 2024-07-25 - Double-Allocation Anti-Pattern in Go String Generation
+**Learning:** Using `strings.Join(slice, "\n") + "\n"` is an anti-pattern that causes a hidden double allocation: Go allocates the first large string for the Join result, then immediately allocates a second string to append the final newline, creating unnecessary garbage collection overhead when writing temporary files (like rclone filters) frequently.
+**Action:** Use `strings.Builder`. First calculate the exact required capacity (sum of string lengths + number of strings), pre-allocate it with `b.Grow()`, then write the strings and newlines to avoid any intermediate string allocations or dynamic buffer resizing.
