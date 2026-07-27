@@ -2,6 +2,36 @@
 
 [![CI](https://github.com/n24q02m/better-drive/actions/workflows/ci.yml/badge.svg)](https://github.com/n24q02m/better-drive/actions/workflows/ci.yml)
 
+<!-- BEGIN: AUTO-GENERATED-CROSS-PROMO -->
+<details>
+  <summary><strong>Sister projects from n24q02m</strong> (click to expand)</summary>
+
+| Project | Tagline | Tag |
+|---|---|---|
+| [agent-chat-plugin](https://github.com/n24q02m/agent-chat-plugin) | Peer AI agents chat in a shared folder — no human relay, no orchestrator, wor... | Tooling |
+| [better-code-review-graph](https://github.com/n24q02m/better-code-review-graph) | Knowledge graph for token-efficient code reviews -- semantic search and call-... | MCP |
+| [better-drive](https://github.com/n24q02m/better-drive) | 2-way Google Drive sync with .driveignore filter — rclone engine, Windows tray | Tooling |
+| [better-email-mcp](https://github.com/n24q02m/better-email-mcp) | IMAP/SMTP email for AI agents -- read, send, organize folders, and manage att... | MCP |
+| [better-godot-mcp](https://github.com/n24q02m/better-godot-mcp) | Composite MCP server for Godot Engine -- 17 composite tools for AI-assisted g... | MCP |
+| [better-notion-mcp](https://github.com/n24q02m/better-notion-mcp) | Markdown-first Notion for AI agents -- pages, databases, blocks, and comments... | MCP |
+| [better-semantic-release](https://github.com/n24q02m/better-semantic-release) | Drop-in python-semantic-release fork with built-in release-safety guards (orp... | Tooling |
+| [better-telegram-mcp](https://github.com/n24q02m/better-telegram-mcp) | Telegram for AI agents -- messages, chats, media, and contacts across both bo... | MCP |
+| [better-workspace-mcp](https://github.com/n24q02m/better-workspace-mcp) | Google Workspace MCP server (Docs/Drive/Calendar/Gmail/Sheets/Slides/Tasks/Ch... | MCP |
+| [claude-plugins](https://github.com/n24q02m/claude-plugins) | Claude Code plugin marketplace for the n24q02m MCP servers -- install web sea... | Marketplace |
+| [imagine-mcp](https://github.com/n24q02m/imagine-mcp) | Image and video understanding + generation for AI agents -- across Gemini, Op... | MCP |
+| [jules-task-archiver](https://github.com/n24q02m/jules-task-archiver) | Chrome Extension for bulk operations on Jules tasks via batchexecute API -- a... | Tooling |
+| [mcp-core](https://github.com/n24q02m/mcp-core) | Shared foundation for building MCP servers -- Streamable HTTP transport, OAut... | MCP |
+| [mnemo-mcp](https://github.com/n24q02m/mnemo-mcp) | Persistent AI memory with hybrid search and embedded sync. Open, free, unlimi... | MCP |
+| [qwen3-embed](https://github.com/n24q02m/qwen3-embed) | Lightweight Qwen3 text embedding and reranking via ONNX Runtime and GGUF | Library |
+| [skret](https://github.com/n24q02m/skret) | Secrets without the server. | CLI |
+| [tacet](https://github.com/n24q02m/tacet) | A self-distilling neuro-symbolic cascade that amortises LLM cost across knowl... | Tooling |
+| [web-core](https://github.com/n24q02m/web-core) | Shared web infrastructure package for search, scraping, HTTP security, and st... | Library |
+| [wet-mcp](https://github.com/n24q02m/wet-mcp) | Open-source MCP server for AI agents: web search, content extraction, and lib... | MCP |
+
+</details>
+<!-- END: AUTO-GENERATED-CROSS-PROMO -->
+
+
 Cross-platform Google Drive sync — bisync (2-way), copy, or sync (1-way mirror) per pair, with `.driveignore` filters and config-level excludes. A thin, lean wrapper around the [rclone](https://rclone.org) binary: better-drive owns the ergonomics (`.driveignore`, multi-pair config, a system-tray daemon, per-OS autostart) and shells out to your installed `rclone` for the actual transfers. Supports multiple independent `[[pair]]` blocks in one config (e.g. syncing/backing up several unrelated folders under one daemon).
 
 Runs on Windows, Linux, and macOS. The binary is small (~4 MB) and requires `rclone` on `PATH` (installed automatically by the scoop/brew packages below).
