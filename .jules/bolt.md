@@ -1,0 +1,3 @@
+## 2024-07-27 - Pre-allocate slice when mapping data and avoid string allocations on byte lookups
+**Learning:** In high volume mapping functions (like `TranslateIgnoreLines`), creating new slices through `append()` can cause repeated hidden allocations. Similarly, using `strings.HasPrefix(string, "!")` creates additional function calls and string slices when a simple byte lookup `string[0] == '!'` can avoid that overhead entirely.
+**Action:** Always pre-allocate slices with `make([]T, 0, len(input))` when mapping 1:1 or 1:N data. Use zero-allocation byte indexing instead of `strings.HasPrefix` for single-character checks on strings.
