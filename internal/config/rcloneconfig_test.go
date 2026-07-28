@@ -7,7 +7,8 @@ import (
 )
 
 func TestResolveRcloneConfigExplicitWins(t *testing.T) {
-	if got := ResolveRcloneConfig("X:/custom.conf"); got != "X:/custom.conf" {
+	expected := filepath.Clean("X:/custom.conf")
+	if got := ResolveRcloneConfig("X:/custom.conf"); got != expected {
 		t.Fatalf("explicit path must win, got %q", got)
 	}
 }
