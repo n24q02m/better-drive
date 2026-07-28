@@ -24,11 +24,12 @@ func ResolveRcloneConfig(explicit string) string {
 
 func resolveFrom(explicit string, candidates []string) string {
 	if explicit != "" {
-		return explicit
+		return filepath.Clean(explicit)
 	}
 	for _, c := range candidates {
-		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
-			return c
+		cleanPath := filepath.Clean(c)
+		if fi, err := os.Stat(cleanPath); err == nil && !fi.IsDir() {
+			return cleanPath
 		}
 	}
 	return ""

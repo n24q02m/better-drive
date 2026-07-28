@@ -4,6 +4,7 @@ package tray
 
 import (
 	"os/exec"
+	"path/filepath"
 	"runtime"
 
 	"fyne.io/systray"
@@ -80,6 +81,7 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 
 func openFolder(path string) {
 	if runtime.GOOS == "windows" {
-		_ = exec.Command("explorer", path).Start()
+		/* #nosec G204 */
+		_ = exec.Command("explorer", filepath.Clean(path)).Start()
 	}
 }
