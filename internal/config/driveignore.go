@@ -48,14 +48,19 @@ func readDriveIgnoreLines(localRoot string) ([]string, error) {
 // reversed as a whole after translation so later negations (which must win
 // under gitignore semantics) are checked before the rules they negate.
 func TranslateIgnoreLines(lines []string) []string {
-	var out []string
+	if lines == nil {
+		return nil
+	}
+	// Performance optimization: Pre-allocate slice capacity to prevent hidden re-allocations during append()
+	out := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
+		// Performance optimization: Use zero-allocation byte indexing instead of strings.HasPrefix for single-character checks
+		if line == "" || line[0] == '#' {
 			continue
 		}
 		sign := "- "
-		if strings.HasPrefix(line, "!") {
+		if line[0] == '!' {
 			sign = "+ "
 			line = line[1:]
 		}
@@ -75,6 +80,9 @@ func TranslateDriveIgnore(localRoot string) ([]string, error) {
 	if err != nil {
 		return nil, err
 	}
+	if lines == nil {
+		return nil, nil
+	}
 	return TranslateIgnoreLines(lines), nil
 }
 
@@ -89,6 +97,9 @@ func PairFilters(localRoot string, exclude []string) ([]string, error) {
 	fileLines, err := readDriveIgnoreLines(localRoot)
 	if err != nil {
 		return nil, err
+	}
+	if len(exclude) == 0 && fileLines == nil {
+		return nil, nil
 	}
 	lines := make([]string, 0, len(exclude)+len(fileLines))
 	lines = append(lines, exclude...)
