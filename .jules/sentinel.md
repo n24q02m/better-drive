@@ -9,3 +9,7 @@
 **Learning:** `os.OpenRoot` was introduced in Go 1.24 to provide a secure, scoped file system handle. When you need to read files within a specific directory context and want to guarantee that accesses cannot escape that context (e.g., via `..` or symlinks), `os.OpenRoot` is the correct defense-in-depth approach compared to manually resolving and validating paths.
 
 **Prevention:** Use `root, err := os.OpenRoot(baseDir)` followed by `root.Open(file)` instead of `os.Open(filepath.Join(baseDir, file))` for safely handling user-controlled or potentially untrusted file/directory structures.
+## 2026-07-29 - Prevent Command Injection via Subprocess with Variables
+**Vulnerability:** External input or variables passed to `exec.Command` can be risky if unvalidated (CWE-78 / Gosec G204). While Go natively resists shell injection when arguments are split, passing unsanitized file paths to GUI commands like `explorer` is a path traversal and logic risk.
+**Learning:** Always sanitize inputs meant for sub-processes, even in thick clients or GUI trays. `filepath.Clean` provides essential defense-in-depth against crafted paths traversing out of bounds.
+**Prevention:** Always wrap external inputs via `filepath.Clean()` before execution. For known-safe binaries, document the intentional use via a `/* #nosec G204 */` linter suppression comment to differentiate them from actual unvalidated risk points.
