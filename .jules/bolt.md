@@ -1,0 +1,3 @@
+## 2024-07-30 - Prevent hidden re-allocations in string slices
+**Learning:** `TranslateIgnoreLines` was dynamically appending to a string slice without pre-allocating the length, causing hidden re-allocations during `append()`. Using `strings.HasPrefix` for single-character checks also adds slight unnecessary overhead compared to zero-allocation byte indexing (e.g., `line[0] == '#'` when `line != ""`).
+**Action:** When working with slices whose maximum size can be bounded by the input, always pre-allocate with `make([]T, 0, len(input))` to prevent re-allocations. Use byte indexing for single-character checks if the string is guaranteed to be non-empty.
