@@ -1,0 +1,3 @@
+## 2025-02-23 - Optimize Single Character Parsing
+**Learning:** `strings.HasPrefix` allocates and consumes unnecessary cycles for single-character prefix checks. Similarly, appending to unallocated slices dynamically allocates and resizes arrays, burning cycles.
+**Action:** Use byte indexing (e.g., `str[0] == '#'`) for single-character matching. Always ensure `str != ""` before indexing to avoid out of bounds panic. Pre-allocate slice capacity `make([]T, 0, len(items))` whenever the maximum upper bounds of elements are known. Ensure zero length inputs explicitly return `nil` if returning `nil` is a required behavior.
