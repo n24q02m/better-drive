@@ -214,4 +214,4 @@ error: --non-interactive needs --token or --service-account-file; get a token by
 
 ## License
 
-MIT.
+Apache-2.0.

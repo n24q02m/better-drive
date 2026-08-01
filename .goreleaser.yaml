@@ -88,7 +88,7 @@ homebrew_casks:
     directory: Casks
     homepage: "https://github.com/n24q02m/better-drive"
     description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
-    license: "MIT"
+    license: "Apache-2.0"
     binaries:
       - better-drive
     dependencies:
@@ -114,7 +114,7 @@ scoops:
     directory: bucket
     homepage: "https://github.com/n24q02m/better-drive"
     description: "2-way Google Drive sync with .driveignore filter (rclone engine, Windows tray)"
-    license: MIT
+    license: Apache-2.0
     depends:
       - rclone
     commit_author:
