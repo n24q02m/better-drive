@@ -263,7 +263,9 @@ func runCmd() *cobra.Command {
 			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
 			e.Close() // safe to Finalize the engine now that no goroutine can touch it
 			if logFile != nil {
-				logFile.Close()
+				if closeErr := logFile.Close(); closeErr != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not close log file: %v\n", closeErr)
+				}
 			}
 			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
 			// right before Quit races with cancel()/wg.Wait() above (SyncNow spawns its own
