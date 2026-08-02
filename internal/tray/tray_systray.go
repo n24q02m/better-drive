@@ -37,15 +37,20 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	agg.OnChange(func(st syncloop.State) {
 		systray.SetTooltip("better-drive - " + st.String())
 		mStatus.SetTitle("Status: " + st.String())
+		mStatus.SetTooltip("Current synchronization status: " + st.String())
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
+			mPause.SetTooltip("Resume scheduled syncs for all pairs")
 		} else {
 			mPause.SetTitle("Pause")
+			mPause.SetTooltip("Pause scheduled syncs for all pairs")
 		}
 		if st == syncloop.StateSyncing {
 			mSync.Disable()
+			mSync.SetTooltip("Sync is currently in progress")
 		} else {
 			mSync.Enable()
+			mSync.SetTooltip("Trigger a sync immediately for all pairs")
 		}
 	})
 
