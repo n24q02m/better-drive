@@ -1,0 +1,3 @@
+## 2024-08-03 - Optimizing Slice Allocations and String Prefix Checks
+**Learning:** In Go, dynamically appending to a slice without pre-allocating its capacity can cause hidden re-allocations and overhead. Additionally, `strings.HasPrefix(s, "x")` is noticeably slower than zero-allocation byte indexing (`s[0] == 'x'`) for single-character checks (after ensuring the string isn't empty).
+**Action:** Always consider `make([]T, 0, len(input))` to pre-allocate slice capacities when the output size is known or bounded. Use zero-allocation byte indexing (`string[0] == '#'`) instead of `strings.HasPrefix` for single-character checks, making sure to verify the string is not empty (`string != ""`) beforehand to prevent out-of-bounds panics.
