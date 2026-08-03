@@ -9,3 +9,7 @@
 **Learning:** `os.OpenRoot` was introduced in Go 1.24 to provide a secure, scoped file system handle. When you need to read files within a specific directory context and want to guarantee that accesses cannot escape that context (e.g., via `..` or symlinks), `os.OpenRoot` is the correct defense-in-depth approach compared to manually resolving and validating paths.
 
 **Prevention:** Use `root, err := os.OpenRoot(baseDir)` followed by `root.Open(file)` instead of `os.Open(filepath.Join(baseDir, file))` for safely handling user-controlled or potentially untrusted file/directory structures.
+## 2026-08-03 - Systemd Unit File Injection in Linux Autostart
+**Vulnerability:** Command splitting and path injection vulnerability in Linux autostart systemd unit file generation due to unescaped executable path formatting.
+**Learning:** `fmt.Sprintf` with `%s` leaves the resulting string open to injection if the string comes from a variable containing special characters, particularly in systemd unit files which evaluate `%` as variables and spaces as argument delimiters.
+**Prevention:** Use `%q` in `fmt.Sprintf` to safely quote paths for executable commands in config files (like systemd's `ExecStart`) and manually escape any characters that have special meaning to the configuration format itself (e.g. replacing `%` with `%%` for systemd).
