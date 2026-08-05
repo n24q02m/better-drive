@@ -1,0 +1,3 @@
+## 2024-05-24 - Zero-allocation string checks and slice capacity pre-allocation
+**Learning:** Using `strings.HasPrefix` for single-character checks adds unnecessary overhead. Zero-allocation byte indexing (`string[0] == '#'`) is significantly faster. Also, failing to pre-allocate slice capacities when the target size is known causes hidden re-allocations during `append()`.
+**Action:** Always pre-allocate slices using `make([]T, 0, len(input))` when mapping collections, handling empty inputs early. Prefer byte indexing over `strings.HasPrefix` for single-character checks, ensuring string emptiness is verified first.
