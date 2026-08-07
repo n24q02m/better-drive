@@ -1,0 +1,3 @@
+## 2025-02-24 - Pre-allocating slices and zero-allocation indexing
+**Learning:** Hidden re-allocations during `append()` can be avoided by pre-allocating slice capacities based on the input size (`make([]T, 0, len(input))`). Furthermore, using `strings.HasPrefix` for single-character checks incurs function call overhead; zero-allocation byte indexing (`string[0] == '#'`) is measurably faster, provided empty strings are checked first to prevent panics.
+**Action:** Always pre-allocate slices when the maximum size is known, handling empty inputs early. Replace single-character `HasPrefix` checks with byte indexing on non-empty strings.
