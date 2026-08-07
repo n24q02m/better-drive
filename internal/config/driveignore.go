@@ -48,14 +48,17 @@ func readDriveIgnoreLines(localRoot string) ([]string, error) {
 // reversed as a whole after translation so later negations (which must win
 // under gitignore semantics) are checked before the rules they negate.
 func TranslateIgnoreLines(lines []string) []string {
-	var out []string
+	if len(lines) == 0 {
+		return nil
+	}
+	out := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		if line == "" || strings.HasPrefix(line, "#") {
+		if line == "" || line[0] == '#' {
 			continue
 		}
 		sign := "- "
-		if strings.HasPrefix(line, "!") {
+		if line[0] == '!' {
 			sign = "+ "
 			line = line[1:]
 		}
