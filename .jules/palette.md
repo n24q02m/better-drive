@@ -1,3 +1,3 @@
-## 2024-05-24 - Dynamic System Tray Feedback
-**Learning:** In desktop background applications without a main window, the system tray icon tooltip is a critical, low-friction surface for providing state visibility. Users shouldn't need to open a menu just to see if a sync is active. Furthermore, action items like "Sync now" should reflect current state (e.g., being disabled during a sync) to prevent confusion and duplicate actions.
-**Action:** Always bind tray icon tooltips and menu item enabled/disabled states to the application's core state aggregator to provide immediate, passive feedback and prevent impossible actions.
+## 2024-05-23 - Dynamic Tooltips in Systray Menus
+**Learning:** When menu items dynamically change title (e.g. Pause -> Resume) or state (e.g. Disabled), their initial tooltips can become inaccurate or confusing for screen readers and users, breaking context.
+**Action:** Always update a menu item's tooltip (`SetTooltip`) alongside dynamic changes to its title or disabled state to preserve context and ensure accessibility.
