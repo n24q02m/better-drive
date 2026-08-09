@@ -9,3 +9,7 @@
 **Learning:** `os.OpenRoot` was introduced in Go 1.24 to provide a secure, scoped file system handle. When you need to read files within a specific directory context and want to guarantee that accesses cannot escape that context (e.g., via `..` or symlinks), `os.OpenRoot` is the correct defense-in-depth approach compared to manually resolving and validating paths.
 
 **Prevention:** Use `root, err := os.OpenRoot(baseDir)` followed by `root.Open(file)` instead of `os.Open(filepath.Join(baseDir, file))` for safely handling user-controlled or potentially untrusted file/directory structures.
+## 2026-08-09 - Prevent Systemd Unit File Injection
+**Vulnerability:** When generating `~/.config/systemd/user/better-drive.service`, the executable path was formatted into the template using `%s` without escaping systemd specifiers (`%`) or variables (`$`), and without quoting. This could allow command splitting or injection if the path contains malicious characters.
+**Learning:** Systemd unit files have their own syntax rules. Any user-controlled or dynamically generated string inserted into a unit file must escape systemd's special characters (`%` -> `%%`, `$` -> `$$`) and be properly quoted, just like preventing shell injection.
+**Prevention:** Always use `strings.ReplaceAll` to escape `%` and `$` before formatting strings into systemd unit templates, and use Go's `%q` format verb (or literal double quotes) to ensure the path is safely enclosed.
