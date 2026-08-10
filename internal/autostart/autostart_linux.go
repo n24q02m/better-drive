@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 )
 
 const serviceName = "better-drive.service"
@@ -19,7 +20,7 @@ const unitTemplate = `[Unit]
 Description=better-drive sync daemon
 
 [Service]
-ExecStart=%s run
+ExecStart=%q run
 Restart=on-failure
 
 [Install]
@@ -42,6 +43,10 @@ func Enable(exePath string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
+
+	exePath = strings.ReplaceAll(exePath, "%", "%%")
+	exePath = strings.ReplaceAll(exePath, "$", "$$")
+
 	unit := fmt.Sprintf(unitTemplate, exePath)
 	if err := os.WriteFile(path, []byte(unit), 0o600); err != nil {
 		return err
