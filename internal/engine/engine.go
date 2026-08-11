@@ -408,7 +408,21 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 	}
 	path := f.Name()
 	cleanup = func() { os.Remove(path) }
-	if _, err := f.WriteString(strings.Join(filters, "\n") + "\n"); err != nil {
+
+	// Pre-allocate exact capacity for all strings plus their trailing newlines
+	// to avoid hidden double allocations from strings.Join(...) + "\n"
+	capacity := len(filters) // for newlines
+	for _, filter := range filters {
+		capacity += len(filter)
+	}
+	var sb strings.Builder
+	sb.Grow(capacity)
+	for _, filter := range filters {
+		sb.WriteString(filter)
+		sb.WriteByte('\n')
+	}
+
+	if _, err := f.WriteString(sb.String()); err != nil {
 		if closeErr := f.Close(); closeErr != nil {
 			err = fmt.Errorf("write error: %w, close error: %v", err, closeErr)
 		}
