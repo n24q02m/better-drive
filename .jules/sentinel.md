@@ -13,3 +13,12 @@
 **Vulnerability:** External input or variables passed to `exec.Command` can be risky if unvalidated (CWE-78 / Gosec G204). While Go natively resists shell injection when arguments are split, passing unsanitized file paths to GUI commands like `explorer` is a path traversal and logic risk.
 **Learning:** Always sanitize inputs meant for sub-processes, even in thick clients or GUI trays. `filepath.Clean` provides essential defense-in-depth against crafted paths traversing out of bounds.
 **Prevention:** Always wrap external inputs via `filepath.Clean()` before execution. For known-safe binaries, document the intentional use via a `/* #nosec G204 */` linter suppression comment to differentiate them from actual unvalidated risk points.
+## 2026-08-07 - Secure Path Resolution with os.OpenRoot
+**Vulnerability:** Path traversal (CWE-22) flagged by gosec due to taint analysis on os.Getenv("APPDATA") when checking file existence using os.Stat(filepath.Join(...)).
+**Learning:** Combining tainted environment variables with filepath.Join and os.Stat is vulnerable to path traversal. filepath.Clean() is merely lexical and doesn't enforce strict boundaries.
+**Prevention:** Use Go 1.24+ os.OpenRoot() to safely scope filesystem access to the expected root directory, and call root.Stat() on the resulting handle to prevent escapes.
+
+## 2026-08-10 - Prevent Systemd Command Injection
+**Vulnerability:** Unescaped executable paths in systemd unit templates allowed command splitting via spaces and variable/specifier injection via `%` and `$`.
+**Learning:** Systemd expands variables and specifiers (like `%h` or `$USER`) in `ExecStart`. If a path contains these characters, it can alter the execution context or run arbitrary commands. Additionally, unquoted paths with spaces cause systemd to split arguments incorrectly.
+**Prevention:** Always escape `%` to `%%` and `$` to `$$` in user-controlled or variable paths inserted into systemd units, and use double quotes (or `%q` in Go) to prevent command splitting.
