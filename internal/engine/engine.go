@@ -409,7 +409,9 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 	path := f.Name()
 	cleanup = func() { os.Remove(path) }
 	if _, err := f.WriteString(strings.Join(filters, "\n") + "\n"); err != nil {
-		f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			err = fmt.Errorf("write error: %w, close error: %v", err, closeErr)
+		}
 		cleanup()
 		return nil, func() {}, err
 	}
