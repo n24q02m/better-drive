@@ -49,6 +49,9 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 		if st == syncloop.StateSyncing {
 			mSync.Disable()
 			mSync.SetTooltip("Sync is currently in progress")
+		} else if st == syncloop.StatePaused {
+			mSync.Disable()
+			mSync.SetTooltip("Cannot sync while paused")
 		} else {
 			mSync.Enable()
 			mSync.SetTooltip("Trigger a sync immediately for all pairs")
