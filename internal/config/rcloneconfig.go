@@ -32,10 +32,10 @@ func ResolveRcloneConfig(explicit string) string {
 	for _, c := range candidates {
 		if root, err := os.OpenRoot(c.root); err == nil {
 			if fi, err := root.Stat(c.path); err == nil && !fi.IsDir() {
-				root.Close()
+				_ = root.Close() // #nosec G104 -- read-only directory handle, close error is unactionable and benign.
 				return filepath.Join(c.root, filepath.FromSlash(c.path))
 			}
-			root.Close()
+			_ = root.Close() // #nosec G104 -- read-only directory handle, close error is unactionable and benign.
 		}
 	}
 	return ""
