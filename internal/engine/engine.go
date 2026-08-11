@@ -423,7 +423,9 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 	}
 
 	if _, err := f.WriteString(sb.String()); err != nil {
-		f.Close()
+		if closeErr := f.Close(); closeErr != nil {
+			err = fmt.Errorf("write error: %w, close error: %v", err, closeErr)
+		}
 		cleanup()
 		return nil, func() {}, err
 	}
