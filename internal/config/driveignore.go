@@ -66,6 +66,9 @@ func TranslateIgnoreLines(lines []string) []string {
 		}
 		out = append(out, sign+toRclonePattern(line))
 	}
+	if len(out) == 0 {
+		return nil
+	}
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}

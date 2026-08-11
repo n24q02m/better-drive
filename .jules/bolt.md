@@ -1,3 +1,7 @@
+## 2024-05-24 - Pre-allocating slices and zero-allocation string parsing in Go
+**Learning:** When generating configuration strings or parsing rules, avoid `strings.HasPrefix` for single-character checks because it invokes a function call and can have overhead. Additionally, hidden allocations inside loops like `append()` can cause performance bottlenecks.
+**Action:** Use zero-allocation byte indexing (e.g., `string[0] == '#'`) instead of `strings.HasPrefix` for single-character checks, always ensuring you check for an empty string first (`string != ""`). Pre-allocate slice capacities (e.g., `make([]T, 0, len(input))`) to prevent hidden re-allocations during `append()`. Always ensure you explicitly handle nil/empty inputs first (e.g., `if len(input) == 0 { return nil }`).
+
 ## 2025-02-26 - Pre-allocate strings.Builder for Slice Joining with Trailing Separators
 **Learning:** Using `strings.Join(slice, sep) + sep` results in a hidden double allocation: `Join` allocates its own string, and the subsequent `+` operator allocates a new string to append the final separator. This is particularly wasteful when generating large configurations or filter lists.
 **Action:** Replace `strings.Join(slice, sep) + sep` with a `strings.Builder`. Calculate the exact needed capacity first (`len(slice) * len(sep)` + sum of all string lengths), call `Grow(capacity)`, and iterate over the slice calling `WriteString` and `WriteByte`/`WriteString` for the separator.
