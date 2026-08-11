@@ -39,6 +39,13 @@ func TestTranslateDriveIgnoreMissingFile(t *testing.T) {
 	}
 }
 
+func TestTranslateIgnoreLinesReturnsNilForIgnoredOnlyInput(t *testing.T) {
+	got := TranslateIgnoreLines([]string{"# comment", "", "   "})
+	if got != nil {
+		t.Fatalf("ignored-only input = %#v, want nil", got)
+	}
+}
+
 func TestTranslateDriveIgnoreAnchoring(t *testing.T) {
 	root := t.TempDir()
 	body := "a/b\nfoo/bar/\n"

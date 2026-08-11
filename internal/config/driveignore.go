@@ -51,12 +51,11 @@ func TranslateIgnoreLines(lines []string) []string {
 	if len(lines) == 0 {
 		return nil
 	}
-
-	// Pre-allocate to prevent hidden re-allocations during append()
+	// Pre-allocate capacity based on input to prevent reallocation during append.
 	out := make([]string, 0, len(lines))
 	for _, raw := range lines {
 		line := strings.TrimSpace(raw)
-		// Use zero-allocation byte indexing instead of strings.HasPrefix for single characters
+		// Use byte indexing for single-character prefix checks.
 		if line == "" || line[0] == '#' {
 			continue
 		}
@@ -67,11 +66,9 @@ func TranslateIgnoreLines(lines []string) []string {
 		}
 		out = append(out, sign+toRclonePattern(line))
 	}
-
 	if len(out) == 0 {
 		return nil
 	}
-
 	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
 		out[i], out[j] = out[j], out[i]
 	}
