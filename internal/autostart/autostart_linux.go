@@ -27,6 +27,12 @@ Restart=on-failure
 WantedBy=default.target
 `
 
+func escapeSystemd(s string) string {
+	s = strings.ReplaceAll(s, "%", "%%")
+	s = strings.ReplaceAll(s, "$", "$$")
+	return s
+}
+
 func unitPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -44,10 +50,7 @@ func Enable(exePath string) error {
 		return err
 	}
 
-	exePath = strings.ReplaceAll(exePath, "%", "%%")
-	exePath = strings.ReplaceAll(exePath, "$", "$$")
-
-	unit := fmt.Sprintf(unitTemplate, exePath)
+	unit := fmt.Sprintf(unitTemplate, escapeSystemd(exePath))
 	if err := os.WriteFile(path, []byte(unit), 0o600); err != nil {
 		return err
 	}
