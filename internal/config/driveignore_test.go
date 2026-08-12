@@ -46,6 +46,23 @@ func TestTranslateIgnoreLinesReturnsNilForIgnoredOnlyInput(t *testing.T) {
 	}
 }
 
+func FuzzTranslateIgnoreLines(f *testing.F) {
+	f.Add("")
+	f.Add("# comment\nnode_modules/\n!keep.tmp\n/build")
+	f.Fuzz(func(t *testing.T, input string) {
+		lines := strings.Split(input, "\n")
+		got := TranslateIgnoreLines(lines)
+		if len(got) > len(lines) {
+			t.Fatalf("translated %d rules from %d input lines", len(got), len(lines))
+		}
+		for i, rule := range got {
+			if !strings.HasPrefix(rule, "- ") && !strings.HasPrefix(rule, "+ ") {
+				t.Fatalf("rule %d = %q has no rclone include/exclude prefix", i, rule)
+			}
+		}
+	})
+}
+
 func TestTranslateDriveIgnoreAnchoring(t *testing.T) {
 	root := t.TempDir()
 	body := "a/b\nfoo/bar/\n"
