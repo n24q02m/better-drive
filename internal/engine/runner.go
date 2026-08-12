@@ -48,6 +48,12 @@ func execStreamRunner(bin string) streamRunner {
 		hideConsole(cmd) // Windows: no console window flash per rclone invocation
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
-		return cmd.Run()
+		err := cmd.Run()
+		if err != nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return ctxErr
+			}
+		}
+		return err
 	}
 }

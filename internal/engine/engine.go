@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -240,6 +239,43 @@ type MountParams struct {
 	Stdout, Stderr     io.Writer
 }
 
+const mountStderrTailLimit = 64 * 1024
+
+// mountStderrWriter forwards stderr live while retaining only its bounded
+// tail for the error returned by Mount. Capture happens before forwarding so
+// remediation evidence survives even when the caller's terminal writer fails.
+type mountStderrWriter struct {
+	live io.Writer
+	tail []byte
+}
+
+func newMountStderrWriter(live io.Writer) *mountStderrWriter {
+	return &mountStderrWriter{
+		live: live,
+		tail: make([]byte, 0, mountStderrTailLimit),
+	}
+}
+
+func (w *mountStderrWriter) Write(p []byte) (int, error) {
+	w.retain(p)
+	return w.live.Write(p)
+}
+
+func (w *mountStderrWriter) retain(p []byte) {
+	if len(p) >= mountStderrTailLimit {
+		w.tail = w.tail[:mountStderrTailLimit]
+		copy(w.tail, p[len(p)-mountStderrTailLimit:])
+		return
+	}
+	if overflow := len(w.tail) + len(p) - mountStderrTailLimit; overflow > 0 {
+		copy(w.tail, w.tail[overflow:])
+		w.tail = w.tail[:len(w.tail)-overflow]
+	}
+	w.tail = append(w.tail, p...)
+}
+
+func (w *mountStderrWriter) String() string { return string(w.tail) }
+
 // About reports a remote's storage quota via `rclone about <name>: --json`.
 // Quota is the only account-level fact obtainable for a Drive remote: the
 // Drive backend does not implement `config userinfo`: it reports that the
@@ -265,7 +301,8 @@ func (e *Engine) About(name string) (Quota, error) {
 // `--vfs-cache-mode full` default, optionally adding `--read-only`. Unlike
 // sync operations it intentionally does not hold syncMu: a long-lived mount
 // must not block independent copy/sync/bisync cycles. stderr is streamed to
-// the caller live and also retained in the returned error for remediation.
+// the caller live and its last 64 KiB are retained in the returned error for
+// remediation.
 func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 	stdout := p.Stdout
 	if stdout == nil {
@@ -286,9 +323,8 @@ func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 		argv = append(argv, "--read-only")
 	}
 
-	var stderr bytes.Buffer
-	teeStderr := io.MultiWriter(stderrOut, &stderr)
-	if err := e.streamExec(ctx, stdout, teeStderr, argv...); err != nil {
+	stderr := newMountStderrWriter(stderrOut)
+	if err := e.streamExec(ctx, stdout, stderr, argv...); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
 			return fmt.Errorf("rclone mount: %w", err)
