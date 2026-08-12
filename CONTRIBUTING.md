@@ -13,7 +13,17 @@ cd better-drive
 go build ./...
 ```
 
-No other setup step is required: there is no mise/pre-commit config in this repo, just the Go toolchain.
+The repository includes optional `mise` tasks and pre-commit hooks. If those
+tools are installed, initialize them with:
+
+```bash
+mise install
+pre-commit install
+pre-commit install --hook-type commit-msg
+```
+
+The equivalent build and test shortcuts are `mise run build` and
+`mise run test`.
 
 ## Running tests
 
@@ -31,9 +41,11 @@ go tool cover -func=coverage.out | tail -1
 ## Running the linter
 
 ```bash
-gofmt -l .        # lists any file not gofmt-formatted; fix with: gofmt -w .
+python scripts/check_gofmt.py
 go vet ./...
 ```
+
+To format a changed Go file, run `gofmt -w <changed-go-files>` explicitly.
 
 ## Commit convention
 

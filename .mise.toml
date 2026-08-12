@@ -1,0 +1,14 @@
+[tools]
+go = "1.26.5"
+
+[tasks.build]
+description = "Build all packages"
+run = "go build ./..."
+
+[tasks.test]
+description = "Run the test suite"
+run = "go test ./..."
+
+[tasks.verify]
+description = "Run the local verification checks"
+run = ["python scripts/check_gofmt.py", "go vet ./...", "go test ./..."]

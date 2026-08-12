@@ -1,0 +1,74 @@
+name: Bot PR Governance
+
+on:
+  pull_request:
+    types:
+      - opened
+      - reopened
+
+permissions:
+  pull-requests: write
+  contents: read
+
+jobs:
+  governance:
+    name: Bot PR rate limit and duplicate check
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    steps:
+      - name: Detect and govern bot PRs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ github.head_ref }}
+          ACTOR: ${{ github.actor }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          bot_branch_regex='^(bolt[-/]|palette[-/]|palette-ux-|fix/web-scraper-|jules[-/]|sentinel[-/]|renovate[-/])|-[0-9]{14,}$'
+          if ! printf '%s\n' "$BRANCH" | grep -qE "$bot_branch_regex"; then
+            echo "Not a governed bot PR ($BRANCH), skipping governance checks."
+            exit 0
+          fi
+
+          echo "Governed bot PR detected on branch: $BRANCH"
+          since=$(date -u -d '24 hours ago' +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || \
+            date -u -v-24H +%Y-%m-%dT%H:%M:%SZ)
+          if ! count=$(SINCE="$since" BOT_BRANCH_REGEX="$bot_branch_regex" gh pr list \
+            --repo "$REPO" --state open --limit 1000 \
+            --json createdAt,headRefName,author \
+            --jq '[.[]
+              | select(.author.login == env.ACTOR)
+              | select(.createdAt > env.SINCE)
+              | select(.headRefName | test(env.BOT_BRANCH_REGEX))] | length'); then
+            echo "Unable to query open PRs for bot rate limiting." >&2
+            exit 1
+          fi
+          echo "Governed bot PRs by $ACTOR in the last 24 hours: $count"
+          if [ "${count:-0}" -gt 5 ]; then
+            gh pr close "$PR_NUMBER" --repo "$REPO" \
+              --comment "Bot rate limit exceeded: $count governed PRs were created in the last 24 hours (limit: 5/day). Consolidate related fixes before reopening this change."
+            echo "PR #$PR_NUMBER closed for exceeding the bot rate limit."
+            exit 0
+          fi
+
+          keyword=$(printf '%s' "$PR_TITLE" | sed 's/[^a-zA-Z0-9 _-]//g' | \
+            tr '[:upper:]' '[:lower:]' | cut -c1-50 | xargs)
+          if [ -z "$keyword" ]; then
+            echo "No searchable title keyword, skipping duplicate check."
+            exit 0
+          fi
+
+          if ! dupes=$(gh pr list --repo "$REPO" --state open --limit 1000 \
+            --search "$keyword" --json number \
+            --jq '[.[] | select(.number != (env.PR_NUMBER | tonumber))] | length'); then
+            echo "Unable to query open PRs for duplicate detection." >&2
+            exit 1
+          fi
+          echo "Similar open PRs for '$keyword': $dupes"
+          if [ "${dupes:-0}" -ge 1 ]; then
+            gh pr comment "$PR_NUMBER" --repo "$REPO" \
+              --body "Possible duplicate: found $dupes open PR(s) with similar title ('$keyword'). Review related changes before merging."
+          fi

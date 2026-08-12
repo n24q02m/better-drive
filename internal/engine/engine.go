@@ -218,10 +218,10 @@ type Quota struct {
 
 // About reports a remote's storage quota via `rclone about <name>: --json`.
 // Quota is the only account-level fact obtainable for a Drive remote: the
-// Drive backend does not implement `config userinfo` (it answers "Google
-// drive root '' doesn't support UserInfo"), so rclone cannot tell us which
-// Google account a remote is signed in as, and the numbers here are what a
-// user has to tell two configured accounts apart by.
+// Drive backend does not implement `config userinfo`: it reports that the
+// Drive root with an empty path does not support UserInfo, so rclone cannot
+// tell us which Google account a remote is signed in as; the numbers here are
+// what a user has to tell two configured accounts apart by.
 func (e *Engine) About(name string) (Quota, error) {
 	stdout, stderr, err := e.exec("about", name+":", "--json")
 	if err != nil {
