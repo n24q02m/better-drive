@@ -15,3 +15,14 @@ func TestSyncMenuStatePausedDisablesWithReason(t *testing.T) {
 		t.Fatalf("paused sync tooltip = %q, want %q", tooltip, "Cannot sync while paused")
 	}
 }
+
+func TestSyncMenuStateNeedsResyncDisablesWithReason(t *testing.T) {
+	enabled, tooltip := syncMenuState(syncloop.StateNeedsResync)
+	if enabled {
+		t.Fatal("needs-resync sync action is enabled")
+	}
+	expected := "Manual resync required: run 'better-drive sync --resync'"
+	if tooltip != expected {
+		t.Fatalf("needs-resync sync tooltip = %q, want %q", tooltip, expected)
+	}
+}
