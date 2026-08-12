@@ -135,7 +135,7 @@ signs:
   - cmd: cosign
     env:
       - COSIGN_EXPERIMENTAL=1
-    signature: "${artifact}.bundle"
+    signature: "${artifact}.sigstore.json"
     args:
       - sign-blob
       - "--bundle=${signature}"
