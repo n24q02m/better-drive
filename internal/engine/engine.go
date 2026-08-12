@@ -407,7 +407,9 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 		return nil, func() {}, err
 	}
 	path := f.Name()
-	cleanup = func() { os.Remove(path) }
+	cleanup = func() {
+		_ = os.Remove(path) // #nosec G104 -- xóa tệp bộ lọc tạm theo best-effort; callback không thể trả lỗi dọn dẹp.
+	}
 
 	// Pre-allocate exact capacity for all strings plus their trailing newlines
 	// to avoid hidden double allocations from strings.Join(...) + "\n"

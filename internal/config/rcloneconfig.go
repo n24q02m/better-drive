@@ -32,10 +32,10 @@ func ResolveRcloneConfig(explicit string) string {
 	for _, c := range candidates {
 		if root, err := os.OpenRoot(c.root); err == nil {
 			if fi, err := root.Stat(c.path); err == nil && !fi.IsDir() {
-				root.Close()
+				_ = root.Close() // #nosec G104 -- handle thư mục chỉ đọc; lỗi đóng không có hành động xử lý khả dụng.
 				return filepath.Join(c.root, filepath.FromSlash(c.path))
 			}
-			root.Close()
+			_ = root.Close() // #nosec G104 -- handle thư mục chỉ đọc; lỗi đóng không có hành động xử lý khả dụng.
 		}
 	}
 	return ""

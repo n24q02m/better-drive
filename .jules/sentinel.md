@@ -22,3 +22,7 @@
 **Vulnerability:** Unescaped executable paths in systemd unit templates allowed command splitting via spaces and variable/specifier injection via `%` and `$`.
 **Learning:** Systemd expands variables and specifiers (like `%h` or `$USER`) in `ExecStart`. If a path contains these characters, it can alter the execution context or run arbitrary commands. Additionally, unquoted paths with spaces cause systemd to split arguments incorrectly.
 **Prevention:** Always escape `%` to `%%` and `$` to `$$` in user-controlled or variable paths inserted into systemd units, and use double quotes (or `%q` in Go) to prevent command splitting.
+## 2026-08-11 - Explicitly handle or document unhandled errors
+**Vulnerability:** Unhandled errors, such as ignoring the return value of resource cleanups or core application logic, can silently obscure resource exhaustion or logic bypasses (CWE-703), which gosec flags as G104.
+**Learning:** In Go, blindly suppressing unhandled errors (e.g., using `_ = err`) without comment makes the code unauditable. For cases where an error is truly unactionable (like a best-effort `os.Remove` on a temp file or a read-only `root.Close()`), it must be explicitly documented.
+**Prevention:** Document intentional error suppressions with `// #nosec G104 -- [reason]` to prove to auditors and linters that the ignored error was consciously evaluated as benign and not a forgotten security or reliability boundary.
