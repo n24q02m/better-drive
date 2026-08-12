@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +20,19 @@ func newFakeRunnerEngine(cfg string, fn runner) *Engine {
 	return &Engine{cfg: cfg, run: fn}
 }
 
+// newFakeStreamingRunnerEngine builds an Engine with injectable captured and
+// streaming runner seams, so tests can exercise long-lived mount behavior
+// without a real rclone binary.
+func newFakeStreamingRunnerEngine(cfg string, runFn runner, streamFn streamRunner) *Engine {
+	if runFn == nil {
+		runFn = func(args ...string) (string, string, error) { return "", "", nil }
+	}
+	if streamFn == nil {
+		streamFn = func(ctx context.Context, stdout, stderr io.Writer, args ...string) error { return nil }
+	}
+	return &Engine{cfg: cfg, run: runFn, stream: streamFn}
+}
+
 // TestNewResolvesRunner verifies New wires up a working runner seam (the
 // rclone shell-out replacement for librclone.Initialize/RPC) without
 // requiring a real rclone binary on PATH for the construction itself.
@@ -31,6 +46,189 @@ func TestNewResolvesRunner(t *testing.T) {
 	}
 	if e.bin == "" {
 		t.Fatal("New(\"\").bin is empty, want a resolved rclone binary name/path")
+	}
+	if e.stream == nil {
+		t.Fatal("New(\"\").stream is nil, want a resolved streaming runner")
+	}
+}
+
+func TestMountBuildsStreamingArgs(t *testing.T) {
+	t.Run("default cache mode and config prefix", func(t *testing.T) {
+		var gotArgv []string
+		e := newFakeStreamingRunnerEngine("X:/portable/rclone.conf", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+			gotArgv = append([]string(nil), args...)
+			return nil
+		})
+
+		err := e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:Projects",
+			Mountpoint: "G:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []string{
+			"--config", "X:/portable/rclone.conf",
+			"mount", "gdrive:Projects", "G:",
+			"--vfs-cache-mode", "full",
+		}
+		if !reflect.DeepEqual(gotArgv, want) {
+			t.Fatalf("argv = %#v, want %#v", gotArgv, want)
+		}
+	})
+
+	t.Run("read only appends flag", func(t *testing.T) {
+		var gotArgv []string
+		e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+			gotArgv = append([]string(nil), args...)
+			return nil
+		})
+
+		err := e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "M:",
+			ReadOnly:   true,
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []string{
+			"mount", "gdrive:", "M:",
+			"--vfs-cache-mode", "full",
+			"--read-only",
+		}
+		if !reflect.DeepEqual(gotArgv, want) {
+			t.Fatalf("argv = %#v, want %#v", gotArgv, want)
+		}
+	})
+}
+
+func TestMountStreamsOutputAndRetainsStderrInError(t *testing.T) {
+	var stdoutBuf, stderrBuf strings.Builder
+	boom := errors.New("exit status 1")
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		if _, err := io.WriteString(stdout, "mounted\n"); err != nil {
+			t.Fatalf("write stdout: %v", err)
+		}
+		if _, err := io.WriteString(stderr, "driver missing\n"); err != nil {
+			t.Fatalf("write stderr: %v", err)
+		}
+		return boom
+	})
+
+	err := e.Mount(context.Background(), MountParams{
+		Remote:     "gdrive:",
+		Mountpoint: "G:",
+		Stdout:     &stdoutBuf,
+		Stderr:     &stderrBuf,
+	})
+	if err == nil {
+		t.Fatal("Mount() error = nil, want streamed stderr folded into the returned error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("Mount() error = %v, want wrapped %v", err, boom)
+	}
+	if got := stdoutBuf.String(); got != "mounted\n" {
+		t.Fatalf("stdout = %q, want %q", got, "mounted\n")
+	}
+	if got := stderrBuf.String(); got != "driver missing\n" {
+		t.Fatalf("stderr = %q, want %q", got, "driver missing\n")
+	}
+	if !strings.Contains(err.Error(), "driver missing") {
+		t.Fatalf("error = %v, want streamed stderr preserved for remediation", err)
+	}
+}
+
+func TestMountPropagatesContextToStreamingRunner(t *testing.T) {
+	started := make(chan context.Context, 1)
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		started <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Mount(ctx, MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "Z:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+	}()
+
+	gotCtx := <-started
+	if gotCtx != ctx {
+		t.Fatalf("runner context = %p, want %p", gotCtx, ctx)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Mount() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Mount() did not return after context cancellation")
+	}
+}
+
+func TestMountDoesNotSerializeWithSyncOps(t *testing.T) {
+	mountStarted := make(chan struct{})
+	releaseMount := make(chan struct{})
+	e := newFakeStreamingRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "", nil
+	}, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		close(mountStarted)
+		<-releaseMount
+		return nil
+	})
+
+	mountDone := make(chan error, 1)
+	go func() {
+		mountDone <- e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "X:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+	}()
+
+	<-mountStarted
+
+	copyDone := make(chan error, 1)
+	go func() {
+		copyDone <- e.Copy(CopyParams{Local: t.TempDir(), Remote: "gdrive:backup"})
+	}()
+
+	select {
+	case err := <-copyDone:
+		if err != nil {
+			t.Fatalf("Copy() error = %v", err)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("Copy() blocked behind an active Mount(); Mount must not hold syncMu")
+	}
+
+	close(releaseMount)
+
+	select {
+	case err := <-mountDone:
+		if err != nil {
+			t.Fatalf("Mount() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Mount() did not return after release")
 	}
 }
 

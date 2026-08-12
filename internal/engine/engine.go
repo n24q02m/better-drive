@@ -1,9 +1,12 @@
 package engine
 
 import (
+	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -19,11 +22,13 @@ type Engine struct {
 	// "rclone" name when not found on PATH - the error surfaces on first use
 	// instead of at New()). cfg is the rclone config file path to pass via
 	// --config; empty means let rclone fall back to its own default discovery
-	// (including honoring the RCLONE_CONFIG env var itself). run is the seam
-	// tests inject a fake into; New wires it to the real execRunner(bin).
-	bin string
-	cfg string
-	run runner
+	// (including honoring the RCLONE_CONFIG env var itself). run and stream are
+	// the short-lived captured and long-lived streaming seams tests inject
+	// fakes into; New wires them to the real execRunner/execStreamRunner(bin).
+	bin    string
+	cfg    string
+	run    runner
+	stream streamRunner
 	// syncMu serializes the sync operations (Bisync/Copy/Sync). The previous
 	// librclone rc engine applied its _filter (and other run options) to
 	// PROCESS-GLOBAL state for the duration of a sync, so two concurrent syncs
@@ -46,7 +51,12 @@ func New(rcloneConfigPath string) *Engine {
 	if err != nil {
 		bin = "rclone" // not found on PATH; the error surfaces on first use
 	}
-	return &Engine{bin: bin, cfg: rcloneConfigPath, run: execRunner(bin)}
+	return &Engine{
+		bin:    bin,
+		cfg:    rcloneConfigPath,
+		run:    execRunner(bin),
+		stream: execStreamRunner(bin),
+	}
 }
 
 // Close is a no-op: each rclone invocation is an independent subprocess with
@@ -66,6 +76,12 @@ func (e *Engine) args(base ...string) []string {
 // runner seam, applying args' --config prefixing.
 func (e *Engine) exec(argv ...string) (stdout, stderr string, err error) {
 	return e.run(e.args(argv...)...)
+}
+
+// streamExec runs a long-lived rclone subcommand (argv, without --config)
+// through the streaming runner seam, applying args' --config prefixing.
+func (e *Engine) streamExec(ctx context.Context, stdout, stderr io.Writer, argv ...string) error {
+	return e.stream(ctx, stdout, stderr, e.args(argv...)...)
 }
 
 // RemoteExists reports whether name is a configured remote (any type), by
@@ -216,6 +232,14 @@ type Quota struct {
 	Free  int64 `json:"free"`
 }
 
+// MountParams configures a foreground `rclone mount` invocation. Stdout and
+// Stderr receive rclone's live process output; nil writers are discarded.
+type MountParams struct {
+	Remote, Mountpoint string
+	ReadOnly           bool
+	Stdout, Stderr     io.Writer
+}
+
 // About reports a remote's storage quota via `rclone about <name>: --json`.
 // Quota is the only account-level fact obtainable for a Drive remote: the
 // Drive backend does not implement `config userinfo`: it reports that the
@@ -235,6 +259,43 @@ func (e *Engine) About(name string) (Quota, error) {
 		return Quota{}, fmt.Errorf("rclone about: parse json: %w", err)
 	}
 	return q, nil
+}
+
+// Mount runs `rclone mount` in the foreground with the compatibility-safe
+// `--vfs-cache-mode full` default, optionally adding `--read-only`. Unlike
+// sync operations it intentionally does not hold syncMu: a long-lived mount
+// must not block independent copy/sync/bisync cycles. stderr is streamed to
+// the caller live and also retained in the returned error for remediation.
+func (e *Engine) Mount(ctx context.Context, p MountParams) error {
+	stdout := p.Stdout
+	if stdout == nil {
+		stdout = io.Discard
+	}
+	stderrOut := p.Stderr
+	if stderrOut == nil {
+		stderrOut = io.Discard
+	}
+
+	argv := []string{
+		"mount",
+		p.Remote,
+		p.Mountpoint,
+		"--vfs-cache-mode", "full",
+	}
+	if p.ReadOnly {
+		argv = append(argv, "--read-only")
+	}
+
+	var stderr bytes.Buffer
+	teeStderr := io.MultiWriter(stderrOut, &stderr)
+	if err := e.streamExec(ctx, stdout, teeStderr, argv...); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg == "" {
+			return fmt.Errorf("rclone mount: %w", err)
+		}
+		return fmt.Errorf("rclone mount: %w: %s", err, msg)
+	}
+	return nil
 }
 
 type BisyncParams struct {
