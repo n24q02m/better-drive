@@ -408,7 +408,7 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 	}
 	path := f.Name()
 	cleanup = func() {
-		_ = os.Remove(path) // #nosec G104 -- best-effort removal of a temporary filter file.
+		_ = os.Remove(path) // #nosec G104 -- xóa tệp bộ lọc tạm theo best-effort; callback không thể trả lỗi dọn dẹp.
 	}
 
 	// Pre-allocate exact capacity for all strings plus their trailing newlines

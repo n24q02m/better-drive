@@ -257,7 +257,7 @@ func (l *Loop) Resume() {
 }
 
 func (l *Loop) Start(ctx context.Context, interval time.Duration) {
-	_ = l.runOnce() // #nosec G104 -- runOnce internally transitions to StateError and calls callbacks on failure.
+	_ = l.runOnce() // #nosec G104 -- runOnce tự chuyển sang StateError và gọi callback khi thất bại.
 	t := time.NewTicker(interval)
 	defer t.Stop()
 	for {
@@ -265,7 +265,7 @@ func (l *Loop) Start(ctx context.Context, interval time.Duration) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			_ = l.runOnce() // #nosec G104 -- runOnce internally transitions to StateError and calls callbacks on failure.
+			_ = l.runOnce() // #nosec G104 -- runOnce tự chuyển sang StateError và gọi callback khi thất bại.
 		}
 	}
 }
