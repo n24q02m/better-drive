@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2024-09-06 - Actionable Error State Tooltips
+**Learning:** Disabling a UI element due to a broken or error state (like StateNeedsResync) without providing an actionable resolution creates a dead-end for users. Passively stating the error isn't enough; users need to know exactly how to fix it.
+**Action:** Ensure the corresponding tooltip for a disabled element provides actionable instructions, such as the exact CLI command needed to resolve the issue (e.g., `better-drive sync --resync`).
