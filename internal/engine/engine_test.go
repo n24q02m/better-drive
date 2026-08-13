@@ -34,40 +34,59 @@ func newFakeStreamingRunnerEngine(cfg string, runFn runner, streamFn streamRunne
 }
 
 type triggeredContext struct {
-	done chan struct{}
-	err  error
-	once sync.Once
+	context.Context
+	err    error
+	cancel context.CancelFunc
+	once   sync.Once
 }
 
-func newTriggeredContext(err error) *triggeredContext {
-	return &triggeredContext{done: make(chan struct{}), err: err}
-}
+const helperProcessCleanupGrace = time.Second
 
-func (c *triggeredContext) Deadline() (time.Time, bool) { return time.Time{}, false }
-func (c *triggeredContext) Done() <-chan struct{}       { return c.done }
-func (c *triggeredContext) Err() error {
-	select {
-	case <-c.done:
-		return c.err
-	default:
-		return nil
+func newTriggeredContext(t *testing.T, err error) *triggeredContext {
+	t.Helper()
+	testDeadline, ok := t.Deadline()
+	if !ok {
+		t.Fatal("helper-process test requires go test's bounded timeout")
 	}
+	// Bound child cleanup by the test binary's deadline instead of guessing
+	// how quickly Windows can schedule a new process under suite-wide load.
+	guardDeadline := testDeadline.Add(-helperProcessCleanupGrace)
+	if !time.Now().Before(guardDeadline) {
+		t.Fatal("insufficient time remains to start helper process and clean it up")
+	}
+
+	guard, cancel := context.WithDeadline(context.Background(), guardDeadline)
+	ctx := &triggeredContext{Context: guard, err: err, cancel: cancel}
+	t.Cleanup(ctx.trigger)
+	return ctx
 }
-func (c *triggeredContext) Value(any) any { return nil }
+
+func (c *triggeredContext) Err() error {
+	if c.Context.Err() == context.Canceled {
+		return c.err
+	}
+	return c.Context.Err()
+}
 func (c *triggeredContext) trigger() {
-	c.once.Do(func() { close(c.done) })
+	c.once.Do(c.cancel)
 }
 
 type signalingWriter struct {
 	dst      io.Writer
 	signaled chan struct{}
+	onSignal func()
 	once     sync.Once
 }
 
 func (w *signalingWriter) Write(p []byte) (int, error) {
 	n, err := w.dst.Write(p)
 	if n > 0 {
-		w.once.Do(func() { close(w.signaled) })
+		w.once.Do(func() {
+			close(w.signaled)
+			if w.onSignal != nil {
+				w.onSignal()
+			}
+		})
 	}
 	return n, err
 }
@@ -107,41 +126,51 @@ func TestNewResolvesRunner(t *testing.T) {
 func TestExecStreamRunnerNormalizesContextCancellation(t *testing.T) {
 	const helperEnv = "GO_WANT_EXEC_STREAM_RUNNER_HELPER"
 	if os.Getenv(helperEnv) == "1" {
-		_, _ = io.WriteString(os.Stdout, "helper ready\n")
-		select {}
+		// An empty select is reported as a runtime deadlock, so the helper can
+		// exit with status 2 before its parent observes readiness. A blocking OS
+		// pipe read remains alive until CommandContext terminates the process.
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			_, _ = io.WriteString(os.Stderr, "create helper pipe: "+err.Error()+"\n")
+			os.Exit(2)
+		}
+		defer readEnd.Close()
+		defer writeEnd.Close()
+
+		if _, err := io.WriteString(os.Stdout, "helper ready\n"); err != nil {
+			_, _ = io.WriteString(os.Stderr, "write helper readiness: "+err.Error()+"\n")
+			os.Exit(2)
+		}
+		var blocked [1]byte
+		if _, err := readEnd.Read(blocked[:]); err != nil {
+			_, _ = io.WriteString(os.Stderr, "helper pipe read returned: "+err.Error()+"\n")
+		} else {
+			_, _ = io.WriteString(os.Stderr, "helper pipe became readable unexpectedly\n")
+		}
+		os.Exit(2)
 	}
 
 	t.Setenv(helperEnv, "1")
 	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
 		t.Run(want.Error(), func(t *testing.T) {
-			ctx := newTriggeredContext(want)
+			ctx := newTriggeredContext(t, want)
 			ready := make(chan struct{})
-			stdout := &signalingWriter{dst: io.Discard, signaled: ready}
-			done := make(chan error, 1)
+			stdout := &signalingWriter{dst: io.Discard, signaled: ready, onSignal: ctx.trigger}
+			var helperStderr strings.Builder
 
-			go func() {
-				done <- execStreamRunner(os.Args[0])(
-					ctx,
-					stdout,
-					io.Discard,
-					"-test.run=^TestExecStreamRunnerNormalizesContextCancellation$",
-				)
-			}()
-
+			err := execStreamRunner(os.Args[0])(
+				ctx,
+				stdout,
+				&helperStderr,
+				"-test.run=^TestExecStreamRunnerNormalizesContextCancellation$",
+			)
 			select {
 			case <-ready:
-			case <-time.After(5 * time.Second):
-				t.Fatal("helper process did not report ready")
+			default:
+				t.Fatalf("helper process exited before readiness; runner error = %v, stderr = %q", err, helperStderr.String())
 			}
-			ctx.trigger()
-
-			select {
-			case err := <-done:
-				if !errors.Is(err, want) {
-					t.Fatalf("execStreamRunner() error = %v, want errors.Is(..., %v)", err, want)
-				}
-			case <-time.After(5 * time.Second):
-				t.Fatal("execStreamRunner() did not return after context cancellation")
+			if !errors.Is(err, want) {
+				t.Fatalf("execStreamRunner() error = %v, want errors.Is(..., %v); helper stderr = %q", err, want, helperStderr.String())
 			}
 		})
 	}
@@ -430,6 +459,109 @@ func TestMountDoesNotSerializeWithSyncOps(t *testing.T) {
 		}
 	case <-time.After(time.Second):
 		t.Fatal("Mount() did not return after release")
+	}
+}
+
+// TestSyncCommandsStreamProgressAndCancel protects the one-shot CLI path from
+// looking hung while rclone scans a large remote. Every sync mode must use the
+// context-aware streaming runner when the caller supplies a progress writer,
+// expose rclone stats before the process exits, and stop on cancellation.
+func TestSyncCommandsStreamProgressAndCancel(t *testing.T) {
+	tests := []struct {
+		name       string
+		subcommand string
+		fileLocal  bool
+	}{
+		{name: "copy directory", subcommand: "copy"},
+		{name: "sync directory", subcommand: "sync"},
+		{name: "copy single file", subcommand: "copyto", fileLocal: true},
+		{name: "bisync", subcommand: "bisync"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			started := make(chan struct{})
+			var gotContext context.Context
+			var gotArgs []string
+			var progress strings.Builder
+			e := newFakeStreamingRunnerEngine("", nil,
+				func(streamContext context.Context, _ io.Writer, stderr io.Writer, args ...string) error {
+					gotContext = streamContext
+					gotArgs = append([]string(nil), args...)
+					if _, err := stderr.Write([]byte("Transferred: 1 / 2\n")); err != nil {
+						return err
+					}
+					close(started)
+					<-streamContext.Done()
+					return streamContext.Err()
+				})
+
+			local := t.TempDir()
+			workdir := t.TempDir()
+			if tt.fileLocal {
+				local = filepath.Join(local, ".claude.json")
+				if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			done := make(chan error, 1)
+			go func() {
+				switch tt.subcommand {
+				case "bisync":
+					_, err := e.Bisync(BisyncParams{
+						Path1: local, Path2: "gdrive:test", Workdir: workdir,
+						DryRun: true, Context: ctx, Stderr: &progress,
+					})
+					done <- err
+				default:
+					operation := tt.subcommand
+					if tt.fileLocal {
+						operation = "copy"
+					}
+					done <- e.copyOrSync(operation, CopyParams{
+						Local: local, Remote: "gdrive:test", DryRun: true,
+						Context: ctx, Stderr: &progress,
+					})
+				}
+			}()
+
+			select {
+			case <-started:
+				if !strings.Contains(progress.String(), "Transferred: 1 / 2") {
+					t.Fatalf("progress was not visible before process exit: %q", progress.String())
+				}
+			case err := <-done:
+				t.Fatalf("sync returned before streaming runner started: %v", err)
+			case <-time.After(2 * time.Second):
+				t.Fatal("sync did not start the streaming runner")
+			}
+
+			cancel()
+			select {
+			case err := <-done:
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("sync error = %v, want context.Canceled", err)
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("sync did not return after context cancellation")
+			}
+
+			if gotContext != ctx {
+				t.Fatal("sync did not propagate the caller context to the streaming runner")
+			}
+			if len(gotArgs) == 0 || gotArgs[0] != tt.subcommand {
+				t.Fatalf("args = %v, want subcommand %q", gotArgs, tt.subcommand)
+			}
+			for _, want := range []string{"--dry-run", "--stats", "5s", "--stats-one-line"} {
+				if !containsArg(gotArgs, want) {
+					t.Errorf("args = %v, missing progress arg %q", gotArgs, want)
+				}
+			}
+		})
 	}
 }
 

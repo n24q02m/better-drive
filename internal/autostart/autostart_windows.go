@@ -12,16 +12,24 @@ const (
 	valueName = "better-drive"
 )
 
-func Enable(exePath string) error {
+type runRegistry interface {
+	set(value string) error
+	delete() error
+	enabled() (bool, error)
+}
+
+type windowsRunRegistry struct{}
+
+func (windowsRunRegistry) set(value string) error {
 	k, _, err := registry.CreateKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
 	if err != nil {
 		return err
 	}
 	defer k.Close()
-	return k.SetStringValue(valueName, `"`+exePath+`" run`)
+	return k.SetStringValue(valueName, value)
 }
 
-func Disable() error {
+func (windowsRunRegistry) delete() error {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.SET_VALUE)
 	if err != nil {
 		return err
@@ -33,10 +41,13 @@ func Disable() error {
 	return nil
 }
 
-func Enabled() (bool, error) {
+func (windowsRunRegistry) enabled() (bool, error) {
 	k, err := registry.OpenKey(registry.CURRENT_USER, runKey, registry.QUERY_VALUE)
-	if err != nil {
+	if err == registry.ErrNotExist {
 		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 	defer k.Close()
 	if _, _, err := k.GetStringValue(valueName); err == registry.ErrNotExist {
@@ -46,3 +57,29 @@ func Enabled() (bool, error) {
 	}
 	return true, nil
 }
+
+type autostartRegistration struct {
+	registry runRegistry
+}
+
+func newAutostart(registry runRegistry) *autostartRegistration {
+	return &autostartRegistration{registry: registry}
+}
+
+func (a *autostartRegistration) enable(exePath string) error {
+	return a.registry.set(`"` + exePath + `" run`)
+}
+
+func (a *autostartRegistration) disable() error {
+	return a.registry.delete()
+}
+
+func (a *autostartRegistration) enabled() (bool, error) {
+	return a.registry.enabled()
+}
+
+var systemAutostart = newAutostart(windowsRunRegistry{})
+
+func Enable(exePath string) error { return systemAutostart.enable(exePath) }
+func Disable() error              { return systemAutostart.disable() }
+func Enabled() (bool, error)      { return systemAutostart.enabled() }

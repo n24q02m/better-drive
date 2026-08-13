@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 
@@ -57,7 +58,7 @@ func execute(args []string) (string, error) {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "better-drive",
-		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
+		Short:   "Google Drive sync and virtual-drive mount with rclone",
 		Version: version.Version,
 		// cli.RenderError (via Execute) owns error rendering now, in whatever
 		// format the caller asked for - cobra's own default "Error: ..." +
@@ -67,7 +68,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
@@ -339,6 +340,9 @@ func syncCmd() *cobra.Command {
 			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer stop()
+			cmd.SetContext(ctx)
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
@@ -395,6 +399,8 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		loop.SetDryRun(dryRun)
 		loop.SetForceResync(forceResync)
+		loop.SetExecution(cmd.Context(), cmd.ErrOrStderr())
+		fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: RUNNING\n", p.Local, p.Remote, p.Mode)
 		if err := loop.RunOnce(); err != nil {
 			failed = true
 			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)

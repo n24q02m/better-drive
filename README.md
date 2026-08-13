@@ -33,18 +33,20 @@
 <!-- END: AUTO-GENERATED-CROSS-PROMO -->
 
 
-Cross-platform Google Drive sync — bisync (2-way), copy, or sync (1-way mirror) per pair, with `.driveignore` filters and config-level excludes. A thin, lean wrapper around the [rclone](https://rclone.org) binary: better-drive owns the ergonomics (`.driveignore`, multi-pair config, a system-tray daemon, per-OS autostart) and shells out to your installed `rclone` for the actual transfers. Supports multiple independent `[[pair]]` blocks in one config (e.g. syncing/backing up several unrelated folders under one daemon).
+Cross-platform Google Drive sync and virtual-drive mount — bisync (2-way), copy, sync (1-way mirror), or a foreground mounted filesystem. A thin, lean wrapper around the [rclone](https://rclone.org) binary: better-drive owns the ergonomics (`.driveignore`, multi-pair config, a system-tray daemon, per-OS autostart, and a safe mount contract) while your installed `rclone` performs transfers and filesystem mounting.
 
-Runs on Windows, Linux, and macOS. The binary is small (~4 MB) and requires `rclone` on `PATH` (installed automatically by the scoop/brew packages below).
+Runs on Windows, Linux, and macOS. The standalone binary requires `rclone` on `PATH` (installed automatically by the scoop/brew packages below).
 
 ## Contents
 
 - [Install](#install)
 - [Quick start](#quick-start)
+- [Mount a virtual drive](#mount-a-virtual-drive)
 - [Accounts](#accounts)
 - [Configuration](#configuration)
 - [.driveignore + config excludes](#driveignore--config-excludes)
 - [How it works](#how-it-works)
+- [Command reference](#command-reference)
 - [Requirements](#requirements)
 - [Non-interactive setup](#non-interactive-setup)
 - [License](#license)
@@ -76,6 +78,7 @@ go install github.com/n24q02m/better-drive@latest
 
 ```bash
 better-drive setup      # create the rclone Google Drive remote (opens browser OAuth) — or reuse an existing rclone remote
+better-drive mount gdrive: G: # mount Drive in the foreground; Ctrl+C unmounts it
 better-drive install    # register the daemon to start at login (HKCU Run key / LaunchAgent / systemd-user)
 better-drive run        # start the sync daemon (system-tray on Windows/Linux/macOS)
 better-drive status     # show configured pairs and their state
@@ -84,6 +87,33 @@ better-drive uninstall  # remove the login autostart
 ```
 
 The daemon syncs each pair once on start, then again every `interval`, and logs each cycle to `<config-dir>/better-drive.log`.
+
+## Mount a virtual drive
+
+`better-drive mount` exposes an already-configured rclone remote as a foreground filesystem. It is independent of sync pairs: `config.toml` may be absent or contain only an optional `rclone_config` path. The command verifies the remote's OAuth token before mounting, always uses `--vfs-cache-mode full` for application compatibility, streams rclone output live, and unmounts when you press Ctrl+C.
+
+```powershell
+# Windows drive letter
+scoop install winfsp
+better-drive mount gdrive: G:
+
+# Let rclone choose an unused drive letter; prevent writes
+better-drive mount gdrive:Documents * --read-only
+```
+
+```bash
+# Linux directory mount (install FUSE 3 and ensure the user can access /dev/fuse)
+mkdir -p ~/Drive
+better-drive mount gdrive: ~/Drive
+```
+
+Mount requirements are OS-specific because better-drive deliberately does not embed a filesystem driver:
+
+- Windows: [WinFsp](https://winfsp.dev/) (`scoop install winfsp`).
+- Linux: FUSE 3 (`fusermount3` or `fusermount`) and permission to access `/dev/fuse`.
+- macOS: an [rclone-supported mount backend](https://rclone.org/commands/rclone_mount/) such as NFS, FUSE-T, or macFUSE, depending on the installed rclone version.
+
+The first argument must be `<remote>:<path>`; the second is passed through to rclone, so values such as `G:`, `*`, and a Unix directory retain their native meaning. Mount failures keep rclone's stderr; missing-driver failures also include an OS-specific remediation.
 
 ## Accounts
 
@@ -202,10 +232,28 @@ better-drive builds an `rclone` command line from each pair's config and runs th
 
 `better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows, Linux and macOS it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on any other platform it runs headless (use the log + `better-drive status`).
 
+`better-drive mount` instead runs one foreground `rclone mount <remote:path> <mountpoint> --vfs-cache-mode full` process. It does not take the sync mutex and therefore does not block independent sync cycles. `--read-only` appends rclone's write-protection flag; Ctrl+C cancels the child process and unmounts the filesystem.
+
+## Command reference
+
+| Command | Purpose |
+|---|---|
+| `better-drive setup [flags]` | Create or repair a Google Drive rclone remote through OAuth. |
+| `better-drive account list\|add\|remove` | Inspect, create, or remove Drive accounts/remotes. |
+| `better-drive run` | Run every configured sync pair continuously with tray status. |
+| `better-drive status [--format table\|json]` | Print configured pairs without touching the network. |
+| `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every pair and exit. |
+| `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
+| `better-drive install` | Register the sync daemon to start at login. |
+| `better-drive uninstall` | Remove the login-autostart registration. |
+
+Run `better-drive <command> --help` for complete flags, examples, and prerequisites.
+
 ## Requirements
 
 - [`rclone`](https://rclone.org) on `PATH` (installed automatically by the scoop and brew packages).
 - A configured rclone Google Drive remote — run `better-drive setup`, or reuse a remote you already have (`rclone config`). Tip: create your own Google [client_id](https://rclone.org/drive/#making-your-own-client-id) to avoid the shared-client rate limits (pass it to `setup`/`account add` as `--client-id`/`--client-secret`).
+- Mount mode additionally needs WinFsp on Windows, FUSE 3 plus `/dev/fuse` access on Linux, or a mount backend supported by the installed rclone on macOS. Sync-only commands do not need these filesystem drivers.
 
 ### Non-interactive setup
 

@@ -35,7 +35,8 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
-	agg.OnChange(func(st syncloop.State) {
+	agg.OnChange(func(aggregate AggregateState) {
+		st := aggregate.State
 		systray.SetTooltip("better-drive - " + st.String())
 		mStatus.SetTitle("Status: " + st.String())
 		mStatus.SetTooltip("Current status: " + st.String())
@@ -46,7 +47,7 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 			mPause.SetTitle("Pause")
 			mPause.SetTooltip("Pause scheduled syncs for all pairs")
 		}
-		syncEnabled, syncTooltip := syncMenuState(st)
+		syncEnabled, syncTooltip := syncMenuState(aggregate)
 		if syncEnabled {
 			mSync.Enable()
 		} else {

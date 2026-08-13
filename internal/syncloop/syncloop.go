@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"time"
@@ -59,6 +60,8 @@ type Loop struct {
 	running     bool
 	dryRun      bool
 	forceResync bool
+	execContext context.Context
+	stderr      io.Writer
 	onChange    func(State)
 	onResult    func(error)
 }
@@ -137,6 +140,16 @@ func (l *Loop) SetForceResync(v bool) {
 	l.mu.Unlock()
 }
 
+// SetExecution opts subsequent cycles into context-aware execution with live
+// rclone stderr. The one-shot CLI uses it for cancellation and progress; the
+// continuous daemon leaves both values unset and retains captured execution.
+func (l *Loop) SetExecution(ctx context.Context, stderr io.Writer) {
+	l.mu.Lock()
+	l.execContext = ctx
+	l.stderr = stderr
+	l.mu.Unlock()
+}
+
 func (l *Loop) setState(st State) {
 	l.mu.Lock()
 	l.state = st
@@ -169,6 +182,8 @@ func (l *Loop) runOnce() (err error) {
 	// when the caller explicitly asked for one to be rebuilt (SetForceResync).
 	resync := l.mode == "bisync" && (!l.hasBaseline || l.forceResync)
 	dryRun := l.dryRun
+	execContext := l.execContext
+	stderr := l.stderr
 	l.mu.Unlock()
 
 	// A panicking Syncer must not leave l.running stuck at true (which would
@@ -193,13 +208,13 @@ func (l *Loop) runOnce() (err error) {
 	if err == nil {
 		switch l.mode {
 		case "copy":
-			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
+			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
 		case "sync":
-			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
+			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
 		default: // "bisync"
 			_, err = l.s.Bisync(engine.BisyncParams{
 				Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
-				Resync: resync, DryRun: dryRun, Filters: filters,
+				Resync: resync, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr,
 			})
 		}
 	}

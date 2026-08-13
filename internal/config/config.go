@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -61,6 +63,23 @@ func Load(path string) (*Config, error) {
 		c.Pairs = append(c.Pairs, Pair{Local: p.Local, Remote: p.Remote, Interval: d, Mode: mode, Exclude: p.Exclude})
 	}
 	return c, nil
+}
+
+// LoadRcloneConfigOnly reads the optional rclone_config setting for commands
+// such as mount that do not consume or validate sync pairs. A missing
+// better-drive config deliberately falls back to rclone's own discovery; an
+// existing malformed TOML file remains an actionable configuration error.
+func LoadRcloneConfigOnly(path string) (string, error) {
+	var raw struct {
+		RcloneConfig string `toml:"rclone_config"`
+	}
+	if _, err := toml.DecodeFile(path, &raw); err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
+		return "", fmt.Errorf("decode %s: %w", path, err)
+	}
+	return raw.RcloneConfig, nil
 }
 
 // Validate checks every pair independently; N pairs (>= 1) are supported.

@@ -50,6 +50,7 @@ func New(rcloneConfigPath string) *Engine {
 	if err != nil {
 		bin = "rclone" // not found on PATH; the error surfaces on first use
 	}
+	bin = resolveRcloneExecutable(bin)
 	return &Engine{
 		bin:    bin,
 		cfg:    rcloneConfigPath,
@@ -239,42 +240,70 @@ type MountParams struct {
 	Stdout, Stderr     io.Writer
 }
 
-const mountStderrTailLimit = 64 * 1024
+const stderrTailLimit = 64 * 1024
 
-// mountStderrWriter forwards stderr live while retaining only its bounded
-// tail for the error returned by Mount. Capture happens before forwarding so
-// remediation evidence survives even when the caller's terminal writer fails.
-type mountStderrWriter struct {
+// stderrTailWriter forwards stderr live while retaining only its bounded tail
+// for the error returned by a streaming operation. Capture happens before
+// forwarding so remediation evidence survives even when the caller's terminal
+// writer fails.
+type stderrTailWriter struct {
 	live io.Writer
 	tail []byte
 }
 
-func newMountStderrWriter(live io.Writer) *mountStderrWriter {
-	return &mountStderrWriter{
+func newStderrTailWriter(live io.Writer) *stderrTailWriter {
+	return &stderrTailWriter{
 		live: live,
-		tail: make([]byte, 0, mountStderrTailLimit),
+		tail: make([]byte, 0, stderrTailLimit),
 	}
 }
 
-func (w *mountStderrWriter) Write(p []byte) (int, error) {
+func (w *stderrTailWriter) Write(p []byte) (int, error) {
 	w.retain(p)
 	return w.live.Write(p)
 }
 
-func (w *mountStderrWriter) retain(p []byte) {
-	if len(p) >= mountStderrTailLimit {
-		w.tail = w.tail[:mountStderrTailLimit]
-		copy(w.tail, p[len(p)-mountStderrTailLimit:])
+func (w *stderrTailWriter) retain(p []byte) {
+	if len(p) >= stderrTailLimit {
+		w.tail = w.tail[:stderrTailLimit]
+		copy(w.tail, p[len(p)-stderrTailLimit:])
 		return
 	}
-	if overflow := len(w.tail) + len(p) - mountStderrTailLimit; overflow > 0 {
+	if overflow := len(w.tail) + len(p) - stderrTailLimit; overflow > 0 {
 		copy(w.tail, w.tail[overflow:])
 		w.tail = w.tail[:len(w.tail)-overflow]
 	}
 	w.tail = append(w.tail, p...)
 }
 
-func (w *mountStderrWriter) String() string { return string(w.tail) }
+func (w *stderrTailWriter) String() string { return string(w.tail) }
+
+// execWithContext preserves the captured runner for short-lived daemon calls,
+// but switches to the context-aware runner when a one-shot caller supplies a
+// context or live stderr writer. Streaming stderr remains bounded in memory so
+// a returned error retains useful rclone diagnostics.
+func (e *Engine) execWithContext(ctx context.Context, stderrOut io.Writer, argv ...string) (string, error) {
+	if ctx == nil && stderrOut == nil {
+		_, stderr, err := e.exec(argv...)
+		return stderr, err
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if stderrOut == nil {
+		stderrOut = io.Discard
+	}
+	stderr := newStderrTailWriter(stderrOut)
+	err := e.streamExec(ctx, io.Discard, stderr, argv...)
+	return stderr.String(), err
+}
+
+func appendProgressFlags(argv []string, stderr io.Writer) []string {
+	if stderr == nil {
+		return argv
+	}
+	return append(argv, "--stats", "5s", "--stats-one-line")
+}
 
 // About reports a remote's storage quota via `rclone about <name>: --json`.
 // Quota is the only account-level fact obtainable for a Drive remote: the
@@ -323,7 +352,7 @@ func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 		argv = append(argv, "--read-only")
 	}
 
-	stderr := newMountStderrWriter(stderrOut)
+	stderr := newStderrTailWriter(stderrOut)
 	if err := e.streamExec(ctx, stdout, stderr, argv...); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {
@@ -341,6 +370,10 @@ type BisyncParams struct {
 	// rclone's own --dry-run, applying no change.
 	DryRun  bool
 	Filters []string
+	// Context and Stderr opt a one-shot caller into cancellable execution with
+	// live rclone progress. Their zero values retain the daemon's captured path.
+	Context context.Context
+	Stderr  io.Writer
 }
 
 type BisyncResult struct{ Output string }
@@ -349,12 +382,12 @@ type BisyncResult struct{ Output string }
 // exist yet via `rclone mkdir`. rclone bisync --resync aborts when path2's
 // root is missing, so the first run must create it. mkdir is idempotent, so
 // an existing dir is a no-op.
-func (e *Engine) ensureRemoteDir(path string) error {
+func (e *Engine) ensureRemoteDir(ctx context.Context, stderrOut io.Writer, path string) error {
 	_, remote, found := strings.Cut(path, ":")
 	if !found || remote == "" {
 		return nil // not a remote path, or the remote root (always exists)
 	}
-	_, stderr, err := e.exec("mkdir", path)
+	stderr, err := e.execWithContext(ctx, stderrOut, "mkdir", path)
 	if err != nil {
 		return fmt.Errorf("rclone mkdir: %w: %s", err, strings.TrimSpace(stderr))
 	}
@@ -384,7 +417,7 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		if err := os.MkdirAll(p.Path1, 0o700); err != nil {
 			return BisyncResult{}, err
 		}
-		if err := e.ensureRemoteDir(p.Path2); err != nil {
+		if err := e.ensureRemoteDir(p.Context, p.Stderr, p.Path2); err != nil {
 			return BisyncResult{}, err
 		}
 	}
@@ -409,8 +442,9 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 		"--compare", "size,modtime,checksum",
 	)
 	argv = append(argv, filterArgv...)
+	argv = appendProgressFlags(argv, p.Stderr)
 
-	_, stderr, err := e.exec(argv...)
+	stderr, err := e.execWithContext(p.Context, p.Stderr, argv...)
 	if err != nil {
 		if needsResync(stderr) {
 			return BisyncResult{}, ErrNeedsResync
@@ -455,6 +489,10 @@ type CopyParams struct {
 	// deletes remote files absent locally.
 	DryRun  bool
 	Filters []string
+	// Context and Stderr opt a one-shot caller into cancellable execution with
+	// live rclone progress. Their zero values retain the daemon's captured path.
+	Context context.Context
+	Stderr  io.Writer
 }
 
 // isFileLocal reports whether local is an existing regular file (not a
@@ -550,13 +588,14 @@ func joinRemotePath(dir, name string) string {
 // copyLocalFile copies a single local file to a remote directory via `rclone
 // copyto <local> <remoteDir>/<base>`. Filters are not applied: there is
 // nothing else under a single source file to include/exclude.
-func (e *Engine) copyLocalFile(local, remoteDir string, dryRun bool) error {
-	dst := joinRemotePath(remoteDir, filepath.Base(local))
-	argv := []string{"copyto", local, dst, "--retries", "3", "--local-no-check-updated", "--drive-skip-gdocs"}
-	if dryRun {
+func (e *Engine) copyLocalFile(p CopyParams) error {
+	dst := joinRemotePath(p.Remote, filepath.Base(p.Local))
+	argv := []string{"copyto", p.Local, dst, "--retries", "3", "--local-no-check-updated", "--drive-skip-gdocs"}
+	if p.DryRun {
 		argv = append(argv, "--dry-run")
 	}
-	_, stderr, err := e.exec(argv...)
+	argv = appendProgressFlags(argv, p.Stderr)
+	stderr, err := e.execWithContext(p.Context, p.Stderr, argv...)
 	if err != nil {
 		return fmt.Errorf("rclone copyto: %w: %s", err, strings.TrimSpace(stderr))
 	}
@@ -586,7 +625,7 @@ func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if isFileLocal(p.Local) {
-		return e.copyLocalFile(p.Local, p.Remote, p.DryRun)
+		return e.copyLocalFile(p)
 	}
 	filterArgv, cleanup, err := writeFilters("--filter-from", p.Filters)
 	if err != nil {
@@ -598,7 +637,8 @@ func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
 		argv = append(argv, "--dry-run")
 	}
 	argv = append(argv, filterArgv...)
-	_, stderr, err := e.exec(argv...)
+	argv = appendProgressFlags(argv, p.Stderr)
+	stderr, err := e.execWithContext(p.Context, p.Stderr, argv...)
 	if err != nil {
 		return fmt.Errorf("rclone %s: %w: %s", subcommand, err, strings.TrimSpace(stderr))
 	}

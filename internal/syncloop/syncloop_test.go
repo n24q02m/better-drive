@@ -1,6 +1,7 @@
 package syncloop
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -205,6 +206,38 @@ func TestStartCancels(t *testing.T) {
 	case <-done:
 	case <-time.After(2 * time.Second):
 		t.Fatal("Start did not return after ctx cancel")
+	}
+}
+
+func TestRunOnceThreadsExecutionContextAndStderr(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "one-shot")
+
+	for _, mode := range []string{"copy", "sync", "bisync"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeSyncer{}
+			var stderr bytes.Buffer
+			l := newLoopMode(f, mode)
+			l.SetExecution(ctx, &stderr)
+			if err := l.RunOnce(); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+
+			switch mode {
+			case "copy":
+				if len(f.copyCalls) != 1 || f.copyCalls[0].Context != ctx || f.copyCalls[0].Stderr != &stderr {
+					t.Fatalf("copy params = %+v, want caller context and stderr", f.copyCalls)
+				}
+			case "sync":
+				if len(f.syncCalls) != 1 || f.syncCalls[0].Context != ctx || f.syncCalls[0].Stderr != &stderr {
+					t.Fatalf("sync params = %+v, want caller context and stderr", f.syncCalls)
+				}
+			default:
+				if len(f.calls) != 1 || f.calls[0].Context != ctx || f.calls[0].Stderr != &stderr {
+					t.Fatalf("bisync params = %+v, want caller context and stderr", f.calls)
+				}
+			}
+		})
 	}
 }
 
