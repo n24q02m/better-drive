@@ -22,10 +22,15 @@ func hideConsole(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: createNoWindow}
 }
 
-// resolveRcloneExecutable bypasses a Scoop shim when its adjacent .shim file
-// names a valid target. CommandContext can then own the real rclone process;
-// killing only the shim otherwise leaves its child running after cancellation.
+// resolveRcloneExecutable bypasses a Scoop shim only for an absolute executable
+// path returned by a successful lookup. CommandContext can then own the real
+// rclone process; killing only the shim otherwise leaves its child running after
+// cancellation. Rejecting relative paths also prevents a cwd-controlled
+// rclone.shim from being read after LookPath fails or returns ErrDot.
 func resolveRcloneExecutable(bin string) string {
+	if !filepath.IsAbs(bin) {
+		return bin
+	}
 	ext := filepath.Ext(bin)
 	shimPath := strings.TrimSuffix(bin, ext) + ".shim"
 	data, err := os.ReadFile(shimPath)
