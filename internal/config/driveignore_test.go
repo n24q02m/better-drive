@@ -247,7 +247,11 @@ func TestTranslateDriveIgnoreAgainstRealRcloneFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const rcloneDeadline = 30 * time.Second
+	// A race-instrumented full-suite run starts package test binaries in
+	// parallel. On Windows, the observed Scoop rclone process startup exceeded
+	// 30 seconds under that load even though the same isolated command completed
+	// normally. Keep this bounded, but budget for the external process under load.
+	const rcloneDeadline = 60 * time.Second
 	ctx, cancel := context.WithTimeout(context.Background(), rcloneDeadline)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, bin,
