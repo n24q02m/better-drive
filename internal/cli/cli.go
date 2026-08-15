@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 
@@ -57,7 +58,7 @@ func execute(args []string) (string, error) {
 func newRootCmd() *cobra.Command {
 	root := &cobra.Command{
 		Use:     "better-drive",
-		Short:   "Google Drive sync (bisync/copy/sync modes) with .driveignore + config excludes, multi-pair",
+		Short:   "Google Drive sync and virtual-drive mount with rclone",
 		Version: version.Version,
 		// cli.RenderError (via Execute) owns error rendering now, in whatever
 		// format the caller asked for - cobra's own default "Error: ..." +
@@ -67,7 +68,7 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
@@ -99,8 +100,8 @@ func badFormatErr(err error) error {
 		fmt.Sprintf("use --format %s or --format %s", output.FormatTable, output.FormatJSON))
 }
 
-// remoteNotConfiguredErr reports remoteName as missing or token-less, with a
-// remediation hint that is the exact command to fix it. Extracted out of
+// remoteNotConfiguredErr reports remoteName as missing or credential-less,
+// with a remediation hint that is the exact command to fix it. Extracted out of
 // runCmd's RunE (its only call site) so it can be unit-tested without a real
 // engine.Engine/rclone binary - the same reasoning runSyncOnce's doc comment
 // gives for taking a syncloop.Syncer parameter instead of constructing one.
@@ -183,9 +184,9 @@ func setupCmd() *cobra.Command {
 	return newAccountAddCmd("setup",
 		"Create the rclone Google Drive remote (opens browser for OAuth)",
 		"Create (or repair) an rclone Google Drive remote via `rclone config\n"+
-			"create`, which opens a browser for OAuth. Idempotent: a remote that is\n"+
-			"already configured with a valid token is left alone; a broken, token-less\n"+
-			"remote left behind by an interrupted setup is deleted and recreated.\n"+
+			"create`, which opens a browser for OAuth. Idempotent: a remote that\n"+
+			"already has an OAuth token or service-account file is left alone; a broken,\n"+
+			"credential-less remote left behind by an interrupted setup is deleted and recreated.\n"+
 			"`better-drive account add` is the same command under its other name.",
 		"  better-drive setup\n"+
 			"  better-drive setup --remote gdrive-work")
@@ -260,17 +261,14 @@ func runCmd() *cobra.Command {
 
 			err = tray.Run(loops, cfg.Pairs, agg) // blocks on the systray event loop until Quit
 			cancel()
-			wg.Wait() // wait for every sync loop goroutine to finish its current cycle
-			e.Close() // safe to Finalize the engine now that no goroutine can touch it
+			syncloop.ShutdownAll(loops) // reject new SyncNow requests and drain every accepted manual cycle
+			wg.Wait()                   // wait for every sync loop goroutine to finish its current cycle
+			e.Close()                   // safe to Finalize the engine now that no goroutine can touch it
 			if logFile != nil {
 				if closeErr := logFile.Close(); closeErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not close log file: %v\n", closeErr)
 				}
 			}
-			// NOTE (v1 accepted edge case): a SyncNow-triggered run started via the tray
-			// right before Quit races with cancel()/wg.Wait() above (SyncNow spawns its own
-			// goroutine per loop, not tracked by `wg`), so a loop can still be mid-sync when
-			// e.Close runs. Narrow window, no known data loss; revisit if it proves to matter.
 			return err
 		},
 	}
@@ -339,6 +337,9 @@ func syncCmd() *cobra.Command {
 			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
+			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
+			defer stop()
+			cmd.SetContext(ctx)
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
@@ -395,7 +396,12 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
 		loop.SetDryRun(dryRun)
 		loop.SetForceResync(forceResync)
+		loop.SetExecution(cmd.Context(), cmd.ErrOrStderr())
+		fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: RUNNING\n", p.Local, p.Remote, p.Mode)
 		if err := loop.RunOnce(); err != nil {
+			if errors.Is(err, context.Canceled) {
+				return results, err
+			}
 			failed = true
 			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)
 			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)

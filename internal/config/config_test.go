@@ -222,3 +222,39 @@ func TestValidateRejectsZeroInterval(t *testing.T) {
 		t.Fatal("want error for zero interval, got nil")
 	}
 }
+
+func TestLoadRcloneConfigOnlyAllowsMissingFile(t *testing.T) {
+	got, err := LoadRcloneConfigOnly(filepath.Join(t.TempDir(), "missing.toml"))
+	if err != nil {
+		t.Fatalf("LoadRcloneConfigOnly(missing): %v", err)
+	}
+	if got != "" {
+		t.Fatalf("rclone_config = %q, want empty discovery fallback", got)
+	}
+}
+
+func TestLoadRcloneConfigOnlyDoesNotValidatePairs(t *testing.T) {
+	p := writeTemp(t, `
+rclone_config = "X:/rclone.conf"
+
+[[pair]]
+local = ""
+remote = ""
+interval = "not-a-duration"
+mode = "not-a-mode"
+`)
+	got, err := LoadRcloneConfigOnly(p)
+	if err != nil {
+		t.Fatalf("LoadRcloneConfigOnly: %v", err)
+	}
+	if got != "X:/rclone.conf" {
+		t.Fatalf("rclone_config = %q, want %q", got, "X:/rclone.conf")
+	}
+}
+
+func TestLoadRcloneConfigOnlyRejectsMalformedExistingFile(t *testing.T) {
+	p := writeTemp(t, `rclone_config = "unterminated`)
+	if _, err := LoadRcloneConfigOnly(p); err == nil {
+		t.Fatal("want malformed existing config to fail")
+	}
+}

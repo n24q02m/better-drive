@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"path/filepath"
 	"sync"
 	"time"
@@ -46,21 +47,26 @@ type Syncer interface {
 type IgnoreFunc func() ([]string, error)
 
 type Loop struct {
-	s           Syncer
-	path1       string
-	path2       string
-	workdir     string
-	mode        string
-	ignore      IgnoreFunc
-	mu          sync.Mutex
-	state       State
-	paused      bool
-	hasBaseline bool
-	running     bool
-	dryRun      bool
-	forceResync bool
-	onChange    func(State)
-	onResult    func(error)
+	s            Syncer
+	path1        string
+	path2        string
+	workdir      string
+	mode         string
+	ignore       IgnoreFunc
+	mu           sync.Mutex
+	state        State
+	paused       bool
+	needsResync  bool
+	hasBaseline  bool
+	running      bool
+	dryRun       bool
+	forceResync  bool
+	execContext  context.Context
+	stderr       io.Writer
+	onChange     func(State)
+	onResult     func(error)
+	manualWG     sync.WaitGroup
+	manualClosed bool
 }
 
 // New creates a Loop for the given mode ("bisync", "copy", or "sync"); an
@@ -137,6 +143,16 @@ func (l *Loop) SetForceResync(v bool) {
 	l.mu.Unlock()
 }
 
+// SetExecution opts subsequent cycles into context-aware execution with live
+// rclone stderr. The one-shot CLI uses it for cancellation and progress; the
+// continuous daemon leaves both values unset and retains captured execution.
+func (l *Loop) SetExecution(ctx context.Context, stderr io.Writer) {
+	l.mu.Lock()
+	l.execContext = ctx
+	l.stderr = stderr
+	l.mu.Unlock()
+}
+
 func (l *Loop) setState(st State) {
 	l.mu.Lock()
 	l.state = st
@@ -169,6 +185,8 @@ func (l *Loop) runOnce() (err error) {
 	// when the caller explicitly asked for one to be rebuilt (SetForceResync).
 	resync := l.mode == "bisync" && (!l.hasBaseline || l.forceResync)
 	dryRun := l.dryRun
+	execContext := l.execContext
+	stderr := l.stderr
 	l.mu.Unlock()
 
 	// A panicking Syncer must not leave l.running stuck at true (which would
@@ -193,13 +211,13 @@ func (l *Loop) runOnce() (err error) {
 	if err == nil {
 		switch l.mode {
 		case "copy":
-			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
+			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
 		case "sync":
-			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters})
+			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
 		default: // "bisync"
 			_, err = l.s.Bisync(engine.BisyncParams{
 				Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
-				Resync: resync, DryRun: dryRun, Filters: filters,
+				Resync: resync, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr,
 			})
 		}
 	}
@@ -211,8 +229,10 @@ func (l *Loop) runOnce() (err error) {
 		if l.mode == "bisync" {
 			l.hasBaseline = true
 		}
+		l.needsResync = false
 		l.state = StateIdle
 	case errors.Is(err, engine.ErrNeedsResync):
+		l.needsResync = true
 		l.state = StateNeedsResync
 	default:
 		l.state = StateError
@@ -240,20 +260,77 @@ func (l *Loop) runOnce() (err error) {
 // tray and no ticker.
 func (l *Loop) RunOnce() error { return l.runOnce() }
 
-func (l *Loop) SyncNow() { go l.runOnce() }
+// SyncNow schedules a manual cycle without blocking the tray event loop. The
+// wait-group increment and the shutdown gate share l.mu so Shutdown cannot
+// begin waiting while a newly accepted cycle is still being registered.
+// It returns false once shutdown has started and no new manual work is
+// accepted.
+func (l *Loop) SyncNow() bool {
+	l.mu.Lock()
+	if l.manualClosed {
+		l.mu.Unlock()
+		return false
+	}
+	l.manualWG.Add(1)
+	l.mu.Unlock()
+
+	go func() {
+		defer l.manualWG.Done()
+		_ = l.runOnce()
+	}()
+	return true
+}
+
+func (l *Loop) beginShutdown() {
+	l.mu.Lock()
+	l.manualClosed = true
+	l.mu.Unlock()
+}
+
+// Shutdown stops accepting SyncNow requests and waits for every manual cycle
+// accepted before the gate closed. The scheduled Start goroutine remains
+// owned by its caller's context and wait group.
+func (l *Loop) Shutdown() {
+	l.beginShutdown()
+	l.manualWG.Wait()
+}
+
+// ShutdownAll closes every loop's acceptance gate before waiting on any one
+// loop. This prevents a blocked manual cycle in an early loop from leaving
+// later loops able to accept tray work during daemon teardown.
+func ShutdownAll(loops []*Loop) {
+	for _, loop := range loops {
+		loop.beginShutdown()
+	}
+	for _, loop := range loops {
+		loop.manualWG.Wait()
+	}
+}
 
 func (l *Loop) Pause() {
 	l.mu.Lock()
 	l.paused = true
+	l.state = StatePaused
+	fn := l.onChange
 	l.mu.Unlock()
-	l.setState(StatePaused)
+	if fn != nil {
+		fn(StatePaused)
+	}
 }
 
 func (l *Loop) Resume() {
 	l.mu.Lock()
 	l.paused = false
+	st := StateIdle
+	if l.needsResync {
+		st = StateNeedsResync
+	}
+	l.state = st
+	fn := l.onChange
 	l.mu.Unlock()
-	l.setState(StateIdle)
+	if fn != nil {
+		fn(st)
+	}
 }
 
 func (l *Loop) Start(ctx context.Context, interval time.Duration) {

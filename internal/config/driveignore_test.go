@@ -2,6 +2,7 @@ package config
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"os"
 	"os/exec"
@@ -9,6 +10,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTranslateDriveIgnore(t *testing.T) {
@@ -186,6 +188,26 @@ func TestPairFiltersNeverWritesDriveignoreFile(t *testing.T) {
 	}
 }
 
+// TestPairFiltersSingleFileDoesNotTreatItAsDirectory protects single-file
+// pairs such as ~/.claude.json. A file has no child .driveignore to open, so
+// PairFilters must not fail with an OS "not a directory" error before the
+// engine can dispatch the pair to rclone copyto.
+func TestPairFiltersSingleFileDoesNotTreatItAsDirectory(t *testing.T) {
+	local := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := PairFilters(local, []string{"*.tmp"})
+	if err != nil {
+		t.Fatalf("PairFilters(single file): %v", err)
+	}
+	want := []string{"- *.tmp"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %#v, want %#v", got, want)
+	}
+}
+
 // TestTranslateDriveIgnoreAgainstRealRcloneFilter shells out to the system
 // rclone binary (`rclone lsf --filter-from`) to verify the translated rules
 // against rclone's OWN filter engine, not just our string assertions - a
@@ -225,11 +247,26 @@ func TestTranslateDriveIgnoreAgainstRealRcloneFilter(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cmd := exec.Command(bin, "lsf", "--filter-from", filterFile, dir)
+	// A race-instrumented full-suite run starts package test binaries in
+	// parallel. On Windows, the observed Scoop rclone process startup exceeded
+	// 30 seconds under that load even though the same isolated command completed
+	// normally. Keep this bounded, but budget for the external process under load.
+	const rcloneDeadline = 60 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), rcloneDeadline)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, bin,
+		// An explicit null-device config bypasses ambient rclone config,
+		// credentials and remote discovery without creating a regular config
+		// file that rclone may lock or rewrite.
+		"--config", os.DevNull,
+		"lsf", "--filter-from", filterFile, dir)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			t.Fatalf("rclone lsf exceeded %s isolation deadline: %s", rcloneDeadline, stderr.String())
+		}
 		t.Fatalf("rclone lsf: %v: %s", err, stderr.String())
 	}
 	got := stdout.String()

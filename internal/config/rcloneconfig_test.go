@@ -12,7 +12,15 @@ func TestResolveRcloneConfigExplicitWins(t *testing.T) {
 	}
 }
 
+func TestResolveRcloneConfigEnvironmentWins(t *testing.T) {
+	t.Setenv("RCLONE_CONFIG", "X:/environment.conf")
+	if got := ResolveRcloneConfig(""); got != "X:/environment.conf" {
+		t.Fatalf("RCLONE_CONFIG must win when explicit path is empty, got %q", got)
+	}
+}
+
 func TestResolveRcloneConfigAutoDetectsExisting(t *testing.T) {
+	t.Setenv("RCLONE_CONFIG", "")
 	dir := t.TempDir()
 	conf := filepath.Join(dir, "rclone.conf")
 	if err := os.WriteFile(conf, []byte("[gdrive]\n"), 0o600); err != nil {
@@ -46,6 +54,7 @@ func TestResolveRcloneConfigAutoDetectsExisting(t *testing.T) {
 }
 
 func TestResolveRcloneConfigNoneExists(t *testing.T) {
+	t.Setenv("RCLONE_CONFIG", "")
 	t.Setenv("APPDATA", t.TempDir()) // Empty dir, no rclone/rclone.conf
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("USERPROFILE", t.TempDir())

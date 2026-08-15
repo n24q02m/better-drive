@@ -2,6 +2,7 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"errors"
 	"os"
@@ -65,9 +66,18 @@ func TestRootHasSubcommands(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatal(err)
 	}
-	for _, sub := range []string{"setup", "run", "status", "sync", "install", "uninstall"} {
+	for _, sub := range []string{"setup", "run", "status", "sync", "mount", "install", "uninstall"} {
 		if !bytes.Contains(buf.Bytes(), []byte(sub)) {
 			t.Errorf("help missing subcommand %q", sub)
+		}
+	}
+}
+
+func TestRootTaglineIncludesSyncAndMount(t *testing.T) {
+	short := strings.ToLower(newRootCmd().Short)
+	for _, capability := range []string{"sync", "mount"} {
+		if !strings.Contains(short, capability) {
+			t.Errorf("root tagline %q does not mention %s", short, capability)
 		}
 	}
 }
@@ -381,18 +391,28 @@ type fakeCLISyncer struct {
 	errByRemote  map[string]error
 	bisyncParams []engine.BisyncParams
 	copyParams   []engine.CopyParams
+	onCall       func()
 }
 
 func (f *fakeCLISyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
 	f.bisyncParams = append(f.bisyncParams, p)
+	if f.onCall != nil {
+		f.onCall()
+	}
 	return engine.BisyncResult{}, f.errByRemote[p.Path2]
 }
 func (f *fakeCLISyncer) Copy(p engine.CopyParams) error {
 	f.copyParams = append(f.copyParams, p)
+	if f.onCall != nil {
+		f.onCall()
+	}
 	return f.errByRemote[p.Remote]
 }
 func (f *fakeCLISyncer) Sync(p engine.CopyParams) error {
 	f.copyParams = append(f.copyParams, p)
+	if f.onCall != nil {
+		f.onCall()
+	}
 	return f.errByRemote[p.Remote]
 }
 
@@ -423,6 +443,32 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	// this assertion used to check stdout, which encoded the bug fixed here.
 	if !strings.Contains(errOut.String(), "gdrive:bad") || !strings.Contains(errOut.String(), "FAILED") || !strings.Contains(errOut.String(), "boom") {
 		t.Errorf("missing failed-pair line with its error on stderr; got:\n%s", errOut.String())
+	}
+}
+
+func TestRunSyncOnceStopsImmediatelyOnContextCanceled(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:first", Interval: time.Second, Mode: "copy"},
+		{Local: t.TempDir(), Remote: "gdrive:second", Interval: time.Second, Mode: "copy"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:first": context.Canceled}}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	if err != context.Canceled {
+		t.Fatalf("runSyncOnce error = %v, want original context.Canceled", err)
+	}
+	if len(s.copyParams) != 1 || s.copyParams[0].Remote != "gdrive:first" {
+		t.Fatalf("copy calls = %+v, want only the canceled first pair", s.copyParams)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %+v, want cancellation returned before failure bookkeeping", results)
+	}
+	if strings.Contains(errOut.String(), "FAILED") {
+		t.Fatalf("cancellation was reported as a sync failure:\n%s", errOut.String())
 	}
 }
 
@@ -474,6 +520,46 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Status != "ok" || results[1].Status != "ok" {
 		t.Errorf("results = %#v, want 2 ok results", results)
+	}
+}
+
+// TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory exercises the
+// same CLI path as `better-drive sync --dry-run --format json` for a
+// ~/.claude.json-style pair. Filter discovery must accept the file before the
+// engine's file-local dispatch turns the copy into rclone copyto.
+func TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory(t *testing.T) {
+	local := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Pairs: []config.Pair{{
+		Local: local, Remote: "gdrive:Backups/claude", Interval: time.Second, Mode: "copy",
+	}}}
+	s := &fakeCLISyncer{}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, true, false)
+	if err != nil {
+		t.Fatalf("runSyncOnce(single file): %v; stderr=%q", err, errOut.String())
+	}
+	if len(s.copyParams) != 1 {
+		t.Fatalf("copy calls = %d, want exactly one", len(s.copyParams))
+	}
+	got := s.copyParams[0]
+	if got.Local != local || got.Remote != "gdrive:Backups/claude" || !got.DryRun {
+		t.Fatalf("copy params = %+v, want file pair with dry-run preserved", got)
+	}
+	if len(got.Filters) != 0 {
+		t.Fatalf("copy filters = %#v, want none for a single-file pair", got.Filters)
+	}
+	if len(results) != 1 || results[0].Status != "ok" || !results[0].DryRun {
+		t.Fatalf("results = %+v, want one successful dry-run result", results)
+	}
+	if strings.Contains(errOut.String(), "not a directory") {
+		t.Fatalf("single-file pair was treated as a directory: %s", errOut.String())
 	}
 }
 
@@ -577,6 +663,69 @@ func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
 	}
 	if len(results) != 1 || !results[0].DryRun {
 		t.Errorf("results = %+v, want DryRun=true", results)
+	}
+}
+
+func TestRunSyncOnceThreadsCommandContextAndProgressWriter(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "cli-sync")
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "copy"},
+	}}
+	s := &fakeCLISyncer{}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetContext(ctx)
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false); err != nil {
+		t.Fatalf("runSyncOnce: %v", err)
+	}
+	if len(s.copyParams) != 1 {
+		t.Fatalf("copy params = %+v, want exactly one call", s.copyParams)
+	}
+	if s.copyParams[0].Context != ctx {
+		t.Fatal("runSyncOnce did not thread the command context to the sync engine")
+	}
+	if s.copyParams[0].Stderr != &errOut {
+		t.Fatal("runSyncOnce did not thread command stderr as the live progress writer")
+	}
+}
+
+func TestRunSyncOnceReportsPairRunningBeforeRcloneCompletes(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	s := &fakeCLISyncer{onCall: func() {
+		close(started)
+		<-release
+	}}
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:slow", Interval: time.Second, Mode: "copy"},
+	}}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	done := make(chan error, 1)
+	go func() {
+		_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false)
+		done <- err
+	}()
+
+	select {
+	case <-started:
+		if got := errOut.String(); !strings.Contains(got, "gdrive:slow") || !strings.Contains(got, "RUNNING") {
+			close(release)
+			t.Fatalf("stderr before rclone completion = %q, want pair RUNNING status", got)
+		}
+	case <-time.After(2 * time.Second):
+		close(release)
+		t.Fatal("syncer was not called")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatalf("runSyncOnce: %v", err)
 	}
 }
 

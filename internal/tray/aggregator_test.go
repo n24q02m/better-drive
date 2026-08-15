@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/n24q02m/better-drive/internal/engine"
@@ -31,6 +32,17 @@ func TestDeriveAnyErrorIsError(t *testing.T) {
 	states := map[int]syncloop.State{0: syncloop.StateIdle, 1: syncloop.StateError, 2: syncloop.StateNeedsResync}
 	if got := derive(states); got != syncloop.StateError {
 		t.Fatalf("derive(any error) = %v, want StateError", got)
+	}
+}
+
+func TestDeriveAggregatePreservesNeedsResyncBehindError(t *testing.T) {
+	states := map[int]syncloop.State{0: syncloop.StateError, 1: syncloop.StateNeedsResync}
+	got := deriveAggregate(states)
+	if got.State != syncloop.StateError {
+		t.Fatalf("aggregate state = %v, want StateError", got.State)
+	}
+	if !got.NeedsResync {
+		t.Fatal("aggregate lost NeedsResync while StateError had display precedence")
 	}
 }
 
@@ -94,7 +106,7 @@ func TestAggregatorRegisterFeedsCombinedState(t *testing.T) {
 
 	agg := NewAggregator()
 	var callbackFired int
-	agg.OnChange(func(syncloop.State) { callbackFired++ })
+	agg.OnChange(func(AggregateState) { callbackFired++ })
 	agg.Register(0, loopA)
 	agg.Register(1, loopB)
 
@@ -116,5 +128,58 @@ func TestAggregatorRegisterFeedsCombinedState(t *testing.T) {
 
 	if callbackFired == 0 {
 		t.Fatal("OnChange callback was never invoked despite loop state changes")
+	}
+}
+
+func TestAggregatorOnChangePreservesNeedsResyncBehindError(t *testing.T) {
+	agg := NewAggregator()
+	var got AggregateState
+	agg.OnChange(func(snapshot AggregateState) { got = snapshot })
+
+	agg.update(0, syncloop.StateError)
+	agg.update(1, syncloop.StateNeedsResync)
+
+	if got.State != syncloop.StateError || !got.NeedsResync {
+		t.Fatalf("OnChange snapshot = %+v, want StateError with NeedsResync", got)
+	}
+}
+
+func TestAggregatorCallbacksNeverDeliverOlderSnapshotAfterNewer(t *testing.T) {
+	agg := NewAggregator()
+	oldEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	var seenMu sync.Mutex
+	var seen []syncloop.State
+	agg.OnChange(func(snapshot AggregateState) {
+		if snapshot.State == syncloop.StateError {
+			close(oldEntered)
+			<-releaseOld
+		}
+		seenMu.Lock()
+		seen = append(seen, snapshot.State)
+		seenMu.Unlock()
+	})
+
+	oldDone := make(chan struct{})
+	go func() {
+		agg.update(0, syncloop.StateError)
+		close(oldDone)
+	}()
+	<-oldEntered
+
+	// The old implementation invoked this newer callback immediately while
+	// the older one was blocked, deterministically producing [idle error]. A
+	// serialized dispatcher queues it and returns without scheduler timing.
+	agg.update(0, syncloop.StateIdle)
+	if agg.State() != syncloop.StateIdle {
+		t.Fatal("new aggregate state was not committed before callback dispatch")
+	}
+	close(releaseOld)
+	<-oldDone
+
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	if len(seen) != 2 || seen[0] != syncloop.StateError || seen[1] != syncloop.StateIdle {
+		t.Fatalf("callback states = %v, want generation order [error idle]", seen)
 	}
 }

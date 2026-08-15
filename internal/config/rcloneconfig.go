@@ -20,6 +20,9 @@ func ResolveRcloneConfig(explicit string) string {
 	if explicit != "" {
 		return explicit
 	}
+	if env := os.Getenv("RCLONE_CONFIG"); env != "" {
+		return env
+	}
 
 	home, _ := os.UserHomeDir()
 	candidates := []candidate{

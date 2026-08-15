@@ -3,6 +3,7 @@ package paths
 import (
 	"path/filepath"
 	"regexp"
+	"strings"
 	"testing"
 )
 
@@ -60,5 +61,32 @@ func TestPairWorkdirNameShape(t *testing.T) {
 	name := filepath.Base(PairWorkdir("C:/Users/me/My Documents", "gdrive:My Documents"))
 	if matched, _ := regexp.MatchString(`^pair-[0-9a-f]{8}$`, name); !matched {
 		t.Errorf("workdir name = %q, want the form pair-<8 hex chars>", name)
+	}
+}
+
+func TestConfigFileHonorsEnvironmentOverride(t *testing.T) {
+	want := filepath.Join(t.TempDir(), "config.toml")
+	t.Setenv("BETTER_DRIVE_CONFIG", want)
+	if got := ConfigFile(); got != want {
+		t.Fatalf("ConfigFile() = %q, want override %q", got, want)
+	}
+}
+
+func TestDefaultPathsUseBetterDriveDirectory(t *testing.T) {
+	t.Setenv("BETTER_DRIVE_CONFIG", "")
+	for name, got := range map[string]string{
+		"config":  ConfigFile(),
+		"workdir": Workdir(),
+		"log":     LogFile(),
+	} {
+		if !strings.Contains(got, filepath.Join("better-drive")) {
+			t.Errorf("%s path %q does not use the better-drive directory", name, got)
+		}
+	}
+	if !strings.HasSuffix(ConfigFile(), filepath.Join("better-drive", "config.toml")) {
+		t.Errorf("ConfigFile() = %q, want better-drive\\config.toml suffix", ConfigFile())
+	}
+	if !strings.HasSuffix(LogFile(), filepath.Join("better-drive", "better-drive.log")) {
+		t.Errorf("LogFile() = %q, want better-drive\\better-drive.log suffix", LogFile())
 	}
 }

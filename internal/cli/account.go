@@ -190,8 +190,8 @@ func accountAddCmd() *cobra.Command {
 		"Add a Google Drive account (the same command as `better-drive setup`)",
 		"Add a Google Drive account by creating (or repairing) an rclone remote via\n"+
 			"`rclone config create`, which opens a browser for OAuth. Idempotent: an\n"+
-			"account that already has a valid token is left alone; a broken, token-less\n"+
-			"remote left behind by an interrupted run is deleted and recreated. This is\n"+
+			"account with an OAuth token or service-account file is left alone; a\n"+
+			"credential-less remote left behind by an interrupted run is deleted and recreated. This is\n"+
 			"the same command as `better-drive setup`, reachable under either name.",
 		"  better-drive account add\n"+
 			"  better-drive account add --remote gdrive-work")
@@ -301,14 +301,15 @@ func runAccountAdd(cmd *cobra.Command, e setupEngine, remote string, creds drive
 	// RemoteConfigured (not RemoteExists) gates the skip: config/create writes
 	// the remote's config stanza to disk BEFORE OAuth completes, so an
 	// interrupted run leaves behind a remote that "exists" by name but has no
-	// token. Treat that as broken and self-heal instead of silently skipping.
+	// usable credential. Treat that as broken and self-heal instead of silently
+	// skipping.
 	configured, _ := e.RemoteConfigured(remote)
 	if configured {
 		fmt.Fprintf(cmd.OutOrStdout(), "remote %q already set up\n", remote)
 		return nil
 	}
 	if exists, _ := e.RemoteExists(remote); exists {
-		_ = e.DeleteRemote(remote) // clear broken, token-less stanza before recreating
+		_ = e.DeleteRemote(remote) // clear broken, credential-less stanza before recreating
 	}
 	// rclone's error is returned exactly as it came back. It must never be
 	// wrapped with the params that produced it: --token's value is a live
@@ -327,7 +328,8 @@ func accountListCmd() *cobra.Command {
 		Use:   "list",
 		Short: "List the Google Drive accounts and the pairs using them",
 		Long: "List every Google Drive remote in the rclone config: its name, whether it\n" +
-			"has a usable token, and which pairs from config.toml sync against it.\n" +
+			"has usable OAuth or service-account credentials, and which pairs from\n" +
+			"config.toml sync against it.\n" +
 			"Read-only and offline by default - it never touches the network. Pass\n" +
 			"--quota to additionally ask Drive for each configured account's storage\n" +
 			"usage, which does make one network call per account.",
@@ -369,7 +371,7 @@ func runAccountList(cmd *cobra.Command, e accountEngine, cfg *config.Config, for
 			// without first testing it for absence.
 			Pairs: append([]string{}, pairsUsingRemote(cfg, name)...),
 		}
-		// A token-less remote is never asked for its quota: `rclone about`
+		// A credential-less remote is never asked for its quota: `rclone about`
 		// can only fail there, spending a round trip to produce a warning
 		// that the "not set up" state already explains.
 		if withQuota && configured {

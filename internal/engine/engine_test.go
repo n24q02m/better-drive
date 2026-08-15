@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -18,6 +20,90 @@ func newFakeRunnerEngine(cfg string, fn runner) *Engine {
 	return &Engine{cfg: cfg, run: fn}
 }
 
+// newFakeStreamingRunnerEngine builds an Engine with injectable captured and
+// streaming runner seams, so tests can exercise long-lived mount behavior
+// without a real rclone binary.
+func newFakeStreamingRunnerEngine(cfg string, runFn runner, streamFn streamRunner) *Engine {
+	if runFn == nil {
+		runFn = func(args ...string) (string, string, error) { return "", "", nil }
+	}
+	if streamFn == nil {
+		streamFn = func(ctx context.Context, stdout, stderr io.Writer, args ...string) error { return nil }
+	}
+	return &Engine{cfg: cfg, run: runFn, stream: streamFn}
+}
+
+type triggeredContext struct {
+	context.Context
+	err    error
+	cancel context.CancelFunc
+	once   sync.Once
+}
+
+const helperProcessCleanupGrace = time.Second
+
+func newTriggeredContext(t *testing.T, err error) *triggeredContext {
+	t.Helper()
+	testDeadline, ok := t.Deadline()
+	if !ok {
+		t.Fatal("helper-process test requires go test's bounded timeout")
+	}
+	// Bound child cleanup by the test binary's deadline instead of guessing
+	// how quickly Windows can schedule a new process under suite-wide load.
+	guardDeadline := testDeadline.Add(-helperProcessCleanupGrace)
+	if !time.Now().Before(guardDeadline) {
+		t.Fatal("insufficient time remains to start helper process and clean it up")
+	}
+
+	guard, cancel := context.WithDeadline(context.Background(), guardDeadline)
+	ctx := &triggeredContext{Context: guard, err: err, cancel: cancel}
+	t.Cleanup(ctx.trigger)
+	return ctx
+}
+
+func (c *triggeredContext) Err() error {
+	if c.Context.Err() == context.Canceled {
+		return c.err
+	}
+	return c.Context.Err()
+}
+func (c *triggeredContext) trigger() {
+	c.once.Do(c.cancel)
+}
+
+type signalingWriter struct {
+	dst      io.Writer
+	signaled chan struct{}
+	onSignal func()
+	once     sync.Once
+}
+
+func (w *signalingWriter) Write(p []byte) (int, error) {
+	n, err := w.dst.Write(p)
+	if n > 0 {
+		w.once.Do(func() {
+			close(w.signaled)
+			if w.onSignal != nil {
+				w.onSignal()
+			}
+		})
+	}
+	return n, err
+}
+
+type failingWriter struct{ err error }
+
+func (w failingWriter) Write([]byte) (int, error) { return 0, w.err }
+
+func waitForSignal(t *testing.T, ch <-chan struct{}, failure string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatal(failure)
+	}
+}
+
 // TestNewResolvesRunner verifies New wires up a working runner seam (the
 // rclone shell-out replacement for librclone.Initialize/RPC) without
 // requiring a real rclone binary on PATH for the construction itself.
@@ -31,6 +117,445 @@ func TestNewResolvesRunner(t *testing.T) {
 	}
 	if e.bin == "" {
 		t.Fatal("New(\"\").bin is empty, want a resolved rclone binary name/path")
+	}
+	if e.stream == nil {
+		t.Fatal("New(\"\").stream is nil, want a resolved streaming runner")
+	}
+}
+
+func TestExecStreamRunnerNormalizesContextCancellation(t *testing.T) {
+	const helperEnv = "GO_WANT_EXEC_STREAM_RUNNER_HELPER"
+	if os.Getenv(helperEnv) == "1" {
+		// An empty select is reported as a runtime deadlock, so the helper can
+		// exit with status 2 before its parent observes readiness. A blocking OS
+		// pipe read remains alive until CommandContext terminates the process.
+		readEnd, writeEnd, err := os.Pipe()
+		if err != nil {
+			_, _ = io.WriteString(os.Stderr, "create helper pipe: "+err.Error()+"\n")
+			os.Exit(2)
+		}
+		defer readEnd.Close()
+		defer writeEnd.Close()
+
+		if _, err := io.WriteString(os.Stdout, "helper ready\n"); err != nil {
+			_, _ = io.WriteString(os.Stderr, "write helper readiness: "+err.Error()+"\n")
+			os.Exit(2)
+		}
+		var blocked [1]byte
+		if _, err := readEnd.Read(blocked[:]); err != nil {
+			_, _ = io.WriteString(os.Stderr, "helper pipe read returned: "+err.Error()+"\n")
+		} else {
+			_, _ = io.WriteString(os.Stderr, "helper pipe became readable unexpectedly\n")
+		}
+		os.Exit(2)
+	}
+
+	t.Setenv(helperEnv, "1")
+	for _, want := range []error{context.Canceled, context.DeadlineExceeded} {
+		t.Run(want.Error(), func(t *testing.T) {
+			ctx := newTriggeredContext(t, want)
+			ready := make(chan struct{})
+			stdout := &signalingWriter{dst: io.Discard, signaled: ready, onSignal: ctx.trigger}
+			var helperStderr strings.Builder
+
+			err := execStreamRunner(os.Args[0])(
+				ctx,
+				stdout,
+				&helperStderr,
+				"-test.run=^TestExecStreamRunnerNormalizesContextCancellation$",
+			)
+			select {
+			case <-ready:
+			default:
+				t.Fatalf("helper process exited before readiness; runner error = %v, stderr = %q", err, helperStderr.String())
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("execStreamRunner() error = %v, want errors.Is(..., %v); helper stderr = %q", err, want, helperStderr.String())
+			}
+		})
+	}
+}
+
+func TestMountBuildsStreamingArgs(t *testing.T) {
+	t.Run("default cache mode and config prefix", func(t *testing.T) {
+		var gotArgv []string
+		e := newFakeStreamingRunnerEngine("X:/portable/rclone.conf", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+			gotArgv = append([]string(nil), args...)
+			return nil
+		})
+
+		err := e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:Projects",
+			Mountpoint: "G:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []string{
+			"--config", "X:/portable/rclone.conf",
+			"mount", "gdrive:Projects", "G:",
+			"--vfs-cache-mode", "full",
+		}
+		if !reflect.DeepEqual(gotArgv, want) {
+			t.Fatalf("argv = %#v, want %#v", gotArgv, want)
+		}
+	})
+
+	t.Run("read only appends flag", func(t *testing.T) {
+		var gotArgv []string
+		e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+			gotArgv = append([]string(nil), args...)
+			return nil
+		})
+
+		err := e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "M:",
+			ReadOnly:   true,
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		want := []string{
+			"mount", "gdrive:", "M:",
+			"--vfs-cache-mode", "full",
+			"--read-only",
+		}
+		if !reflect.DeepEqual(gotArgv, want) {
+			t.Fatalf("argv = %#v, want %#v", gotArgv, want)
+		}
+	})
+}
+
+func TestMountStreamsOutputAndRetainsStderrInError(t *testing.T) {
+	var stdoutBuf, stderrBuf strings.Builder
+	stdoutSeen := make(chan struct{})
+	stderrSeen := make(chan struct{})
+	releaseRunner := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseRunner) }) }
+	t.Cleanup(release)
+
+	boom := errors.New("exit status 1")
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		if _, err := io.WriteString(stdout, "mounted\n"); err != nil {
+			return err
+		}
+		if _, err := io.WriteString(stderr, "driver missing\n"); err != nil {
+			return err
+		}
+		<-releaseRunner
+		return boom
+	})
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "G:",
+			Stdout:     &signalingWriter{dst: &stdoutBuf, signaled: stdoutSeen},
+			Stderr:     &signalingWriter{dst: &stderrBuf, signaled: stderrSeen},
+		})
+	}()
+
+	waitForSignal(t, stdoutSeen, "stdout did not reach its writer while the mount runner was active")
+	waitForSignal(t, stderrSeen, "stderr did not reach its writer while the mount runner was active")
+	select {
+	case err := <-done:
+		t.Fatalf("Mount() returned before the blocked runner was released: %v", err)
+	default:
+	}
+
+	if got := stdoutBuf.String(); got != "mounted\n" {
+		t.Fatalf("live stdout = %q, want %q", got, "mounted\n")
+	}
+	if got := stderrBuf.String(); got != "driver missing\n" {
+		t.Fatalf("live stderr = %q, want %q", got, "driver missing\n")
+	}
+
+	release()
+	err := <-done
+	if err == nil {
+		t.Fatal("Mount() error = nil, want streamed stderr folded into the returned error")
+	}
+	if !errors.Is(err, boom) {
+		t.Fatalf("Mount() error = %v, want wrapped %v", err, boom)
+	}
+	if !strings.Contains(err.Error(), "driver missing") {
+		t.Fatalf("error = %v, want streamed stderr preserved for remediation", err)
+	}
+}
+
+func TestMountRetainsBoundedStderrTail(t *testing.T) {
+	const wantTailLimit = 64 * 1024
+	const head = "HEAD-MUST-BE-TRUNCATED\n"
+	const tail = "TAIL-MUST-BE-RETAINED"
+	payload := head + strings.Repeat("x", wantTailLimit) + tail
+	boom := errors.New("exit status 1")
+	var liveStderr strings.Builder
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		for start := 0; start < len(payload); {
+			end := start + 7919
+			if end > len(payload) {
+				end = len(payload)
+			}
+			if _, err := io.WriteString(stderr, payload[start:end]); err != nil {
+				return err
+			}
+			start = end
+		}
+		return boom
+	})
+
+	err := e.Mount(context.Background(), MountParams{
+		Remote:     "gdrive:",
+		Mountpoint: "G:",
+		Stdout:     io.Discard,
+		Stderr:     &liveStderr,
+	})
+	if !errors.Is(err, boom) {
+		t.Fatalf("Mount() error = %v, want wrapped %v", err, boom)
+	}
+	if got := liveStderr.String(); got != payload {
+		t.Fatalf("live stderr length = %d, want full %d-byte stream", len(got), len(payload))
+	}
+
+	errorPrefix := "rclone mount: " + boom.Error() + ": "
+	evidence, ok := strings.CutPrefix(err.Error(), errorPrefix)
+	if !ok {
+		t.Fatalf("Mount() error = %q, want prefix %q", err, errorPrefix)
+	}
+	if len(evidence) > wantTailLimit {
+		t.Fatalf("retained stderr length = %d, want at most %d", len(evidence), wantTailLimit)
+	}
+	wantEvidence := payload[len(payload)-wantTailLimit:]
+	if evidence != wantEvidence {
+		t.Fatalf("retained stderr is not the exact %d-byte tail", wantTailLimit)
+	}
+	if strings.Contains(evidence, head) {
+		t.Fatalf("retained stderr still contains truncated head marker")
+	}
+	if !strings.Contains(evidence, tail) {
+		t.Fatalf("retained stderr = %q, want tail marker %q", evidence, tail)
+	}
+}
+
+func TestMountRetainsStderrWhenLiveWriterFails(t *testing.T) {
+	writerErr := errors.New("terminal writer failed")
+	const evidence = "WinFsp driver missing"
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		_, err := io.WriteString(stderr, evidence)
+		return err
+	})
+
+	err := e.Mount(context.Background(), MountParams{
+		Remote:     "gdrive:",
+		Mountpoint: "G:",
+		Stdout:     io.Discard,
+		Stderr:     failingWriter{err: writerErr},
+	})
+	if !errors.Is(err, writerErr) {
+		t.Fatalf("Mount() error = %v, want wrapped terminal writer error %v", err, writerErr)
+	}
+	if !strings.Contains(err.Error(), evidence) {
+		t.Fatalf("Mount() error = %v, want retained stderr evidence %q", err, evidence)
+	}
+}
+
+func TestMountPropagatesContextToStreamingRunner(t *testing.T) {
+	started := make(chan context.Context, 1)
+	e := newFakeStreamingRunnerEngine("", nil, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		started <- ctx
+		<-ctx.Done()
+		return ctx.Err()
+	})
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		done <- e.Mount(ctx, MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "Z:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+	}()
+
+	gotCtx := <-started
+	if gotCtx != ctx {
+		t.Fatalf("runner context = %p, want %p", gotCtx, ctx)
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Mount() error = %v, want context.Canceled", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Mount() did not return after context cancellation")
+	}
+}
+
+func TestMountDoesNotSerializeWithSyncOps(t *testing.T) {
+	mountStarted := make(chan struct{})
+	copyEntered := make(chan struct{})
+	releaseMount := make(chan struct{})
+	var releaseOnce sync.Once
+	release := func() { releaseOnce.Do(func() { close(releaseMount) }) }
+	t.Cleanup(release)
+	e := newFakeStreamingRunnerEngine("", func(args ...string) (string, string, error) {
+		close(copyEntered)
+		return "", "", nil
+	}, func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
+		close(mountStarted)
+		<-releaseMount
+		return nil
+	})
+
+	mountDone := make(chan error, 1)
+	go func() {
+		mountDone <- e.Mount(context.Background(), MountParams{
+			Remote:     "gdrive:",
+			Mountpoint: "X:",
+			Stdout:     io.Discard,
+			Stderr:     io.Discard,
+		})
+	}()
+
+	waitForSignal(t, mountStarted, "mount runner did not enter")
+
+	copyDone := make(chan error, 1)
+	copyLocal := t.TempDir()
+	go func() {
+		copyDone <- e.Copy(CopyParams{Local: copyLocal, Remote: "gdrive:backup"})
+	}()
+
+	waitForSignal(t, copyEntered, "Copy runner did not enter while Mount was blocked; Mount may hold syncMu")
+	select {
+	case err := <-copyDone:
+		if err != nil {
+			t.Fatalf("Copy() error = %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Copy() did not return after its runner entered")
+	}
+
+	release()
+
+	select {
+	case err := <-mountDone:
+		if err != nil {
+			t.Fatalf("Mount() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("Mount() did not return after release")
+	}
+}
+
+// TestSyncCommandsStreamProgressAndCancel protects the one-shot CLI path from
+// looking hung while rclone scans a large remote. Every sync mode must use the
+// context-aware streaming runner when the caller supplies a progress writer,
+// expose rclone stats before the process exits, and stop on cancellation.
+func TestSyncCommandsStreamProgressAndCancel(t *testing.T) {
+	tests := []struct {
+		name       string
+		subcommand string
+		fileLocal  bool
+	}{
+		{name: "copy directory", subcommand: "copy"},
+		{name: "sync directory", subcommand: "sync"},
+		{name: "copy single file", subcommand: "copyto", fileLocal: true},
+		{name: "bisync", subcommand: "bisync"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+
+			started := make(chan struct{})
+			var gotContext context.Context
+			var gotArgs []string
+			var progress strings.Builder
+			e := newFakeStreamingRunnerEngine("", nil,
+				func(streamContext context.Context, _ io.Writer, stderr io.Writer, args ...string) error {
+					gotContext = streamContext
+					gotArgs = append([]string(nil), args...)
+					if _, err := stderr.Write([]byte("Transferred: 1 / 2\n")); err != nil {
+						return err
+					}
+					close(started)
+					<-streamContext.Done()
+					return streamContext.Err()
+				})
+
+			local := t.TempDir()
+			workdir := t.TempDir()
+			if tt.fileLocal {
+				local = filepath.Join(local, ".claude.json")
+				if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+
+			done := make(chan error, 1)
+			go func() {
+				switch tt.subcommand {
+				case "bisync":
+					_, err := e.Bisync(BisyncParams{
+						Path1: local, Path2: "gdrive:test", Workdir: workdir,
+						DryRun: true, Context: ctx, Stderr: &progress,
+					})
+					done <- err
+				default:
+					operation := tt.subcommand
+					if tt.fileLocal {
+						operation = "copy"
+					}
+					done <- e.copyOrSync(operation, CopyParams{
+						Local: local, Remote: "gdrive:test", DryRun: true,
+						Context: ctx, Stderr: &progress,
+					})
+				}
+			}()
+
+			select {
+			case <-started:
+				if !strings.Contains(progress.String(), "Transferred: 1 / 2") {
+					t.Fatalf("progress was not visible before process exit: %q", progress.String())
+				}
+			case err := <-done:
+				t.Fatalf("sync returned before streaming runner started: %v", err)
+			}
+
+			cancel()
+			err := <-done
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("sync error = %v, want context.Canceled", err)
+			}
+
+			if gotContext != ctx {
+				t.Fatal("sync did not propagate the caller context to the streaming runner")
+			}
+			if len(gotArgs) == 0 || gotArgs[0] != tt.subcommand {
+				t.Fatalf("args = %v, want subcommand %q", gotArgs, tt.subcommand)
+			}
+			for _, want := range []string{"--dry-run", "--stats", "5s", "--stats-one-line"} {
+				if !containsArg(gotArgs, want) {
+					t.Errorf("args = %v, missing progress arg %q", gotArgs, want)
+				}
+			}
+		})
 	}
 }
 
@@ -264,6 +789,17 @@ func TestRemoteConfiguredWithToken(t *testing.T) {
 	}
 }
 
+func TestRemoteConfiguredWithServiceAccountFile(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "[gdrive-sa]\ntype = drive\nservice_account_file = C:/secrets/drive-service-account.json\n", "", nil
+	})
+
+	ok, err := e.RemoteConfigured("gdrive-sa")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want true, nil for Drive service_account_file auth", ok, err)
+	}
+}
+
 // TestRemoteConfiguredTokenless verifies a remote whose config/create hasn't
 // finished OAuth yet (no "token" line at all) is reported as not configured.
 func TestRemoteConfiguredTokenless(t *testing.T) {
@@ -474,6 +1010,22 @@ func TestBisyncDryRunPassesFlagToRclone(t *testing.T) {
 	}
 	if !containsArg(gotArgv, "--dry-run") {
 		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
+func TestBisyncDryRunDoesNotCreateWorkdir(t *testing.T) {
+	workdir := filepath.Join(t.TempDir(), "not-created")
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "", nil
+	})
+
+	if _, err := e.Bisync(BisyncParams{
+		Path1: t.TempDir(), Path2: "gdrive:x", Workdir: workdir, DryRun: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("workdir %q exists after Bisync dry-run, want no filesystem write", workdir)
 	}
 }
 

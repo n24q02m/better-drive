@@ -94,6 +94,14 @@ func TranslateDriveIgnore(localRoot string) ([]string, error) {
 // pair (e.g. a real user directory like ~/.claude) be excluded entirely via
 // config, with no .driveignore file ever written into that directory.
 func PairFilters(localRoot string, exclude []string) ([]string, error) {
+	info, err := os.Stat(localRoot)
+	if err == nil && !info.IsDir() {
+		// A single-file pair (for example ~/.claude.json) has no child
+		// .driveignore to inspect. Preserve config-level excludes here; the
+		// engine deliberately omits them when it dispatches the file through
+		// rclone copyto because there is no directory tree to filter.
+		return TranslateIgnoreLines(exclude), nil
+	}
 	fileLines, err := readDriveIgnoreLines(localRoot)
 	if err != nil {
 		return nil, err

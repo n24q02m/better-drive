@@ -1,6 +1,7 @@
 package syncloop
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os"
@@ -208,6 +209,38 @@ func TestStartCancels(t *testing.T) {
 	}
 }
 
+func TestRunOnceThreadsExecutionContextAndStderr(t *testing.T) {
+	type contextKey struct{}
+	ctx := context.WithValue(context.Background(), contextKey{}, "one-shot")
+
+	for _, mode := range []string{"copy", "sync", "bisync"} {
+		t.Run(mode, func(t *testing.T) {
+			f := &fakeSyncer{}
+			var stderr bytes.Buffer
+			l := newLoopMode(f, mode)
+			l.SetExecution(ctx, &stderr)
+			if err := l.RunOnce(); err != nil {
+				t.Fatalf("RunOnce: %v", err)
+			}
+
+			switch mode {
+			case "copy":
+				if len(f.copyCalls) != 1 || f.copyCalls[0].Context != ctx || f.copyCalls[0].Stderr != &stderr {
+					t.Fatalf("copy params = %+v, want caller context and stderr", f.copyCalls)
+				}
+			case "sync":
+				if len(f.syncCalls) != 1 || f.syncCalls[0].Context != ctx || f.syncCalls[0].Stderr != &stderr {
+					t.Fatalf("sync params = %+v, want caller context and stderr", f.syncCalls)
+				}
+			default:
+				if len(f.calls) != 1 || f.calls[0].Context != ctx || f.calls[0].Stderr != &stderr {
+					t.Fatalf("bisync params = %+v, want caller context and stderr", f.calls)
+				}
+			}
+		})
+	}
+}
+
 func TestResumeReturnsToIdle(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoop(f)
@@ -218,6 +251,24 @@ func TestResumeReturnsToIdle(t *testing.T) {
 	l.Resume()
 	if l.State() != StateIdle {
 		t.Fatalf("state after Resume=%v, want StateIdle", l.State())
+	}
+}
+
+func TestResumeRestoresNeedsResyncLatch(t *testing.T) {
+	f := &fakeSyncer{err: engine.ErrNeedsResync}
+	l := newLoop(f)
+	l.hasBaseline = true
+	if err := l.runOnce(); !errors.Is(err, engine.ErrNeedsResync) {
+		t.Fatalf("runOnce error = %v, want ErrNeedsResync", err)
+	}
+
+	l.Pause()
+	if l.State() != StatePaused {
+		t.Fatalf("state after Pause=%v, want StatePaused", l.State())
+	}
+	l.Resume()
+	if l.State() != StateNeedsResync {
+		t.Fatalf("state after Resume=%v, want StateNeedsResync while latch is open", l.State())
 	}
 }
 
@@ -261,7 +312,9 @@ func TestOnChangeInvokedOnStateChange(t *testing.T) {
 func TestSyncNowRunsAsync(t *testing.T) {
 	f := &fakeSyncer{}
 	l := newLoop(f)
-	l.SyncNow()
+	if accepted := l.SyncNow(); !accepted {
+		t.Fatal("SyncNow rejected before shutdown")
+	}
 	deadline := time.After(2 * time.Second)
 	for {
 		f.mu.Lock()
@@ -276,6 +329,100 @@ func TestSyncNowRunsAsync(t *testing.T) {
 		case <-time.After(time.Millisecond):
 		}
 	}
+}
+
+func TestShutdownWaitsForAcceptedSyncNow(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	f := &fakeSyncer{inFlight: func() {
+		close(entered)
+		<-release
+	}}
+	l := newLoop(f)
+	l.hasBaseline = true
+	if accepted := l.SyncNow(); !accepted {
+		t.Fatal("SyncNow rejected before shutdown")
+	}
+	<-entered
+
+	shutdownDone := make(chan struct{})
+	go func() {
+		l.Shutdown()
+		close(shutdownDone)
+	}()
+
+	for {
+		l.mu.Lock()
+		closed := l.manualClosed
+		l.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	select {
+	case <-shutdownDone:
+		t.Fatal("Shutdown returned while an accepted SyncNow was still blocked")
+	default:
+	}
+
+	close(release)
+	<-shutdownDone
+}
+
+func TestSyncNowRejectedAfterShutdown(t *testing.T) {
+	f := &fakeSyncer{}
+	l := newLoop(f)
+	l.Shutdown()
+
+	if accepted := l.SyncNow(); accepted {
+		t.Fatal("SyncNow accepted work after shutdown")
+	}
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.calls) != 0 {
+		t.Fatalf("SyncNow after shutdown ran %d sync cycles, want 0", len(f.calls))
+	}
+}
+
+func TestShutdownAllClosesEveryGateBeforeWaiting(t *testing.T) {
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	blocked := newLoop(&fakeSyncer{inFlight: func() {
+		close(entered)
+		<-release
+	}})
+	blocked.hasBaseline = true
+	later := newLoop(&fakeSyncer{})
+	if !blocked.SyncNow() {
+		t.Fatal("blocked loop rejected SyncNow before shutdown")
+	}
+	<-entered
+
+	done := make(chan struct{})
+	go func() {
+		ShutdownAll([]*Loop{blocked, later})
+		close(done)
+	}()
+	for {
+		later.mu.Lock()
+		closed := later.manualClosed
+		later.mu.Unlock()
+		if closed {
+			break
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if later.SyncNow() {
+		t.Fatal("later loop accepted SyncNow while ShutdownAll waited on an earlier loop")
+	}
+	select {
+	case <-done:
+		t.Fatal("ShutdownAll returned while accepted work was blocked")
+	default:
+	}
+	close(release)
+	<-done
 }
 
 func TestRunOncePanicRecovers(t *testing.T) {
