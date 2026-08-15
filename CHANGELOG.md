@@ -2,6 +2,63 @@
 
 <!-- version list -->
 
+## v1.6.0 (2026-08-15)
+
+### Bug Fixes
+
+- Address scorecard security controls
+  ([`7784896`](https://github.com/n24q02m/better-drive/commit/7784896cdabb265e5382b3d9e779328529ba3033))
+
+- Document intentional error handling
+  ([`f8e9d9d`](https://github.com/n24q02m/better-drive/commit/f8e9d9d83f56c0ad263bdf0154cf2886520f91fc))
+
+- Handle resource close errors
+  ([`6c10aa5`](https://github.com/n24q02m/better-drive/commit/6c10aa5d8bc6c785a24aaa103cbae82f386a267f))
+
+- Harden rclone config path resolution
+  ([`838039f`](https://github.com/n24q02m/better-drive/commit/838039f7d9b80b2233e03a686047a853a7d9568e))
+
+- Harden systemd autostart path escaping
+  ([`96d9a80`](https://github.com/n24q02m/better-drive/commit/96d9a801e4fb944b03d59bbf89bfde6beb932e6d))
+
+- Harden tray path handling
+  ([`e88cdaf`](https://github.com/n24q02m/better-drive/commit/e88cdafce86a37ba6f06651d0e305c26cb89bdcc))
+
+- Move this repo to Apache-2.0 ([#63](https://github.com/n24q02m/better-drive/pull/63),
+  [`213a74d`](https://github.com/n24q02m/better-drive/commit/213a74d34867d85f4aac67b4a2901bdcd7d5fd4f))
+
+- Publish scorecard-recognized release signatures
+  ([#98](https://github.com/n24q02m/better-drive/pull/98),
+  [`59dd0e7`](https://github.com/n24q02m/better-drive/commit/59dd0e7ace70d23c89a37439ed68c7c49d20aaf3))
+
+- Update non-major dependencies
+  ([`f54f5c8`](https://github.com/n24q02m/better-drive/commit/f54f5c890461971826aff138ce728cdf44608808))
+
+- **deps**: Update step-security/harden-runner action to v2.20.1
+  ([#96](https://github.com/n24q02m/better-drive/pull/96),
+  [`06abb54`](https://github.com/n24q02m/better-drive/commit/06abb54eb59b39dea07a6eaaaf76b4923d2967de))
+
+### Features
+
+- Add dynamic tray menu tooltips
+  ([`451a21f`](https://github.com/n24q02m/better-drive/commit/451a21fa84444ec66262f0bf2710478cde5af98a))
+
+- Add repository governance and developer guardrails
+  ([`43cfb68`](https://github.com/n24q02m/better-drive/commit/43cfb68c5723697242f51bcc1e6b839c374d2892))
+
+- Disable paused sync action
+  ([`e432693`](https://github.com/n24q02m/better-drive/commit/e4326931048a12f15fe45944eb7dd695527f44b9))
+
+- Finalize mount and sync reliability
+  ([`6311b28`](https://github.com/n24q02m/better-drive/commit/6311b28569ff402c6fdef28730cea1a123bea366))
+
+- Optimize ignore-line translation
+  ([`59072a1`](https://github.com/n24q02m/better-drive/commit/59072a118774c63bbfb9e251e8cf0735104df86c))
+
+- Sync cross-promo section ([#47](https://github.com/n24q02m/better-drive/pull/47),
+  [`83e8ca7`](https://github.com/n24q02m/better-drive/commit/83e8ca7c43a8b2f5cf31efa869c4bf9dce9c0d4e))
+
+
 ## v1.5.1 (2026-07-25)
 
 ### Bug Fixes
