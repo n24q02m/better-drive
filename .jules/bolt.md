@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2025-02-27 - Replace strings.Split with iterative strings.Cut for parsing lines
+**Learning:** When parsing large string outputs from processes or reading multi-line shim files in Go, `strings.Split(str, "\n")` allocates a new slice and duplicates every string on each line, creating significant garbage collection overhead.
+**Action:** Prefer using `strings.Cut` iteratively over `strings.Split`. Assign the string to a variable, loop while it's not empty, and use `line, rest, _ = strings.Cut(rest, "\n")` to process lines iteratively with zero allocation.
