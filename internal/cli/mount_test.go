@@ -170,6 +170,39 @@ func TestMountCmdValidatesArityAndRemotePath(t *testing.T) {
 	}
 }
 
+func TestMountCmdRejectsFlagLikePositionalsBeforeEngine(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "remote", args: []string{"-attacker:path", "G:"}},
+		{name: "mountpoint", args: []string{"gdrive:path", "--attacker-option"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			factoryCalled := false
+			cmd := mountCmdWithFactory(func(string) mountEngine {
+				factoryCalled = true
+				return &fakeMountEngine{configured: true}
+			})
+			cmd.SetOut(io.Discard)
+			cmd.SetErr(io.Discard)
+			cmd.SetArgs(append([]string{"--"}, tt.args...))
+
+			err := cmd.Execute()
+			if err == nil {
+				t.Fatalf("args %q were accepted and could become rclone flags", tt.args)
+			}
+			if exitcode.Code(err) != exitcode.ConfigErrorCode {
+				t.Fatalf("error = %v, code = %d, want config error", err, exitcode.Code(err))
+			}
+			if factoryCalled {
+				t.Fatal("engine factory called before flag-like positional was rejected")
+			}
+		})
+	}
+}
+
 func TestMountCmdRequiresConfiguredOAuthRemote(t *testing.T) {
 	service := &fakeMountEngine{configured: false}
 	_, _, _, _ = mountFixture(t, "", service)

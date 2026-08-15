@@ -15,6 +15,11 @@ type AggregateState struct {
 	NeedsResync bool
 }
 
+type aggregateChange struct {
+	snapshot AggregateState
+	callback func(AggregateState)
+}
+
 // Aggregator combines the per-loop syncloop.State of N independent sync
 // loops (one per config pair) into an AggregateState for the tray. Scalar
 // State precedence (highest first):
@@ -25,9 +30,11 @@ type AggregateState struct {
 // this simple: Register wires a Loop's OnChange callback to record its state
 // under a stable key (the pair's index) and recompute the combined state.
 type Aggregator struct {
-	mu       sync.Mutex
-	states   map[int]syncloop.State
-	onChange func(AggregateState)
+	mu          sync.Mutex
+	states      map[int]syncloop.State
+	onChange    func(AggregateState)
+	pending     []aggregateChange
+	dispatching bool
 }
 
 // NewAggregator returns an empty Aggregator; State() on an Aggregator with no
@@ -57,9 +64,39 @@ func (a *Aggregator) update(idx int, st syncloop.State) {
 	a.states[idx] = st
 	combined := deriveAggregate(a.states)
 	fn := a.onChange
+	if fn == nil {
+		a.mu.Unlock()
+		return
+	}
+	// Enqueue under the same lock that establishes state order. Exactly one
+	// updater drains the queue, so callbacks cannot overtake one another even
+	// when an older callback blocks while a newer state is committed. Keeping
+	// the callback outside a.mu lets callbacks safely query Aggregate/State.
+	a.pending = append(a.pending, aggregateChange{snapshot: combined, callback: fn})
+	if a.dispatching {
+		a.mu.Unlock()
+		return
+	}
+	a.dispatching = true
 	a.mu.Unlock()
-	if fn != nil {
-		fn(combined)
+
+	a.dispatchChanges()
+}
+
+func (a *Aggregator) dispatchChanges() {
+	for {
+		a.mu.Lock()
+		if len(a.pending) == 0 {
+			a.dispatching = false
+			a.mu.Unlock()
+			return
+		}
+		change := a.pending[0]
+		a.pending[0] = aggregateChange{}
+		a.pending = a.pending[1:]
+		a.mu.Unlock()
+
+		change.callback(change.snapshot)
 	}
 }
 

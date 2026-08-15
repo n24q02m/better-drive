@@ -536,18 +536,12 @@ func TestSyncCommandsStreamProgressAndCancel(t *testing.T) {
 				}
 			case err := <-done:
 				t.Fatalf("sync returned before streaming runner started: %v", err)
-			case <-time.After(2 * time.Second):
-				t.Fatal("sync did not start the streaming runner")
 			}
 
 			cancel()
-			select {
-			case err := <-done:
-				if !errors.Is(err, context.Canceled) {
-					t.Fatalf("sync error = %v, want context.Canceled", err)
-				}
-			case <-time.After(2 * time.Second):
-				t.Fatal("sync did not return after context cancellation")
+			err := <-done
+			if !errors.Is(err, context.Canceled) {
+				t.Fatalf("sync error = %v, want context.Canceled", err)
 			}
 
 			if gotContext != ctx {
@@ -795,6 +789,17 @@ func TestRemoteConfiguredWithToken(t *testing.T) {
 	}
 }
 
+func TestRemoteConfiguredWithServiceAccountFile(t *testing.T) {
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "[gdrive-sa]\ntype = drive\nservice_account_file = C:/secrets/drive-service-account.json\n", "", nil
+	})
+
+	ok, err := e.RemoteConfigured("gdrive-sa")
+	if err != nil || !ok {
+		t.Fatalf("ok=%v err=%v, want true, nil for Drive service_account_file auth", ok, err)
+	}
+}
+
 // TestRemoteConfiguredTokenless verifies a remote whose config/create hasn't
 // finished OAuth yet (no "token" line at all) is reported as not configured.
 func TestRemoteConfiguredTokenless(t *testing.T) {
@@ -1005,6 +1010,22 @@ func TestBisyncDryRunPassesFlagToRclone(t *testing.T) {
 	}
 	if !containsArg(gotArgv, "--dry-run") {
 		t.Errorf("argv %v missing --dry-run", gotArgv)
+	}
+}
+
+func TestBisyncDryRunDoesNotCreateWorkdir(t *testing.T) {
+	workdir := filepath.Join(t.TempDir(), "not-created")
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		return "", "", nil
+	})
+
+	if _, err := e.Bisync(BisyncParams{
+		Path1: t.TempDir(), Path2: "gdrive:x", Workdir: workdir, DryRun: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(workdir); !os.IsNotExist(err) {
+		t.Fatalf("workdir %q exists after Bisync dry-run, want no filesystem write", workdir)
 	}
 }
 

@@ -446,6 +446,32 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	}
 }
 
+func TestRunSyncOnceStopsImmediatelyOnContextCanceled(t *testing.T) {
+	cfg := &config.Config{Pairs: []config.Pair{
+		{Local: t.TempDir(), Remote: "gdrive:first", Interval: time.Second, Mode: "copy"},
+		{Local: t.TempDir(), Remote: "gdrive:second", Interval: time.Second, Mode: "copy"},
+	}}
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:first": context.Canceled}}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	if err != context.Canceled {
+		t.Fatalf("runSyncOnce error = %v, want original context.Canceled", err)
+	}
+	if len(s.copyParams) != 1 || s.copyParams[0].Remote != "gdrive:first" {
+		t.Fatalf("copy calls = %+v, want only the canceled first pair", s.copyParams)
+	}
+	if len(results) != 0 {
+		t.Fatalf("results = %+v, want cancellation returned before failure bookkeeping", results)
+	}
+	if strings.Contains(errOut.String(), "FAILED") {
+		t.Fatalf("cancellation was reported as a sync failure:\n%s", errOut.String())
+	}
+}
+
 // TestRunSyncOnce_FailuresGoToStderr verifies the AX contract: stdout carries
 // only success (OK) lines, while FAILED (and SKIPPED) diagnostics go to
 // stderr. Every agent consumer of `sync` (and Task 3's JSON renderer) depends
@@ -494,6 +520,46 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	}
 	if len(results) != 2 || results[0].Status != "ok" || results[1].Status != "ok" {
 		t.Errorf("results = %#v, want 2 ok results", results)
+	}
+}
+
+// TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory exercises the
+// same CLI path as `better-drive sync --dry-run --format json` for a
+// ~/.claude.json-style pair. Filter discovery must accept the file before the
+// engine's file-local dispatch turns the copy into rclone copyto.
+func TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory(t *testing.T) {
+	local := filepath.Join(t.TempDir(), ".claude.json")
+	if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{Pairs: []config.Pair{{
+		Local: local, Remote: "gdrive:Backups/claude", Interval: time.Second, Mode: "copy",
+	}}}
+	s := &fakeCLISyncer{}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, true, false)
+	if err != nil {
+		t.Fatalf("runSyncOnce(single file): %v; stderr=%q", err, errOut.String())
+	}
+	if len(s.copyParams) != 1 {
+		t.Fatalf("copy calls = %d, want exactly one", len(s.copyParams))
+	}
+	got := s.copyParams[0]
+	if got.Local != local || got.Remote != "gdrive:Backups/claude" || !got.DryRun {
+		t.Fatalf("copy params = %+v, want file pair with dry-run preserved", got)
+	}
+	if len(got.Filters) != 0 {
+		t.Fatalf("copy filters = %#v, want none for a single-file pair", got.Filters)
+	}
+	if len(results) != 1 || results[0].Status != "ok" || !results[0].DryRun {
+		t.Fatalf("results = %+v, want one successful dry-run result", results)
+	}
+	if strings.Contains(errOut.String(), "not a directory") {
+		t.Fatalf("single-file pair was treated as a directory: %s", errOut.String())
 	}
 }
 

@@ -85,3 +85,21 @@ func TestWithRemediation_ComposesWithCode(t *testing.T) {
 		t.Errorf("RemediationOf(remediated ConfigError) = %q, want %q", got, "edit config.toml")
 	}
 }
+
+func TestWrappedErrorsExposeOriginalMessages(t *testing.T) {
+	base := errors.New("bad config")
+	classified := exitcode.ConfigError(base)
+	if got := classified.Error(); got != base.Error() {
+		t.Fatalf("classified.Error() = %q, want %q", got, base.Error())
+	}
+	if !errors.Is(classified, base) {
+		t.Fatal("classified error does not unwrap to its cause")
+	}
+	remediated := exitcode.WithRemediation(classified, "fix config.toml")
+	if got := remediated.Error(); got != base.Error() {
+		t.Fatalf("remediated.Error() = %q, want %q", got, base.Error())
+	}
+	if !errors.Is(remediated, base) {
+		t.Fatal("remediated error does not unwrap to its cause")
+	}
+}

@@ -17,9 +17,9 @@ import (
 var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
 type Engine struct {
-	// bin is the resolved rclone binary path (from exec.LookPath, or the bare
-	// "rclone" name when not found on PATH - the error surfaces on first use
-	// instead of at New()). cfg is the rclone config file path to pass via
+	// bin is the resolved rclone binary path (from a successful exec.LookPath,
+	// or the bare "rclone" name when lookup fails - the error surfaces on first
+	// use instead of at New()). cfg is the rclone config file path to pass via
 	// --config; empty means let rclone fall back to its own default discovery
 	// (including honoring the RCLONE_CONFIG env var itself). run and stream are
 	// the short-lived captured and long-lived streaming seams tests inject
@@ -46,11 +46,10 @@ type Engine struct {
 // own default config discovery, including the RCLONE_CONFIG env var, which
 // the rclone CLI honors natively.
 func New(rcloneConfigPath string) *Engine {
-	bin, err := exec.LookPath("rclone")
-	if err != nil {
-		bin = "rclone" // not found on PATH; the error surfaces on first use
+	bin := "rclone" // lookup failures surface on first use
+	if resolved, err := exec.LookPath(bin); err == nil {
+		bin = resolveRcloneExecutable(resolved)
 	}
-	bin = resolveRcloneExecutable(bin)
 	return &Engine{
 		bin:    bin,
 		cfg:    rcloneConfigPath,
@@ -108,18 +107,18 @@ func (e *Engine) RemoteExists(name string) (bool, error) {
 	return false, nil
 }
 
-// RemoteConfigured reports whether name is a remote with a valid OAuth token,
-// as opposed to a broken, token-less stanza left behind by an interrupted
-// config/create (see CreateDriveRemote doc). `rclone config show <name>` on a
-// remote whose config/create hasn't finished OAuth yet returns the stanza
-// without a "token" line at all; on a missing remote (or any other failure)
-// it errors - both are treated the same as "not configured" rather than
-// distinguished as a separate case.
+// RemoteConfigured reports whether name is a Drive remote with usable
+// credentials: either a non-empty OAuth token or a service_account_file.
+// A stanza left behind by interrupted OAuth has neither credential; a missing
+// remote (or any other config-show failure) errors. Both are treated as "not
+// configured" rather than distinguished as separate cases.
 func (e *Engine) RemoteConfigured(name string) (bool, error) {
 	stdout, _, err := e.exec("config", "show", name)
 	if err != nil {
 		return false, nil
 	}
+	isDrive := false
+	hasCredential := false
 	for stdout != "" {
 		var line string
 		line, stdout, _ = strings.Cut(stdout, "\n")
@@ -127,11 +126,16 @@ func (e *Engine) RemoteConfigured(name string) (bool, error) {
 		if !found {
 			continue
 		}
-		if strings.TrimSpace(key) == "token" && strings.TrimSpace(value) != "" {
-			return true, nil
+		key = strings.TrimSpace(key)
+		value = strings.TrimSpace(value)
+		switch key {
+		case "type":
+			isDrive = value == "drive"
+		case "token", "service_account_file":
+			hasCredential = hasCredential || value != ""
 		}
 	}
-	return false, nil
+	return isDrive && hasCredential, nil
 }
 
 // DeleteRemote removes a remote's config stanza via `rclone config delete
@@ -403,8 +407,10 @@ func (e *Engine) ensureRemoteDir(ctx context.Context, stderrOut io.Writer, path 
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
-	if err := os.MkdirAll(p.Workdir, 0o700); err != nil {
-		return BisyncResult{}, err
+	if !p.DryRun {
+		if err := os.MkdirAll(p.Workdir, 0o700); err != nil {
+			return BisyncResult{}, err
+		}
 	}
 	// First run (resync): ensure both sides exist. path1 is always a local folder
 	// for better-drive; path2 is the Drive remote. Both are real writes (a local

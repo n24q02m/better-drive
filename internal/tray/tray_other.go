@@ -1,4 +1,4 @@
-//go:build !windows && !linux && !darwin
+//go:build !windows && (!cgo || (!linux && !darwin))
 
 package tray
 
@@ -11,12 +11,10 @@ import (
 	"github.com/n24q02m/better-drive/internal/syncloop"
 )
 
-// Run has no tray UI on the remaining platforms (anything other than
-// windows, linux, and darwin, which all get the real systray UI from
-// tray_systray.go): fyne.io/systray has no cgo-free support there, and cross
-// builds for those platforms must stay CGO_ENABLED=0. loops and pairs must
-// be the same length and index-aligned (loops[i] is the Loop driving
-// pairs[i]) and agg must already be wired to loops via agg.Register,
+// Run has no tray UI on platforms without the cgo-backed systray, including
+// Linux release builds, which intentionally use CGO_ENABLED=0. loops and
+// pairs must be the same length and index-aligned (loops[i] is the Loop
+// driving pairs[i]) and agg must already be wired to loops via agg.Register,
 // matching the systray Run signature exactly (cli.go calls tray.Run with no
 // build-tag switch of its own) - but this headless Run never touches them,
 // since the sync loops are already started by the caller before Run is

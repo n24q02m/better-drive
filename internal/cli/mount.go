@@ -53,6 +53,9 @@ func mountCmdWithFactory(factory mountEngineFactory) *cobra.Command {
 			if _, err := mountRemoteName(args[0]); err != nil {
 				return err
 			}
+			if strings.HasPrefix(args[1], "-") {
+				return flagLikeMountPositionalError("mountpoint", args[1])
+			}
 			if strings.TrimSpace(args[1]) == "" {
 				return exitcode.WithRemediation(
 					exitcode.ConfigError(errors.New("mountpoint must not be empty")),
@@ -103,12 +106,21 @@ func mountCmdWithFactory(factory mountEngineFactory) *cobra.Command {
 
 func mountRemoteName(remotePath string) (string, error) {
 	name, _, found := strings.Cut(remotePath, ":")
+	if strings.HasPrefix(name, "-") {
+		return "", flagLikeMountPositionalError("remote", remotePath)
+	}
 	if found && strings.TrimSpace(name) != "" && !strings.ContainsAny(name, `/\\`) {
 		return name, nil
 	}
 	err := fmt.Errorf("invalid remote path %q: expected <remote>:<path>", remotePath)
 	return "", exitcode.WithRemediation(exitcode.ConfigError(err),
 		"use a configured rclone remote, for example: gdrive:Documents")
+}
+
+func flagLikeMountPositionalError(label, value string) error {
+	err := fmt.Errorf("%s %q must not start with '-': it could be interpreted as an rclone flag", label, value)
+	return exitcode.WithRemediation(exitcode.ConfigError(err),
+		fmt.Sprintf("use a %s that does not start with '-'", label))
 }
 
 func mountDriverError(goos string, err error) error {

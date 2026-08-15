@@ -1,6 +1,7 @@
 package tray
 
 import (
+	"sync"
 	"testing"
 
 	"github.com/n24q02m/better-drive/internal/engine"
@@ -140,5 +141,45 @@ func TestAggregatorOnChangePreservesNeedsResyncBehindError(t *testing.T) {
 
 	if got.State != syncloop.StateError || !got.NeedsResync {
 		t.Fatalf("OnChange snapshot = %+v, want StateError with NeedsResync", got)
+	}
+}
+
+func TestAggregatorCallbacksNeverDeliverOlderSnapshotAfterNewer(t *testing.T) {
+	agg := NewAggregator()
+	oldEntered := make(chan struct{})
+	releaseOld := make(chan struct{})
+	var seenMu sync.Mutex
+	var seen []syncloop.State
+	agg.OnChange(func(snapshot AggregateState) {
+		if snapshot.State == syncloop.StateError {
+			close(oldEntered)
+			<-releaseOld
+		}
+		seenMu.Lock()
+		seen = append(seen, snapshot.State)
+		seenMu.Unlock()
+	})
+
+	oldDone := make(chan struct{})
+	go func() {
+		agg.update(0, syncloop.StateError)
+		close(oldDone)
+	}()
+	<-oldEntered
+
+	// The old implementation invoked this newer callback immediately while
+	// the older one was blocked, deterministically producing [idle error]. A
+	// serialized dispatcher queues it and returns without scheduler timing.
+	agg.update(0, syncloop.StateIdle)
+	if agg.State() != syncloop.StateIdle {
+		t.Fatal("new aggregate state was not committed before callback dispatch")
+	}
+	close(releaseOld)
+	<-oldDone
+
+	seenMu.Lock()
+	defer seenMu.Unlock()
+	if len(seen) != 2 || seen[0] != syncloop.StateError || seen[1] != syncloop.StateIdle {
+		t.Fatalf("callback states = %v, want generation order [error idle]", seen)
 	}
 }

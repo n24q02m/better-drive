@@ -27,7 +27,7 @@ func execRunner(bin string) runner {
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		err := cmd.Run()
+		err := runCommand(cmd)
 		return stdout.String(), stderr.String(), err
 	}
 }
@@ -48,7 +48,7 @@ func execStreamRunner(bin string) streamRunner {
 		hideConsole(cmd) // Windows: no console window flash per rclone invocation
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
-		err := cmd.Run()
+		err := runCommand(cmd)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr

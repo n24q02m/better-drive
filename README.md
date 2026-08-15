@@ -90,7 +90,7 @@ The daemon syncs each pair once on start, then again every `interval`, and logs 
 
 ## Mount a virtual drive
 
-`better-drive mount` exposes an already-configured rclone remote as a foreground filesystem. It is independent of sync pairs: `config.toml` may be absent or contain only an optional `rclone_config` path. The command verifies the remote's OAuth token before mounting, always uses `--vfs-cache-mode full` for application compatibility, streams rclone output live, and unmounts when you press Ctrl+C.
+`better-drive mount` exposes an already-configured rclone remote as a foreground filesystem. It is independent of sync pairs: `config.toml` may be absent or contain only an optional `rclone_config` path. The command verifies that the Drive remote has an OAuth token or service-account file before mounting, always uses `--vfs-cache-mode full` for application compatibility, streams rclone output live, and unmounts when you press Ctrl+C.
 
 ```powershell
 # Windows drive letter

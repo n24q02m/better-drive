@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/n24q02m/better-drive/internal/output"
+	"github.com/spf13/cobra"
 )
 
 func TestRenderJSON_PairResults(t *testing.T) {
@@ -41,5 +42,23 @@ func TestValidate(t *testing.T) {
 	}
 	if err := output.Validate("xml"); err == nil {
 		t.Error("Validate(xml) = nil, want an error for an unknown format")
+	}
+}
+
+func TestAddFormatFlagRegistersTableDefault(t *testing.T) {
+	cmd := &cobra.Command{Use: "test"}
+	var format string
+	output.AddFormatFlag(cmd, &format)
+	if got := cmd.Flag("format"); got == nil {
+		t.Fatal("AddFormatFlag did not register --format")
+	}
+	if got := cmd.Flag("format").DefValue; got != output.FormatTable {
+		t.Fatalf("--format default = %q, want %q", got, output.FormatTable)
+	}
+	if err := cmd.ParseFlags([]string{"--format", output.FormatJSON}); err != nil {
+		t.Fatalf("ParseFlags: %v", err)
+	}
+	if format != output.FormatJSON {
+		t.Fatalf("format = %q, want %q after parsing", format, output.FormatJSON)
 	}
 }
