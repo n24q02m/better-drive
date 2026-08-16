@@ -37,9 +37,17 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 
 	agg.OnChange(func(aggregate AggregateState) {
 		st := aggregate.State
-		systray.SetTooltip("better-drive - " + st.String())
+
+		if aggregate.NeedsResync {
+			systray.SetTooltip("better-drive - needs-resync (Run better-drive sync --resync)")
+			mStatus.SetTooltip("Run better-drive sync --resync to rebuild the bisync baseline")
+		} else {
+			systray.SetTooltip("better-drive - " + st.String())
+			mStatus.SetTooltip("Current status: " + st.String())
+		}
+
 		mStatus.SetTitle("Status: " + st.String())
-		mStatus.SetTooltip("Current status: " + st.String())
+
 		if st == syncloop.StatePaused {
 			mPause.SetTitle("Resume")
 			mPause.SetTooltip("Resume scheduled syncs for all pairs")
