@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2024-02-27 - Pre-allocate and Iterative String Parsing
+**Learning:** `strings.Split` creates a new slice allocation which adds garbage collection pressure, particularly when parsing multi-line text files line by line where only parts of each line are examined.
+**Action:** Replace `strings.Split(str, "\n")` loops with an iterative `strings.Cut` approach (`for content != "" { var line string; line, content, _ = strings.Cut(content, "\n"); ... }`). This provides zero-allocation line splitting.
