@@ -88,7 +88,11 @@ func resolveRcloneExecutable(bin string) string {
 	if err != nil {
 		return bin
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	// ⚡ Bolt: Iterative strings.Cut prevents slice allocation overhead
+	content := string(data)
+	for content != "" {
+		var line string
+		line, content, _ = strings.Cut(content, "\n")
 		key, value, found := strings.Cut(line, "=")
 		if !found || strings.TrimSpace(strings.TrimPrefix(key, "\ufeff")) != "path" {
 			continue
