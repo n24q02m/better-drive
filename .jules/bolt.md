@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2025-02-26 - Replace strings.Split with strings.Cut in resolveRcloneExecutable for zero-allocation parsing
+**Learning:** Using `strings.Split` on file contents (like shim files) allocates a large slice to hold all the string lines, which is unnecessary when we can iterate through the string.
+**Action:** Use `strings.Cut(dataStr, "\n")` iteratively in a loop instead of `strings.Split` to eliminate slice allocations and garbage collection overhead.
