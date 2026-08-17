@@ -26,3 +26,7 @@
 **Vulnerability:** Unhandled errors, such as ignoring the return value of resource cleanups or core application logic, can silently obscure resource exhaustion or logic bypasses (CWE-703), which gosec flags as G104.
 **Learning:** In Go, blindly suppressing unhandled errors (e.g., using `_ = err`) without comment makes the code unauditable. For cases where an error is truly unactionable (like a best-effort `os.Remove` on a temp file or a read-only `root.Close()`), it must be explicitly documented.
 **Prevention:** Document intentional error suppressions with `// #nosec G104 -- [reason]` to prove to auditors and linters that the ignored error was consciously evaluated as benign and not a forgotten security or reliability boundary.
+## 2026-08-17 - Prevent Arbitrary Execution via Windows Explorer
+**Vulnerability:** Passing unvalidated paths to `explorer` via `exec.Command` can lead to arbitrary file execution if the path points to an executable rather than a directory. `filepath.Clean` alone only provides lexical path cleaning, offering no real security benefit against malicious file execution.
+**Learning:** When passing paths to external utilities like Windows `explorer`, you must validate the resolved absolute path or use `os.Stat` to confirm the target is strictly a safe directory before execution.
+**Prevention:** Always use `os.Stat(path)` and verify `info.IsDir()` is true before passing user-controlled or configured paths to `explorer` to ensure only directories are opened.
