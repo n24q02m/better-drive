@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2024-08-19 - Actionable tooltips for error states
+**Learning:** When displaying an error or broken state in the UI (like `StateNeedsResync`), simply stating the state is often insufficient and leaves the user stuck. Tooltips are a great place to provide immediate, actionable commands to resolve the issue.
+**Action:** When disabling a UI element or displaying an error state in a tooltip, ensure the text provides actionable instructions (like the exact CLI command needed) rather than passively stating the error.
