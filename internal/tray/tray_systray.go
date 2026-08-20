@@ -87,8 +87,11 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 
 func openFolder(path string) {
 	if runtime.GOOS == "windows" {
-		cleanPath := filepath.Clean(path)
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return
+		}
 		/* #nosec G204 */
-		_ = exec.Command("explorer", cleanPath).Start()
+		_ = exec.Command("explorer", absPath).Start()
 	}
 }
