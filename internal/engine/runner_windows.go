@@ -88,7 +88,10 @@ func resolveRcloneExecutable(bin string) string {
 	if err != nil {
 		return bin
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	dataStr := string(data)
+	for dataStr != "" {
+		var line string
+		line, dataStr, _ = strings.Cut(dataStr, "\n")
 		key, value, found := strings.Cut(line, "=")
 		if !found || strings.TrimSpace(strings.TrimPrefix(key, "\ufeff")) != "path" {
 			continue
