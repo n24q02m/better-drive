@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2024-11-20 - Disable irrelevant actions on manual intervention
+**Learning:** When the application enters a state requiring explicit manual intervention (like needing a CLI `--resync`), leaving unrelated actionable menu items like "Pause/Resume" enabled creates confusion, as they become functionally irrelevant or silently fail to resolve the core issue.
+**Action:** Explicitly disable UI controls that are functionally irrelevant due to a higher-priority application error state, and update their tooltip to clearly direct the user to the required resolution.
