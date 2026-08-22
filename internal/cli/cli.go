@@ -100,20 +100,52 @@ func loadExecutionConfig() (*config.Config, error) {
 			fmt.Sprintf("enroll the pinned rclone_runtime in %s before running transfers", paths.ConfigFile()))
 	}
 	for _, job := range cfg.Jobs {
-		if job.Direction != "push" {
-			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q direction %q is not executable until direction-aware transfer support is enabled", job.ID, job.Direction)),
-				"enroll direction=push for Task 1 scheduled execution")
+		if len(job.Destinations) == 0 {
+			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q has no destinations", job.ID)),
+				"add at least one [[job.destination]] block")
 		}
-		if len(job.Destinations) != 1 {
-			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q has %d destinations; multi-destination execution is not enabled yet", job.ID, len(job.Destinations))),
-				"enroll exactly one destination per job until replica execution is enabled")
-		}
-		if _, err := job.Destinations[0].RcloneTarget(); err != nil {
-			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q: %w", job.ID, err)),
-				"set destination.credential_ref to an enrolled rclone:<remote> reference")
+		for _, destination := range job.Destinations {
+			if _, err := destination.RcloneTarget(); err != nil {
+				return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q: %w", job.ID, err)),
+					"set destination.credential_ref to an enrolled rclone:<remote> reference")
+			}
 		}
 	}
 	return cfg, nil
+}
+
+func replicasForJob(job config.Job) ([]engine.ReplicaSpec, error) {
+	if len(job.Destinations) == 0 {
+		return nil, fmt.Errorf("job %q has no destinations", job.ID)
+	}
+	replicas := make([]engine.ReplicaSpec, 0, len(job.Destinations))
+	for i, destination := range job.Destinations {
+		target, err := destination.RcloneTarget()
+		if err != nil {
+			return nil, fmt.Errorf("job %q destination %d: %w", job.ID, i, err)
+		}
+		replicaID := destination.RootID
+		if replicaID == "" {
+			replicaID = fmt.Sprintf("%s-%d", job.ID, i)
+		}
+		replicas = append(replicas, engine.ReplicaSpec{
+			ID: replicaID, Target: target, Workdir: paths.JobReplicaWorkdir(job.ID, replicaID),
+			Required: destination.Required, MinCompleteRestoreSets: destination.MinCompleteRestoreSets,
+		})
+	}
+	return replicas, nil
+}
+
+func replicaResults(summary engine.ReplicaSummary) []output.ReplicaResult {
+	results := make([]output.ReplicaResult, 0, len(summary.Outcomes))
+	for _, outcome := range summary.Outcomes {
+		item := output.ReplicaResult{ID: outcome.ID, Target: outcome.Target, Required: outcome.Required, Status: outcome.Status}
+		if outcome.Err != nil {
+			item.Error = outcome.Err.Error()
+		}
+		results = append(results, item)
+	}
+	return results
 }
 
 // badFormatErr wraps an invalid --format value (output.Validate's error) as
@@ -236,11 +268,17 @@ func runCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
 			}
 			for _, job := range cfg.Jobs {
-				target, _ := job.Destinations[0].RcloneTarget()
-				remoteName, _, _ := strings.Cut(target, ":")
-				if configured, _ := e.RemoteConfigured(remoteName); !configured {
+				replicas, replicaErr := replicasForJob(job)
+				if replicaErr != nil {
 					e.Close()
-					return remoteNotConfiguredErr(remoteName)
+					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
+				}
+				for _, replica := range replicas {
+					remoteName, _, _ := strings.Cut(replica.Target, ":")
+					if configured, _ := e.RemoteConfigured(remoteName); !configured {
+						e.Close()
+						return remoteNotConfiguredErr(remoteName)
+					}
 				}
 			}
 
@@ -263,18 +301,22 @@ func runCmd() *cobra.Command {
 			var wg sync.WaitGroup
 			for i, job := range cfg.Jobs {
 				job := job
-				target, _ := job.Destinations[0].RcloneTarget()
-				loop := syncloop.New(e, job.Source, target, paths.JobWorkdir(job.ID), job.Mode,
+				replicas, replicaErr := replicasForJob(job)
+				if replicaErr != nil {
+					cancel()
+					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
+				}
+				loop := syncloop.NewWithReplicas(e, job.Source, replicas, job.Mode, job.Direction,
 					func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 				loops[i] = loop
 				agg.Register(i, loop)
 				if logger != nil {
 					loop.OnResult(func(err error) {
 						if err != nil {
-							logger.Printf("%s <-> %s [mode=%s job=%s]: FAILED: %v", job.Source, target, job.Mode, job.ID, err)
+							logger.Printf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
 							return
 						}
-						logger.Printf("%s <-> %s [mode=%s job=%s]: OK", job.Source, target, job.Mode, job.ID)
+						logger.Printf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
 					})
 				}
 				wg.Add(1)
@@ -320,20 +362,24 @@ func statusCmd() *cobra.Command {
 			if format == output.FormatJSON {
 				pairs := make([]output.PairStatus, 0, len(cfg.Jobs))
 				for _, job := range cfg.Jobs {
-					target, targetErr := job.Destinations[0].RcloneTarget()
-					if targetErr != nil {
-						return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+					for _, destination := range job.Destinations {
+						target, targetErr := destination.RcloneTarget()
+						if targetErr != nil {
+							return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+						}
+						pairs = append(pairs, output.PairStatus{Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String()})
 					}
-					pairs = append(pairs, output.PairStatus{Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String()})
 				}
 				return output.RenderJSON(cmd.OutOrStdout(), pairs)
 			}
 			for _, job := range cfg.Jobs {
-				target, targetErr := job.Destinations[0].RcloneTarget()
-				if targetErr != nil {
-					return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+				for _, destination := range job.Destinations {
+					target, targetErr := destination.RcloneTarget()
+					if targetErr != nil {
+						return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "job %s: %s <-> %s every %s [mode=%s]\n", job.ID, job.Source, target, job.Interval, job.Mode)
 				}
-				fmt.Fprintf(cmd.OutOrStdout(), "job %s: %s <-> %s every %s [mode=%s]\n", job.ID, job.Source, target, job.Interval, job.Mode)
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "run `better-drive run` to start")
 			return nil
@@ -417,48 +463,49 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 	needsResync := false
 	results := make([]output.PairResult, 0, len(cfg.Jobs))
 	for _, job := range cfg.Jobs {
-		if len(job.Destinations) != 1 {
-			return results, fmt.Errorf("job %q has %d destinations; multi-destination execution is not enabled yet", job.ID, len(job.Destinations))
-		}
-		target, err := job.Destinations[0].RcloneTarget()
+		replicas, err := replicasForJob(job)
 		if err != nil {
-			return results, fmt.Errorf("job %q: %w", job.ID, err)
+			return results, err
 		}
-		if job.Direction != "push" {
-			return results, fmt.Errorf("job %q direction %q is not executable until direction-aware transfer support is enabled", job.ID, job.Direction)
+		targets := make([]string, 0, len(replicas))
+		for _, replica := range replicas {
+			targets = append(targets, replica.Target)
 		}
-		// Missing sources obey the explicit v2 required bit. A required source
-		// fails the run; an optional source is reported as skipped_optional.
+		remoteSummary := strings.Join(targets, ",")
 		if _, statErr := os.Stat(job.Source); errors.Is(statErr, os.ErrNotExist) {
 			status := "skipped_optional"
 			if job.Required {
 				status = "failed"
 				failed = true
 			}
-			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: %s (local not found)\n", job.ID, job.Source, target, job.Mode, strings.ToUpper(status))
-			results = append(results, output.PairResult{Local: job.Source, Remote: target, Mode: job.Mode, Status: status})
+			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: %s (local not found)\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
+			results = append(results, output.PairResult{Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status})
 			continue
 		}
-		loop := syncloop.New(s, job.Source, target, paths.JobWorkdir(job.ID), job.Mode,
+		loop := syncloop.NewWithReplicas(s, job.Source, replicas, job.Mode, job.Direction,
 			func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 		loop.SetDryRun(dryRun)
 		loop.SetForceResync(forceResync)
 		loop.SetExecution(cmd.Context(), cmd.ErrOrStderr())
-		fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: RUNNING\n", job.ID, job.Source, target, job.Mode)
+		fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: RUNNING\n", job.ID, job.Source, remoteSummary, job.Mode)
 		if err := loop.RunOnce(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return results, err
 			}
 			failed = true
 			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)
-			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: FAILED: %v\n", job.ID, job.Source, target, job.Mode, err)
-			results = append(results, output.PairResult{Local: job.Source, Remote: target, Mode: job.Mode, Status: "failed", Error: err.Error(), DryRun: dryRun})
+			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: FAILED: %v\n", job.ID, job.Source, remoteSummary, job.Mode, err)
+			results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: "failed", Error: err.Error(), Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
 			continue
 		}
-		if format == output.FormatTable {
-			fmt.Fprintf(cmd.OutOrStdout(), "job %s %s <-> %s [mode=%s]: OK\n", job.ID, job.Source, target, job.Mode)
+		status := loop.LastReplicaSummary().Status
+		if status == "" {
+			status = "ok"
 		}
-		results = append(results, output.PairResult{Local: job.Source, Remote: target, Mode: job.Mode, Status: "ok", DryRun: dryRun})
+		if format == output.FormatTable {
+			fmt.Fprintf(cmd.OutOrStdout(), "job %s %s <-> %s [mode=%s]: %s\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
+		}
+		results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status, Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
 	}
 	if format == output.FormatJSON {
 		if err := output.RenderJSON(cmd.OutOrStdout(), results); err != nil {

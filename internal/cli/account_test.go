@@ -71,9 +71,13 @@ func testJob(local, remote string) config.Job {
 
 func testJobMode(local, remote, mode string) config.Job {
 	name, path, _ := strings.Cut(remote, ":")
+	direction := "push"
+	if mode == "bisync" {
+		direction = "bidirectional"
+	}
 	return config.Job{
 		ID: "test-" + name + "-" + strings.ReplaceAll(path, "/", "-"), Source: local,
-		Direction: "push", Mode: mode, Required: true, CategoryPolicyID: "test-policy",
+		Direction: direction, Mode: mode, Required: true, CategoryPolicyID: "test-policy",
 		CategoryPolicyVersion: 1, CategoryPolicyDigest: "sha256:test", SymlinkPolicy: "preserve",
 		Interval: time.Second, Schedule: "1s",
 		Destinations: []config.Destination{{Backend: "drive", Path: path, AccountID: "test-account", RootID: "test-root", CredentialRef: "rclone:" + name, Required: true, MinCompleteRestoreSets: 2, DeletePolicy: "none"}},

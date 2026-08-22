@@ -53,3 +53,14 @@ func TestJobWorkdirSeparatesDistinctStableIDs(t *testing.T) {
 		t.Fatalf("distinct job IDs share workdir %q", got)
 	}
 }
+
+func TestJobReplicaWorkdirSeparatesReplicas(t *testing.T) {
+	first := JobReplicaWorkdir("job-1", "drive-root")
+	second := JobReplicaWorkdir("job-1", "r2-bucket")
+	if first == second {
+		t.Fatalf("replica workdirs collide: %q", first)
+	}
+	if filepath.Dir(first) != JobWorkdir("job-1") {
+		t.Fatalf("replica workdir parent = %q, want job workdir %q", filepath.Dir(first), JobWorkdir("job-1"))
+	}
+}

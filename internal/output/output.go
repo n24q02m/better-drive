@@ -23,13 +23,25 @@ type PairStatus struct {
 	Interval string `json:"interval"`
 }
 
-// PairResult is the outcome of syncing one pair, as reported by `sync`.
+// ReplicaResult is one destination outcome within a job's sync cycle.
+type ReplicaResult struct {
+	ID       string `json:"id"`
+	Target   string `json:"target"`
+	Required bool   `json:"required"`
+	Status   string `json:"status"` // ok | failed
+	Error    string `json:"error,omitempty"`
+}
+
+// PairResult is the outcome of syncing one normalized job, retaining the
+// historical wire name for compatibility.
 type PairResult struct {
-	Local  string `json:"local"`
-	Remote string `json:"remote"`
-	Mode   string `json:"mode"`
-	Status string `json:"status"` // ok | failed | skipped
-	Error  string `json:"error,omitempty"`
+	JobID    string          `json:"job_id,omitempty"`
+	Local    string          `json:"local"`
+	Remote   string          `json:"remote"`
+	Mode     string          `json:"mode"`
+	Status   string          `json:"status"` // ok | degraded | failed | skipped
+	Error    string          `json:"error,omitempty"`
+	Replicas []ReplicaResult `json:"replicas,omitempty"`
 	// DryRun reports whether this cycle only previewed changes (--dry-run)
 	// rather than applying them.
 	DryRun bool `json:"dry_run,omitempty"`

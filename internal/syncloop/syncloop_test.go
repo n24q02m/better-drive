@@ -746,3 +746,45 @@ func TestModeDefaultsToBisyncWhenEmpty(t *testing.T) {
 		t.Fatalf("bisync calls=%d, want 1 (empty mode must default to bisync)", len(f.calls))
 	}
 }
+
+type directionReplicaSyncer struct {
+	copies      []engine.CopyParams
+	errByRemote map[string]error
+}
+
+func (f *directionReplicaSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
+	return engine.BisyncResult{}, f.errByRemote[p.Path2]
+}
+func (f *directionReplicaSyncer) Copy(p engine.CopyParams) error {
+	f.copies = append(f.copies, p)
+	return f.errByRemote[p.Remote]
+}
+func (f *directionReplicaSyncer) Sync(engine.CopyParams) error { return nil }
+
+func TestNewWithReplicasSupportsPullDirection(t *testing.T) {
+	f := &directionReplicaSyncer{errByRemote: map[string]error{}}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Workdir: "wd/r1", Required: true}}, "copy", "pull", func() ([]string, error) { return nil, nil })
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.copies) != 1 || f.copies[0].Local != "gdrive:backup" || f.copies[0].Remote != "C:/source" {
+		t.Fatalf("copy calls = %#v, want reversed pull direction", f.copies)
+	}
+}
+
+func TestNewWithReplicasPreservesOptionalFailureAsDegraded(t *testing.T) {
+	f := &directionReplicaSyncer{errByRemote: map[string]error{"r2:optional": errors.New("optional failed")}}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{
+		{ID: "r1", Target: "gdrive:required", Workdir: "wd/r1", Required: true},
+		{ID: "r2", Target: "r2:optional", Workdir: "wd/r2", Required: false},
+	}, "copy", "push", func() ([]string, error) { return nil, nil })
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("optional failure: %v, want nil", err)
+	}
+	if l.State() != StateIdle {
+		t.Fatalf("state = %v, want idle for optional failure", l.State())
+	}
+	if len(f.copies) != 2 {
+		t.Fatalf("copy calls = %#v, want both replicas attempted", f.copies)
+	}
+}

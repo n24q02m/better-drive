@@ -38,11 +38,7 @@ func (s State) String() string {
 	return "unknown"
 }
 
-type Syncer interface {
-	Bisync(engine.BisyncParams) (engine.BisyncResult, error)
-	Copy(engine.CopyParams) error
-	Sync(engine.CopyParams) error
-}
+type Syncer = engine.Transferer
 
 type IgnoreFunc func() ([]string, error)
 
@@ -52,6 +48,9 @@ type Loop struct {
 	path2        string
 	workdir      string
 	mode         string
+	direction    string
+	replicas     []engine.ReplicaSpec
+	baselines    map[string]bool
 	ignore       IgnoreFunc
 	mu           sync.Mutex
 	state        State
@@ -65,21 +64,48 @@ type Loop struct {
 	stderr       io.Writer
 	onChange     func(State)
 	onResult     func(error)
+	lastSummary  engine.ReplicaSummary
 	manualWG     sync.WaitGroup
 	manualClosed bool
 }
 
-// New creates a Loop for the given mode ("bisync", "copy", or "sync"); an
-// empty mode defaults to "bisync" for callers that predate mode support (e.g.
-// existing tests via newLoop).
+// New creates a single-replica Loop for the legacy internal call shape.
+// Bisync defaults to bidirectional; copy and sync default to push.
 func New(s Syncer, path1, path2, workdir, mode string, ignore IgnoreFunc) *Loop {
+	direction := "push"
+	if mode == "" || mode == "bisync" {
+		direction = "bidirectional"
+	}
+	return NewWithReplicas(s, path1, []engine.ReplicaSpec{{ID: "default", Target: path2, Workdir: workdir, Required: true, MinCompleteRestoreSets: 2}}, mode, direction, ignore)
+}
+
+// NewWithReplicas creates a Loop whose one cycle attempts every destination.
+// Required and optional outcomes are kept independently by engine.ExecuteReplicas.
+func NewWithReplicas(s Syncer, path1 string, replicas []engine.ReplicaSpec, mode, direction string, ignore IgnoreFunc) *Loop {
 	if mode == "" {
 		mode = "bisync"
 	}
-	return &Loop{
-		s: s, path1: path1, path2: path2, workdir: workdir, mode: mode, ignore: ignore, state: StateIdle,
-		hasBaseline: baselineExists(workdir),
+	if direction == "" {
+		direction = "push"
+		if mode == "bisync" {
+			direction = "bidirectional"
+		}
 	}
+	path2, workdir := "", ""
+	if len(replicas) > 0 {
+		path2, workdir = replicas[0].Target, replicas[0].Workdir
+	}
+	baselines := make(map[string]bool, len(replicas))
+	for _, replica := range replicas {
+		baselines[replica.ID] = baselineExists(replica.Workdir)
+	}
+	hasBaseline := false
+	if len(replicas) > 0 {
+		hasBaseline = baselines[replicas[0].ID]
+	}
+	return &Loop{s: s, path1: path1, path2: path2, workdir: workdir, mode: mode, direction: direction,
+		replicas: append([]engine.ReplicaSpec(nil), replicas...), baselines: baselines, ignore: ignore,
+		state: StateIdle, hasBaseline: hasBaseline}
 }
 
 // baselineExists reports whether a prior bisync run already left listing
@@ -143,6 +169,14 @@ func (l *Loop) SetForceResync(v bool) {
 	l.mu.Unlock()
 }
 
+func (l *Loop) LastReplicaSummary() engine.ReplicaSummary {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	summary := l.lastSummary
+	summary.Outcomes = append([]engine.ReplicaOutcome(nil), summary.Outcomes...)
+	return summary
+}
+
 // SetExecution opts subsequent cycles into context-aware execution with live
 // rclone stderr. The one-shot CLI uses it for cancellation and progress; the
 // continuous daemon leaves both values unset and retains captured execution.
@@ -181,9 +215,16 @@ func (l *Loop) runOnce() (err error) {
 		return nil
 	}
 	l.running = true
-	// A bisync cycle resyncs when this pair has no baseline of its own yet, or
-	// when the caller explicitly asked for one to be rebuilt (SetForceResync).
-	resync := l.mode == "bisync" && (!l.hasBaseline || l.forceResync)
+	replicas := append([]engine.ReplicaSpec(nil), l.replicas...)
+	for i := range replicas {
+		if l.mode == "bisync" {
+			hasBaseline := l.baselines[replicas[i].ID]
+			if i == 0 {
+				hasBaseline = hasBaseline || l.hasBaseline
+			}
+			replicas[i].Resync = !hasBaseline || l.forceResync
+		}
+	}
 	dryRun := l.dryRun
 	execContext := l.execContext
 	stderr := l.stderr
@@ -208,26 +249,26 @@ func (l *Loop) runOnce() (err error) {
 	l.setState(StateSyncing)
 	var filters []string
 	filters, err = l.ignore()
+	var summary engine.ReplicaSummary
 	if err == nil {
-		switch l.mode {
-		case "copy":
-			err = l.s.Copy(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
-		case "sync":
-			err = l.s.Sync(engine.CopyParams{Local: l.path1, Remote: l.path2, Workdir: l.workdir, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr})
-		default: // "bisync"
-			_, err = l.s.Bisync(engine.BisyncParams{
-				Path1: l.path1, Path2: l.path2, Workdir: l.workdir,
-				Resync: resync, DryRun: dryRun, Filters: filters, Context: execContext, Stderr: stderr,
-			})
-		}
+		summary, err = engine.ExecuteReplicas(l.s, engine.TransferSpec{
+			Local: l.path1, Mode: l.mode, Direction: l.direction, DryRun: dryRun,
+			Filters: filters, Context: execContext, Stderr: stderr, Replicas: replicas,
+		})
 	}
 
 	l.mu.Lock()
 	l.running = false
+	l.lastSummary = summary
 	switch {
 	case err == nil:
-		if l.mode == "bisync" {
-			l.hasBaseline = true
+		for _, outcome := range summary.Outcomes {
+			if outcome.Status == "ok" && l.mode == "bisync" {
+				l.baselines[outcome.ID] = true
+			}
+		}
+		if len(l.replicas) > 0 {
+			l.hasBaseline = l.baselines[l.replicas[0].ID]
 		}
 		l.needsResync = false
 		l.state = StateIdle

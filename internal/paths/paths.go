@@ -34,6 +34,13 @@ func JobWorkdir(jobID string) string {
 	return filepath.Join(Workdir(), "job-"+hex.EncodeToString(sum[:4]))
 }
 
+// JobReplicaWorkdir isolates a destination's bisync baseline under its owning
+// job so two replicas cannot share listing state.
+func JobReplicaWorkdir(jobID, replicaID string) string {
+	sum := sha256.Sum256([]byte(jobID + "\x00" + replicaID))
+	return filepath.Join(JobWorkdir(jobID), "replica-"+hex.EncodeToString(sum[:4]))
+}
+
 // LogFile returns the path of the daemon's persistent sync log
 // (base()/better-drive.log), where `better-drive run` appends one line per
 // completed sync cycle per pair.

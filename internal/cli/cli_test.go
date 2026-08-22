@@ -864,6 +864,99 @@ func TestRunSyncOnce_OrdinaryFailureKeepsItsOwnRemediation(t *testing.T) {
 	}
 }
 
+func TestRunSyncOnceAttemptsMultipleReplicas(t *testing.T) {
+	job := testJob(t.TempDir(), "gdrive:primary")
+	job.Destinations = append(job.Destinations, config.Destination{
+		Backend: "r2", Path: "backup", AccountID: "r2-account", RootID: "r2-root",
+		CredentialRef: "rclone:r2", Required: false, MinCompleteRestoreSets: 2, DeletePolicy: "none",
+	})
+	s := &fakeCLISyncer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	results, err := runSyncOnce(cmd, s, &config.Config{Jobs: []config.Job{job}}, output.FormatTable, false, false)
+	if err != nil {
+		t.Fatalf("runSyncOnce: %v", err)
+	}
+	if len(s.copyParams) != 2 {
+		t.Fatalf("copy calls = %#v, want both replicas attempted", s.copyParams)
+	}
+	if len(results) != 1 || results[0].Status != "ok" {
+		t.Fatalf("results = %#v, want one successful job result", results)
+	}
+}
+
+func TestRunSyncOnceSupportsPullDirection(t *testing.T) {
+	job := testJob(t.TempDir(), "gdrive:backup")
+	job.Direction = "pull"
+	s := &fakeCLISyncer{}
+	cmd := &cobra.Command{}
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+
+	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false); err != nil {
+		t.Fatalf("runSyncOnce pull: %v", err)
+	}
+	if len(s.copyParams) != 1 || s.copyParams[0].Local != "gdrive:backup" || s.copyParams[0].Remote != job.Source {
+		t.Fatalf("copy params = %#v, want pull direction", s.copyParams)
+	}
+}
+
+func TestRunSyncOnceRequiredReplicaFailureStillAttemptsOptional(t *testing.T) {
+	job := testJob(t.TempDir(), "gdrive:required")
+	job.Destinations = append(job.Destinations, config.Destination{
+		Backend: "r2", Path: "optional", AccountID: "r2-account", RootID: "r2-root",
+		CredentialRef: "rclone:r2", Required: false, MinCompleteRestoreSets: 2, DeletePolicy: "none",
+	})
+	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:required": errors.New("required failed")}}
+	var out, errOut bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+
+	_, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false)
+	if err == nil {
+		t.Fatalf("runSyncOnce error = nil, want required replica failure")
+	}
+	if !strings.Contains(errOut.String(), "required failed") {
+		t.Fatalf("stderr = %q, want required replica diagnostic", errOut.String())
+	}
+	if len(s.copyParams) != 2 {
+		t.Fatalf("copy calls = %#v, want optional attempted after required failure", s.copyParams)
+	}
+}
+
+func fakeConfigWithJob(job config.Job) *config.Config {
+	return &config.Config{SchemaVersion: config.CurrentSchemaVersion, Jobs: []config.Job{job}}
+}
+
+func TestRunSyncOnceJSONIncludesReplicaRequiredStatus(t *testing.T) {
+	job := testJob(t.TempDir(), "gdrive:primary")
+	job.Destinations = append(job.Destinations, config.Destination{
+		Backend: "r2", Path: "optional", AccountID: "r2-account", RootID: "r2-root",
+		CredentialRef: "rclone:r2", Required: false, MinCompleteRestoreSets: 2, DeletePolicy: "none",
+	})
+	s := &fakeCLISyncer{}
+	cmd := &cobra.Command{}
+	var out, errOut bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatJSON, false, false); err != nil {
+		t.Fatalf("runSyncOnce: %v; stderr=%q", err, errOut.String())
+	}
+	var got []output.PairResult
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("JSON: %v; output=%s", err, out.String())
+	}
+	if len(got) != 1 || len(got[0].Replicas) != 2 {
+		t.Fatalf("results = %#v, want two replica results", got)
+	}
+	if !got[0].Replicas[0].Required || got[0].Replicas[1].Required {
+		t.Fatalf("replica required bits = %#v, want true,false", got[0].Replicas)
+	}
+}
+
 // TestSyncCmd_HasResyncFlag verifies the `sync` command registers --resync
 // (defaulting to false, so a plain `sync` keeps honouring existing baselines
 // and therefore keeps propagating deletions).

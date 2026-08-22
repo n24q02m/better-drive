@@ -25,7 +25,16 @@ func execRunner(bin string) runner {
 }
 
 func execRunnerWithEnvironment(bin string, env []string) runner {
+	return execRunnerWithEnvironmentAndPreflight(bin, env, nil)
+}
+
+func execRunnerWithEnvironmentAndPreflight(bin string, env []string, preflight func() error) runner {
 	return func(args ...string) (string, string, error) {
+		if preflight != nil {
+			if err := preflight(); err != nil {
+				return "", "", err
+			}
+		}
 		/* #nosec G204 */
 		cmd := exec.Command(bin, args...)
 		if env != nil {
@@ -45,14 +54,22 @@ func execRunnerWithEnvironment(bin string, env []string) runner {
 func execStreamRunner(bin string) streamRunner {
 	return execStreamRunnerWithEnvironment(bin, nil)
 }
-
 func execStreamRunnerWithEnvironment(bin string, env []string) streamRunner {
+	return execStreamRunnerWithEnvironmentAndPreflight(bin, env, nil)
+}
+
+func execStreamRunnerWithEnvironmentAndPreflight(bin string, env []string, preflight func() error) streamRunner {
 	return func(ctx context.Context, stdout, stderr io.Writer, args ...string) error {
 		if stdout == nil {
 			stdout = io.Discard
 		}
 		if stderr == nil {
 			stderr = io.Discard
+		}
+		if preflight != nil {
+			if err := preflight(); err != nil {
+				return err
+			}
 		}
 		/* #nosec G204 */
 		cmd := exec.CommandContext(ctx, bin, args...)
