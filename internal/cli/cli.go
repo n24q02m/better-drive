@@ -157,6 +157,13 @@ func replicaResults(summary engine.ReplicaSummary) []output.ReplicaResult {
 	return results
 }
 
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
 func buildStateFromResults(results []output.PairResult, now time.Time) state.State {
 	scheduler := state.SchedulerState{
 		Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
@@ -328,6 +335,31 @@ func runCmd() *cobra.Command {
 				logger.Printf("daemon started, %d jobs", len(cfg.Jobs))
 			}
 
+			var stateMu sync.Mutex
+			stateResults := make(map[string]output.PairResult, len(cfg.Jobs))
+			persistDaemonResult := func(job config.Job, loop *syncloop.Loop, cycleErr error) {
+				summary := loop.LastReplicaSummary()
+				status := summary.Status
+				if cycleErr != nil {
+					status = "failed"
+				}
+				targets := make([]string, 0, len(summary.Outcomes))
+				for _, outcome := range summary.Outcomes {
+					targets = append(targets, outcome.Target)
+				}
+				result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: strings.Join(targets, ","), Mode: job.Mode, Status: status, Error: errorString(cycleErr), Replicas: replicaResults(summary)}
+				stateMu.Lock()
+				stateResults[job.ID] = result
+				snapshot := make([]output.PairResult, 0, len(stateResults))
+				for _, item := range stateResults {
+					snapshot = append(snapshot, item)
+				}
+				stateMu.Unlock()
+				if err := state.Save(paths.StateFile(), buildStateFromResults(snapshot, time.Now().UTC())); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not persist state: %v\n", err)
+				}
+			}
+
 			agg := tray.NewAggregator()
 			loops := make([]*syncloop.Loop, len(cfg.Jobs))
 			ctx, cancel := context.WithCancel(context.Background())
@@ -343,15 +375,17 @@ func runCmd() *cobra.Command {
 					func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 				loops[i] = loop
 				agg.Register(i, loop)
-				if logger != nil {
-					loop.OnResult(func(err error) {
-						if err != nil {
-							logger.Printf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
-							return
-						}
-						logger.Printf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
-					})
-				}
+				loop.OnResult(func(err error) {
+					persistDaemonResult(job, loop, err)
+					if logger == nil {
+						return
+					}
+					if err != nil {
+						logger.Printf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
+						return
+					}
+					logger.Printf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
+				})
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
