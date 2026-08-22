@@ -19,7 +19,7 @@ func NewVerified(runtime config.RcloneRuntime) (*Engine, error) {
 		return nil, fmt.Errorf("rclone runtime: %w", err)
 	}
 	env := explicitEnvironment(runtime.Environment)
-	preflight := func() error { return verifyRuntimeFiles(runtime) }
+	preflight := func() (func(), error) { return openRuntimeFiles(runtime) }
 	return &Engine{
 		bin:    runtime.Executable,
 		cfg:    runtime.Config,
@@ -42,43 +42,62 @@ func explicitEnvironment(values map[string]string) []string {
 }
 
 func verifyRuntimeFiles(runtime config.RcloneRuntime) error {
-	if err := verifyRuntimeFile("executable", runtime.Executable, runtime.ExecutableDigest); err != nil {
+	release, err := openRuntimeFiles(runtime)
+	if err != nil {
 		return err
 	}
-	return verifyRuntimeFile("config", runtime.Config, runtime.ConfigDigest)
+	release()
+	return nil
 }
 
-func verifyRuntimeFile(label, path, expected string) error {
+func openRuntimeFiles(runtime config.RcloneRuntime) (func(), error) {
+	executable, err := openRuntimeFile("executable", runtime.Executable, runtime.ExecutableDigest)
+	if err != nil {
+		return nil, err
+	}
+	configFile, err := openRuntimeFile("config", runtime.Config, runtime.ConfigDigest)
+	if err != nil {
+		_ = executable.Close()
+		return nil, err
+	}
+	return func() {
+		_ = executable.Close()
+		_ = configFile.Close()
+	}, nil
+}
+
+func openRuntimeFile(label, path, expected string) (*os.File, error) {
 	info, err := os.Lstat(path)
 	if err != nil {
-		return fmt.Errorf("rclone_runtime.%s readback: %w", label, err)
+		return nil, fmt.Errorf("rclone_runtime.%s readback: %w", label, err)
 	}
 	if info.Mode()&os.ModeSymlink != 0 {
-		return fmt.Errorf("rclone_runtime.%s must not be a symlink", label)
+		return nil, fmt.Errorf("rclone_runtime.%s must not be a symlink", label)
 	}
 	if !info.Mode().IsRegular() {
-		return fmt.Errorf("rclone_runtime.%s must be a regular file", label)
+		return nil, fmt.Errorf("rclone_runtime.%s must be a regular file", label)
 	}
 	if !strings.HasPrefix(expected, "sha256:") {
-		return fmt.Errorf("rclone_runtime.%s_digest must use sha256:<hex>", label)
+		return nil, fmt.Errorf("rclone_runtime.%s_digest must use sha256:<hex>", label)
 	}
 	want, err := hex.DecodeString(strings.TrimPrefix(expected, "sha256:"))
 	if err != nil || len(want) != sha256.Size {
-		return fmt.Errorf("rclone_runtime.%s_digest is invalid", label)
+		return nil, fmt.Errorf("rclone_runtime.%s_digest is invalid", label)
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return fmt.Errorf("rclone_runtime.%s open: %w", label, err)
+		return nil, fmt.Errorf("rclone_runtime.%s open: %w", label, err)
 	}
-	defer file.Close()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil {
-		return fmt.Errorf("rclone_runtime.%s hash: %w", label, err)
+		_ = file.Close()
+		return nil, fmt.Errorf("rclone_runtime.%s hash: %w", label, err)
 	}
 	if !equalBytes(hash.Sum(nil), want) {
-		return fmt.Errorf("rclone_runtime.%s_digest mismatch", label)
+		_ = file.Close()
+		return nil, fmt.Errorf("rclone_runtime.%s_digest mismatch", label)
 	}
-	return nil
+	return file, nil
 }
 
 func equalBytes(a, b []byte) bool {

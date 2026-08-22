@@ -21,6 +21,12 @@ type ReplicaSpec struct {
 	Required               bool
 	MinCompleteRestoreSets int
 	Resync                 bool
+	RestoreAcks            []RestoreSetAck
+}
+
+type RestoreSetAck struct {
+	RestoreSetID string
+	Complete     bool
 }
 
 type TransferSpec struct {
@@ -73,6 +79,22 @@ func (e *ReplicaError) Unwrap() error {
 	return nil
 }
 
+func ValidateRestoreFloor(minComplete int, acks []RestoreSetAck) error {
+	if minComplete < 2 {
+		return fmt.Errorf("min_complete_restore_sets must be >= 2")
+	}
+	complete := make(map[string]struct{}, len(acks))
+	for _, ack := range acks {
+		if ack.Complete && strings.TrimSpace(ack.RestoreSetID) != "" {
+			complete[ack.RestoreSetID] = struct{}{}
+		}
+	}
+	if len(complete) < minComplete {
+		return fmt.Errorf("restore floor requires %d complete restore sets, got %d", minComplete, len(complete))
+	}
+	return nil
+}
+
 func ValidateTransfer(mode, direction string) error {
 	switch mode {
 	case "copy", "sync", "bisync":
@@ -109,6 +131,11 @@ func ExecuteReplicas(transferer Transferer, spec TransferSpec) (ReplicaSummary, 
 	for _, replica := range spec.Replicas {
 		if replica.MinCompleteRestoreSets != 0 && replica.MinCompleteRestoreSets < 2 {
 			return ReplicaSummary{}, fmt.Errorf("replica %q min_complete_restore_sets must be >= 2", replica.ID)
+		}
+		if replica.RestoreAcks != nil {
+			if err := ValidateRestoreFloor(replica.MinCompleteRestoreSets, replica.RestoreAcks); err != nil {
+				return ReplicaSummary{}, fmt.Errorf("replica %q: %w", replica.ID, err)
+			}
 		}
 	}
 	summary := ReplicaSummary{Status: "ok", Outcomes: make([]ReplicaOutcome, 0, len(spec.Replicas))}

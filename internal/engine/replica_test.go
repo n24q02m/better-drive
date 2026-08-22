@@ -161,3 +161,29 @@ func TestExecuteReplicasPreservesDriveR2AndCryptTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestRestoreFloorCountsUniqueCompleteAcknowledgements(t *testing.T) {
+	acks := []RestoreSetAck{
+		{RestoreSetID: "set-1", Complete: true},
+		{RestoreSetID: "set-1", Complete: true},
+		{RestoreSetID: "set-2", Complete: false},
+		{RestoreSetID: "set-3", Complete: true},
+	}
+	if err := ValidateRestoreFloor(2, acks); err != nil {
+		t.Fatalf("ValidateRestoreFloor: %v", err)
+	}
+	if err := ValidateRestoreFloor(3, acks); err == nil || !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("ValidateRestoreFloor(3) = %v, want floor rejection", err)
+	}
+}
+
+func TestExecuteReplicasRejectsInsufficientRestoreAcksBeforeTransfer(t *testing.T) {
+	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
+	_, err := ExecuteReplicas(f, TransferSpec{
+		Local: "C:/source", Mode: "copy", Direction: "push",
+		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 2, RestoreAcks: []RestoreSetAck{{RestoreSetID: "set-1", Complete: true}}}},
+	})
+	if err == nil || len(f.calls) != 0 || !strings.Contains(err.Error(), "restore") {
+		t.Fatalf("result err=%v calls=%#v, want restore-floor rejection before transfer", err, f.calls)
+	}
+}
