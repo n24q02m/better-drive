@@ -26,7 +26,7 @@ type mountEngineFactory func(rcloneConfig string) mountEngine
 
 func mountCmd() *cobra.Command {
 	return mountCmdWithFactory(func(rcloneConfig string) mountEngine {
-		return engine.New(rcloneConfig)
+		return engine.NewForeground(rcloneConfig)
 	})
 }
 
@@ -75,7 +75,7 @@ func mountCmdWithFactory(factory mountEngineFactory) *cobra.Command {
 				)
 			}
 
-			e := factory(config.ResolveRcloneConfig(rcloneConfig))
+			e := factory(rcloneConfig)
 			defer e.Close()
 			configured, err := e.RemoteConfigured(remoteName)
 			if err != nil {

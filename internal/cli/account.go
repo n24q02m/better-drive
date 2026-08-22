@@ -38,11 +38,8 @@ type setupEngine interface {
 }
 
 // loadConfigBestEffort reads config.toml but reports every failure as "there
-// is no config yet" instead of as an error. The account commands run
-// legitimately before any [[pair]] exists - an account has to be added before
-// it can be paired with a folder - so a missing or unparseable config must not
-// stop them. loadConfig stays the right helper for run/status/sync, which have
-// nothing to do without pairs.
+// is no config yet" instead of as an error. Account operations still require
+// an enrolled runtime before they can reach rclone.
 func loadConfigBestEffort() *config.Config {
 	cfg, err := config.Load(paths.ConfigFile())
 	if err != nil {
@@ -51,31 +48,30 @@ func loadConfigBestEffort() *config.Config {
 	return cfg
 }
 
-// rcloneConfigPathOf reads cfg's explicit rclone config path, tolerating the
-// nil cfg loadConfigBestEffort returns by falling back to "" - which
-// engine.New passes through as "let rclone discover its own config".
-func rcloneConfigPathOf(cfg *config.Config) string {
+func newVerifiedAccountEngine(cfg *config.Config) (*engine.Engine, error) {
 	if cfg == nil {
-		return ""
+		return nil, fmt.Errorf("no valid config with an enrolled rclone_runtime")
 	}
-	return cfg.RcloneConfig
+	return engine.NewVerified(cfg.RcloneRuntime)
 }
 
-// pairsUsingRemote returns the local path of every configured pair that syncs
-// against remoteName. It splits each pair's Remote on the first ":" (the same
-// split runCmd uses to check a pair's remote is set up) rather than matching a
-// prefix, because "gdrive-work:" starts with "gdrive" as a string while being
-// an entirely different account - and this answer decides whether `account
-// remove` is allowed to delete one.
-func pairsUsingRemote(cfg *config.Config, remoteName string) []string {
+// jobsUsingRemote returns the local source of every configured job that uses
+// remoteName. It compares the enrolled rclone remote reference exactly.
+func jobsUsingRemote(cfg *config.Config, remoteName string) []string {
 	if cfg == nil {
 		return nil
 	}
 	var locals []string
-	for _, p := range cfg.Pairs {
-		name, _, _ := strings.Cut(p.Remote, ":")
-		if name == remoteName {
-			locals = append(locals, p.Local)
+	for _, job := range cfg.Jobs {
+		for _, destination := range job.Destinations {
+			target, err := destination.RcloneTarget()
+			if err != nil {
+				continue
+			}
+			name, _, _ := strings.Cut(target, ":")
+			if name == remoteName {
+				locals = append(locals, job.Source)
+			}
 		}
 	}
 	return locals
@@ -105,9 +101,9 @@ func accountCmd() *cobra.Command {
 		Use:   "account",
 		Short: "Manage the Google Drive accounts (rclone remotes) better-drive syncs with",
 		Long: "Manage the Google Drive accounts better-drive syncs with. Each account is\n" +
-			"an rclone remote; a [[pair]] in config.toml points its `remote` at one of\n" +
-			"them by name, so several accounts can be used side by side. `account add`\n" +
-			"is the same command as `better-drive setup`.",
+			"an rclone remote; a [[job.destination]] in config.toml points its\n" +
+			"credential_ref at one of them by name, so several accounts can coexist.\n" +
+			"`account add` is the same command as `better-drive setup`.",
 		Example: "  better-drive account list\n" +
 			"  better-drive account list --quota\n" +
 			"  better-drive account add --remote gdrive-work\n" +
@@ -123,21 +119,24 @@ func accountRemoveCmd() *cobra.Command {
 		Use:   "remove NAME",
 		Short: "Delete a Google Drive account's rclone remote",
 		Long: "Delete the rclone remote for a Google Drive account. Refused while any\n" +
-			"[[pair]] in config.toml still syncs against it, since removing it would\n" +
-			"leave that pair failing every cycle; the refusal names the pairs holding\n" +
-			"it. Pass --force to delete anyway. Local files are never touched - this\n" +
-			"only removes the stored credentials.",
+			"job in config.toml still syncs against it, since removing it would leave\n" +
+			"that job failing every cycle; the refusal names the jobs holding it.\n" +
+			"Pass --force to delete anyway. Local files are never touched - this only\n" +
+			"removes the stored credentials.",
 		Example: "  better-drive account remove gdrive-work\n" +
 			"  better-drive account remove gdrive-work --force",
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadConfigBestEffort()
-			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
+			e, err := newVerifiedAccountEngine(cfg)
+			if err != nil {
+				return err
+			}
 			defer e.Close()
 			return runAccountRemove(cmd, e, cfg, args[0], force)
 		},
 	}
-	c.Flags().BoolVar(&force, "force", false, "delete even while a configured pair still syncs against the account")
+	c.Flags().BoolVar(&force, "force", false, "delete even while a configured job still syncs against the account")
 	return c
 }
 
@@ -167,14 +166,11 @@ func runAccountRemove(cmd *cobra.Command, e accountEngine, cfg *config.Config, n
 			exitcode.ConfigError(fmt.Errorf("no Google Drive account named %q", name)),
 			"run: better-drive account list")
 	}
-	// As in driveCredentials.validate, --force is named in the message too:
-	// the remediation listing the pairs is only rendered for a --format json
-	// caller, and this command has no --format flag.
-	if pairs := pairsUsingRemote(cfg, name); len(pairs) > 0 && !force {
+	if jobs := jobsUsingRemote(cfg, name); len(jobs) > 0 && !force {
 		return exitcode.WithRemediation(
-			exitcode.ConfigError(fmt.Errorf("account %q is still used by %d configured pair(s); re-run with --force to delete it anyway", name, len(pairs))),
-			fmt.Sprintf("edit %s to remove or repoint the [[pair]] block(s) for %s, or re-run with --force",
-				paths.ConfigFile(), strings.Join(pairs, ", ")))
+			exitcode.ConfigError(fmt.Errorf("account %q is still used by %d configured job(s); re-run with --force to delete it anyway", name, len(jobs))),
+			fmt.Sprintf("edit %s to remove or repoint the [[job.destination]] block(s) for %s, or re-run with --force",
+				paths.ConfigFile(), strings.Join(jobs, ", ")))
 	}
 	if err := e.DeleteRemote(name); err != nil {
 		return err
@@ -281,7 +277,10 @@ func newAccountAddCmd(use, short, long, example string) *cobra.Command {
 		Example: example,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := loadConfigBestEffort()
-			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
+			e, err := newVerifiedAccountEngine(cfg)
+			if err != nil {
+				return err
+			}
 			defer e.Close()
 			return runAccountAdd(cmd, e, remote, creds)
 		},
@@ -326,9 +325,9 @@ func accountListCmd() *cobra.Command {
 	var withQuota bool
 	c := &cobra.Command{
 		Use:   "list",
-		Short: "List the Google Drive accounts and the pairs using them",
+		Short: "List the Google Drive accounts and the jobs using them",
 		Long: "List every Google Drive remote in the rclone config: its name, whether it\n" +
-			"has usable OAuth or service-account credentials, and which pairs from\n" +
+			"has usable OAuth or service-account credentials, and which jobs from\n" +
 			"config.toml sync against it.\n" +
 			"Read-only and offline by default - it never touches the network. Pass\n" +
 			"--quota to additionally ask Drive for each configured account's storage\n" +
@@ -338,7 +337,10 @@ func accountListCmd() *cobra.Command {
 			"  better-drive account list --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := loadConfigBestEffort()
-			e := engine.New(config.ResolveRcloneConfig(rcloneConfigPathOf(cfg)))
+			e, err := newVerifiedAccountEngine(cfg)
+			if err != nil {
+				return err
+			}
 			defer e.Close()
 			return runAccountList(cmd, e, cfg, format, withQuota)
 		},
@@ -350,8 +352,8 @@ func accountListCmd() *cobra.Command {
 
 // runAccountList is the list command's body, taking its engine and config as
 // parameters so it can be tested without an rclone binary or a config.toml on
-// disk. A nil cfg means no config was loadable, which pairsUsingRemote reads
-// as "no pair uses this account".
+// disk. A nil cfg means no config was loadable, which jobsUsingRemote reads as
+// "no job uses this account".
 func runAccountList(cmd *cobra.Command, e accountEngine, cfg *config.Config, format string, withQuota bool) error {
 	if err := output.Validate(format); err != nil {
 		return badFormatErr(err)
@@ -366,10 +368,7 @@ func runAccountList(cmd *cobra.Command, e accountEngine, cfg *config.Config, for
 		account := output.AccountStatus{
 			Name:       name,
 			Configured: configured,
-			// An account with no pairs renders as [] rather than null: a
-			// caller decoding this should be able to range over the field
-			// without first testing it for absence.
-			Pairs: append([]string{}, pairsUsingRemote(cfg, name)...),
+			Pairs:      append([]string{}, jobsUsingRemote(cfg, name)...),
 		}
 		// A credential-less remote is never asked for its quota: `rclone about`
 		// can only fail there, spending a round trip to produce a warning
@@ -404,7 +403,7 @@ func runAccountList(cmd *cobra.Command, e accountEngine, cfg *config.Config, for
 		if account.Configured {
 			state = "ready"
 		}
-		line := fmt.Sprintf("account %s: %s, %d pair(s)", account.Name, state, len(account.Pairs))
+		line := fmt.Sprintf("account %s: %s, %d job(s)", account.Name, state, len(account.Pairs))
 		if account.Quota != nil {
 			line += fmt.Sprintf(", %s of %s used", humanBytes(account.Quota.Used), humanBytes(account.Quota.Total))
 		}

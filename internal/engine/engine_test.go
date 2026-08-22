@@ -104,22 +104,22 @@ func waitForSignal(t *testing.T, ch <-chan struct{}, failure string) {
 	}
 }
 
-// TestNewResolvesRunner verifies New wires up a working runner seam (the
-// rclone shell-out replacement for librclone.Initialize/RPC) without
-// requiring a real rclone binary on PATH for the construction itself.
-func TestNewResolvesRunner(t *testing.T) {
-	e := New("")
+// TestNewForegroundResolvesRunner verifies the explicit foreground mount
+// constructor wires up working runner seams without requiring a real rclone
+// binary on PATH for construction.
+func TestNewForegroundResolvesRunner(t *testing.T) {
+	e := NewForeground("")
 	if e == nil {
-		t.Fatal("New(\"\") returned nil")
+		t.Fatal("NewForeground(\"\") returned nil")
 	}
 	if e.run == nil {
-		t.Fatal("New(\"\").run is nil, want a resolved runner")
+		t.Fatal("NewForeground(\"\").run is nil, want a resolved runner")
 	}
 	if e.bin == "" {
-		t.Fatal("New(\"\").bin is empty, want a resolved rclone binary name/path")
+		t.Fatal("NewForeground(\"\").bin is empty, want a resolved rclone binary name/path")
 	}
 	if e.stream == nil {
-		t.Fatal("New(\"\").stream is nil, want a resolved streaming runner")
+		t.Fatal("NewForeground(\"\").stream is nil, want a resolved streaming runner")
 	}
 }
 

@@ -44,7 +44,7 @@ func TestResolveRcloneExecutableFallsBackForInvalidShim(t *testing.T) {
 	}
 }
 
-func TestNewDoesNotResolveCWDShimAfterLookPathFailure(t *testing.T) {
+func TestNewForegroundDoesNotResolveCWDShimAfterLookPathFailure(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	t.Setenv("PATH", t.TempDir())
@@ -57,12 +57,12 @@ func TestNewDoesNotResolveCWDShimAfterLookPathFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if got := New("").bin; got != "rclone" {
-		t.Fatalf("New().bin = %q after LookPath failure, want bare fallback without reading cwd shim", got)
+	if got := NewForeground("").bin; got != "rclone" {
+		t.Fatalf("NewForeground().bin = %q after LookPath failure, want bare fallback without reading cwd shim", got)
 	}
 }
 
-func TestNewDoesNotResolveCWDShimAfterLookPathErrDot(t *testing.T) {
+func TestNewForegroundDoesNotResolveCWDShimAfterLookPathErrDot(t *testing.T) {
 	cwd := t.TempDir()
 	t.Chdir(cwd)
 	t.Setenv("PATH", "."+string(os.PathListSeparator)+t.TempDir())
@@ -81,7 +81,7 @@ func TestNewDoesNotResolveCWDShimAfterLookPathErrDot(t *testing.T) {
 		t.Fatalf("adversarial fixture LookPath error = %v, want exec.ErrDot", err)
 	}
 
-	if got := New("").bin; got != "rclone" {
-		t.Fatalf("New().bin = %q after LookPath ErrDot, want bare fallback without reading cwd shim", got)
+	if got := NewForeground("").bin; got != "rclone" {
+		t.Fatalf("NewForeground().bin = %q after LookPath ErrDot, want bare fallback without reading cwd shim", got)
 	}
 }

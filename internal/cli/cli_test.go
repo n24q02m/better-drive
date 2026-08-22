@@ -91,17 +91,50 @@ func TestRootTaglineIncludesSyncAndMount(t *testing.T) {
 func TestStatusCmdPrintsAllPairs(t *testing.T) {
 	cfgPath := filepath.Join(t.TempDir(), "config.toml")
 	body := `
-[[pair]]
-local = "C:/pair0"
-remote = "gdrive:pair0"
-interval = "30s"
+schema_version = 2
 
-[[pair]]
-local = "C:/pair1"
-remote = "gdrive:pair1"
-interval = "1m"
+[[job]]
+id = "job-pair0"
+source = "C:/pair0"
+direction = "push"
 mode = "copy"
+required = true
+category_policy_id = "test-policy"
+category_policy_version = 1
+category_policy_digest = "sha256:test"
+symlink_policy = "preserve"
+schedule = "30s"
+[[job.destination]]
+backend = "drive"
+path = "pair0"
+account_id = "test-account"
+root_id = "test-root"
+credential_ref = "rclone:gdrive"
+required = true
+min_complete_restore_sets = 2
+delete_policy = "none"
+
+[[job]]
+id = "job-pair1"
+source = "C:/pair1"
+direction = "push"
+mode = "copy"
+required = true
+category_policy_id = "test-policy"
+category_policy_version = 1
+category_policy_digest = "sha256:test"
+symlink_policy = "preserve"
+schedule = "1m"
 exclude = ["node_modules/"]
+[[job.destination]]
+backend = "drive"
+path = "pair1"
+account_id = "test-account"
+root_id = "test-root-1"
+credential_ref = "rclone:gdrive"
+required = true
+min_complete_restore_sets = 2
+delete_policy = "none"
 `
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -117,24 +150,41 @@ exclude = ["node_modules/"]
 	}
 
 	out := buf.String()
-	for _, want := range []string{"C:/pair0", "gdrive:pair0", "[mode=bisync]", "C:/pair1", "gdrive:pair1", "[mode=copy]"} {
+	for _, want := range []string{"job-pair0", "C:/pair0", "gdrive:pair0", "[mode=copy]", "job-pair1", "C:/pair1", "gdrive:pair1"} {
 		if !bytes.Contains([]byte(out), []byte(want)) {
 			t.Errorf("status output missing %q; got:\n%s", want, out)
 		}
 	}
 }
 
-// statusFixtureConfig writes a single-pair config to a temp file and points
+// statusFixtureConfig writes a single-job v2 config to a temp file and points
 // BETTER_DRIVE_CONFIG at it, returning the path (unused by callers so far,
 // kept for symmetry with the other fixture helpers in this file).
 func statusFixtureConfig(t *testing.T) string {
 	t.Helper()
 	cfgPath := filepath.Join(t.TempDir(), "config.toml")
 	body := `
-[[pair]]
-local = "C:/pair0"
-remote = "gdrive:pair0"
-interval = "30s"
+schema_version = 2
+[[job]]
+id = "job-pair0"
+source = "C:/pair0"
+direction = "push"
+mode = "copy"
+required = true
+category_policy_id = "test-policy"
+category_policy_version = 1
+category_policy_digest = "sha256:test"
+symlink_policy = "preserve"
+schedule = "30s"
+[[job.destination]]
+backend = "drive"
+path = "pair0"
+account_id = "test-account"
+root_id = "test-root"
+credential_ref = "rclone:gdrive"
+required = true
+min_complete_restore_sets = 2
+delete_policy = "none"
 `
 	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
 		t.Fatal(err)
@@ -161,7 +211,7 @@ func TestStatusCmd_TableFormatUnchanged(t *testing.T) {
 		t.Fatalf("status: %v", err)
 	}
 
-	if matched, _ := regexp.MatchString(`^pair: .+ <-> .+ every .+ \[mode=.+\]\n`, out.String()); !matched {
+	if matched, _ := regexp.MatchString(`^job .+: .+ <-> .+ every .+ \[mode=.+\]\n`, out.String()); !matched {
 		t.Errorf("table output does not match the expected shape; got:\n%s", out.String())
 	}
 	if strings.Contains(out.String(), "{") {
@@ -312,9 +362,7 @@ func TestRemoteNotConfiguredErr(t *testing.T) {
 // runSyncOnce returns when a pair fails carries a remediation hint (not just
 // the bare "one or more pairs failed" message).
 func TestRunSyncOnce_SyncFailedErrorHasRemediation(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "copy"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(t.TempDir(), "gdrive:bad")}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
@@ -422,9 +470,9 @@ func (f *fakeCLISyncer) Sync(p engine.CopyParams) error {
 // error when any pair fails - while still running (and reporting) every pair,
 // not stopping at the first failure.
 func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:ok", Interval: time.Second, Mode: "copy"},
-		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "sync"},
+	cfg := &config.Config{Jobs: []config.Job{
+		testJob(t.TempDir(), "gdrive:ok"),
+		testJobMode(t.TempDir(), "gdrive:bad", "sync"),
 	}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
 	var out, errOut bytes.Buffer
@@ -447,9 +495,9 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 }
 
 func TestRunSyncOnceStopsImmediatelyOnContextCanceled(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:first", Interval: time.Second, Mode: "copy"},
-		{Local: t.TempDir(), Remote: "gdrive:second", Interval: time.Second, Mode: "copy"},
+	cfg := &config.Config{Jobs: []config.Job{
+		testJob(t.TempDir(), "gdrive:first"),
+		testJob(t.TempDir(), "gdrive:second"),
 	}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:first": context.Canceled}}
 	var out, errOut bytes.Buffer
@@ -477,9 +525,7 @@ func TestRunSyncOnceStopsImmediatelyOnContextCanceled(t *testing.T) {
 // stderr. Every agent consumer of `sync` (and Task 3's JSON renderer) depends
 // on stdout staying success-only.
 func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(t.TempDir(), "gdrive:bad")}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
@@ -501,9 +547,9 @@ func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
 // TestRunSyncOnceAllOkReturnsNil verifies runSyncOnce returns nil (exit 0)
 // when every pair's RunOnce succeeds.
 func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "copy"},
-		{Local: t.TempDir(), Remote: "gdrive:b", Interval: time.Second, Mode: "bisync"},
+	cfg := &config.Config{Jobs: []config.Job{
+		testJob(t.TempDir(), "gdrive:a"),
+		testJobMode(t.TempDir(), "gdrive:b", "bisync"),
 	}}
 	s := &fakeCLISyncer{}
 	var buf bytes.Buffer
@@ -532,9 +578,7 @@ func TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory(t *testing.T) {
 	if err := os.WriteFile(local, []byte("{}"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	cfg := &config.Config{Pairs: []config.Pair{{
-		Local: local, Remote: "gdrive:Backups/claude", Interval: time.Second, Mode: "copy",
-	}}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(local, "gdrive:Backups/claude")}}
 	s := &fakeCLISyncer{}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
@@ -571,18 +615,18 @@ func TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory(t *testing.T) {
 // listings - which rclone rejects with "must run --resync", while the loop, in
 // turn, saw *.lst files present and never asked for one.
 func TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder(t *testing.T) {
-	a := config.Pair{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"}
-	b := config.Pair{Local: t.TempDir(), Remote: "gdrive:b", Interval: time.Second, Mode: "bisync"}
+	a := testJobMode(t.TempDir(), "gdrive:a", "bisync")
+	b := testJobMode(t.TempDir(), "gdrive:b", "bisync")
 
 	// workdirs runs one full sync pass over pairs (in the given order) and
 	// reports the workdir each pair's Bisync call received, keyed by remote.
-	workdirs := func(pairs ...config.Pair) map[string]string {
+	workdirs := func(jobs ...config.Job) map[string]string {
 		t.Helper()
 		s := &fakeCLISyncer{}
 		cmd := &cobra.Command{}
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		if _, err := runSyncOnce(cmd, s, &config.Config{Pairs: pairs}, output.FormatTable, false, false); err != nil {
+		if _, err := runSyncOnce(cmd, s, &config.Config{Jobs: jobs}, output.FormatTable, false, false); err != nil {
 			t.Fatalf("runSyncOnce: %v", err)
 		}
 		got := make(map[string]string, len(s.bisyncParams))
@@ -609,9 +653,7 @@ func TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder(t *testing.T) {
 // full []output.PairResult once at the end - the table format's per-pair OK
 // line must not leak into json mode.
 func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "copy"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(t.TempDir(), "gdrive:a")}}
 	s := &fakeCLISyncer{}
 	var out bytes.Buffer
 	cmd := &cobra.Command{}
@@ -642,9 +684,7 @@ func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
 // receives, and (c) is echoed on each PairResult - all without applying any
 // real change (the fake Syncer here never shells out to rclone).
 func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJobMode(t.TempDir(), "gdrive:a", "bisync")}}
 	s := &fakeCLISyncer{}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
@@ -669,9 +709,7 @@ func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
 func TestRunSyncOnceThreadsCommandContextAndProgressWriter(t *testing.T) {
 	type contextKey struct{}
 	ctx := context.WithValue(context.Background(), contextKey{}, "cli-sync")
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "copy"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(t.TempDir(), "gdrive:a")}}
 	s := &fakeCLISyncer{}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
@@ -700,9 +738,7 @@ func TestRunSyncOnceReportsPairRunningBeforeRcloneCompletes(t *testing.T) {
 		close(started)
 		<-release
 	}}
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:slow", Interval: time.Second, Mode: "copy"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob(t.TempDir(), "gdrive:slow")}}
 	var out, errOut bytes.Buffer
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
@@ -734,9 +770,7 @@ func TestRunSyncOnceReportsPairRunningBeforeRcloneCompletes(t *testing.T) {
 // was lost or replaced can rebuild it from the CLI instead of deleting the
 // workdir by hand.
 func TestRunSyncOnce_ResyncForcesABaselineRebuild(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJobMode(t.TempDir(), "gdrive:a", "bisync")}}
 	s := &fakeCLISyncer{}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
@@ -757,10 +791,9 @@ func TestRunSyncOnce_ResyncForcesABaselineRebuild(t *testing.T) {
 // resync mkdir/ensureRemoteDir step is pinned by
 // TestBisyncResyncDryRunSkipsRealMkdir.)
 func TestRunSyncOnce_ResyncWithDryRunWritesNothing(t *testing.T) {
-	local := t.TempDir() // unique per run, so the pair's workdir cannot pre-exist
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: local, Remote: "gdrive:a", Interval: time.Second, Mode: "bisync"},
-	}}
+	local := t.TempDir() // unique per run, so the job's workdir cannot pre-exist
+	job := testJobMode(local, "gdrive:a", "bisync")
+	cfg := &config.Config{Jobs: []config.Job{job}}
 	s := &fakeCLISyncer{}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
@@ -775,8 +808,8 @@ func TestRunSyncOnce_ResyncWithDryRunWritesNothing(t *testing.T) {
 	if !s.bisyncParams[0].Resync || !s.bisyncParams[0].DryRun {
 		t.Errorf("params = %+v, want both Resync and DryRun true", s.bisyncParams[0])
 	}
-	if _, err := os.Stat(paths.PairWorkdir(local, "gdrive:a")); !os.IsNotExist(err) {
-		t.Errorf("workdir %q exists after a dry-run resync, want nothing written", paths.PairWorkdir(local, "gdrive:a"))
+	if _, err := os.Stat(paths.JobWorkdir(job.ID)); !os.IsNotExist(err) {
+		t.Errorf("workdir %q exists after a dry-run resync, want nothing written", paths.JobWorkdir(job.ID))
 	}
 }
 
@@ -788,9 +821,7 @@ func TestRunSyncOnce_ResyncWithDryRunWritesNothing(t *testing.T) {
 // baseline is lost and never told how to rebuild it - and the pair would fail
 // identically on every subsequent run.
 func TestRunSyncOnce_NeedsResyncFailureNamesTheRecoveryCommand(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:stuck", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJobMode(t.TempDir(), "gdrive:stuck", "bisync")}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:stuck": engine.ErrNeedsResync}}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})
@@ -818,9 +849,7 @@ func TestRunSyncOnce_NeedsResyncFailureNamesTheRecoveryCommand(t *testing.T) {
 // rebuild a baseline that is not the problem (and whose rebuild does not
 // propagate deletions).
 func TestRunSyncOnce_OrdinaryFailureKeepsItsOwnRemediation(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: t.TempDir(), Remote: "gdrive:bad", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJobMode(t.TempDir(), "gdrive:bad", "bisync")}}
 	s := &fakeCLISyncer{errByRemote: map[string]error{"gdrive:bad": errors.New("boom")}}
 	cmd := &cobra.Command{}
 	cmd.SetOut(&bytes.Buffer{})

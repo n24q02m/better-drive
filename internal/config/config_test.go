@@ -3,9 +3,8 @@ package config
 import (
 	"os"
 	"path/filepath"
-	"reflect"
+	"strings"
 	"testing"
-	"time"
 )
 
 func writeTemp(t *testing.T, body string) string {
@@ -17,209 +16,83 @@ func writeTemp(t *testing.T, body string) string {
 	return p
 }
 
-func TestLoadValidOnePair(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local = "C:/Users/x/DriveSync"
-remote = "gdrive:Backup"
-interval = "30s"
-`)
-	c, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if got := c.Pairs[0].Interval; got != 30*time.Second {
-		t.Fatalf("interval = %v, want 30s", got)
-	}
-}
-
-// TestValidateAcceptsMultiplePairs verifies N (>1) pairs are accepted and all
-// are loaded in order - the multi-pair replacement for backup-to-gdrive.ps1
-// needs several independent [[pair]] blocks in one config.
-func TestValidateAcceptsMultiplePairs(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local="a"
-remote="gdrive:a"
-interval="30s"
-[[pair]]
-local="b"
-remote="gdrive:b"
-interval="1m"
-mode="copy"
-[[pair]]
-local="c"
-remote="gdrive:c"
-interval="5m"
-mode="sync"
-`)
-	c, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if len(c.Pairs) != 3 {
-		t.Fatalf("len(Pairs)=%d, want 3", len(c.Pairs))
-	}
-	wantLocal := []string{"a", "b", "c"}
-	wantMode := []string{"bisync", "copy", "sync"}
-	for i, p := range c.Pairs {
-		if p.Local != wantLocal[i] {
-			t.Errorf("pair %d local=%q, want %q", i, p.Local, wantLocal[i])
-		}
-		if p.Mode != wantMode[i] {
-			t.Errorf("pair %d mode=%q, want %q", i, p.Mode, wantMode[i])
-		}
+func validV2Config(t *testing.T) *Config {
+	t.Helper()
+	return &Config{
+		SchemaVersion: CurrentSchemaVersion,
+		RcloneRuntime: RcloneRuntime{
+			Executable: "C:/tools/rclone.exe", ExecutableFileID: "exe-id", ExecutableDigest: "sha256:exe",
+			Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
+			Config: "C:/tools/rclone.conf", ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg",
+			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
+		},
+		Jobs: []Job{{
+			ID: "home-claude", Source: "C:/Users/me/.claude", Direction: "push", Mode: "copy", Required: true,
+			CategoryPolicyID: "claude-state", CategoryPolicyVersion: 1, CategoryPolicyDigest: "sha256:policy",
+			SymlinkPolicy: "preserve", Schedule: "30s", Interval: 30_000_000_000,
+			Destinations: []Destination{{Backend: "drive", Path: "Backups/home/Claude", AccountID: "account", RootID: "root", CredentialRef: "rclone:gdrive", Required: true, Retention: "30d", MinCompleteRestoreSets: 2, DeletePolicy: "none"}},
+		}},
 	}
 }
 
-// TestValidateRejectsAnyInvalidPairAmongMany verifies Validate rejects the
-// whole config when ANY one of several pairs has an invalid mode, not just
-// when there is a single pair.
-func TestValidateRejectsAnyInvalidPairAmongMany(t *testing.T) {
-	c := &Config{Pairs: []Pair{
-		{Local: "a", Remote: "gdrive:a", Interval: 30 * time.Second, Mode: "bisync"},
-		{Local: "b", Remote: "gdrive:b", Interval: 30 * time.Second, Mode: "mirror"}, // invalid
-	}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("want error when one of several pairs has an invalid mode, got nil")
+func TestValidateAcceptsCompleteV2Config(t *testing.T) {
+	if err := validV2Config(t).Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
 	}
 }
 
-// TestValidateRejectsZeroPairs verifies an empty config (no [[pair]] blocks
-// at all) is rejected.
-func TestValidateRejectsZeroPairs(t *testing.T) {
-	c := &Config{}
-	if err := c.Validate(); err == nil {
-		t.Fatal("want error for 0 pairs, got nil")
+func TestValidateRejectsDuplicateJobIDs(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs = append(cfg.Jobs, cfg.Jobs[0])
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "duplicate id") {
+		t.Fatalf("Validate error = %v, want duplicate-id rejection", err)
 	}
 }
 
-func TestLoadBadInterval(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local = "C:/Users/x/DriveSync"
-remote = "gdrive:Backup"
-interval = "notaduration"
-`)
-	_, err := Load(p)
-	if err == nil {
-		t.Fatal("want error for bad interval, got nil")
+func TestValidateRejectsUnsupportedDirectionModeCombination(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Direction = "bidirectional"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bidirectional") {
+		t.Fatalf("Validate error = %v, want direction/mode rejection", err)
 	}
 }
 
-// TestLoadDefaultsModeToBisync verifies an omitted "mode" key defaults to
-// "bisync" (v1 behaviour before mode support existed).
-func TestLoadDefaultsModeToBisync(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local = "C:/Users/x/DriveSync"
-remote = "gdrive:Backup"
-interval = "30s"
-`)
-	c, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	if got := c.Pairs[0].Mode; got != "bisync" {
-		t.Fatalf("mode = %q, want bisync", got)
+func TestValidateForExecutionRequiresPinnedRuntime(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RcloneRuntime = RcloneRuntime{}
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "absolute") {
+		t.Fatalf("ValidateForExecution error = %v, want pinned runtime rejection", err)
 	}
 }
 
-// TestLoadAcceptsValidModes verifies "copy" and "sync" round-trip through
-// Load unchanged and pass Validate.
-func TestLoadAcceptsValidModes(t *testing.T) {
-	for _, mode := range []string{"copy", "sync", "bisync"} {
-		p := writeTemp(t, `
-[[pair]]
-local = "C:/Users/x/DriveSync"
-remote = "gdrive:Backup"
-interval = "30s"
-mode = "`+mode+`"
-`)
-		c, err := Load(p)
-		if err != nil {
-			t.Fatalf("mode %q: load: %v", mode, err)
-		}
-		if err := c.Validate(); err != nil {
-			t.Fatalf("mode %q: validate: %v", mode, err)
-		}
-		if got := c.Pairs[0].Mode; got != mode {
-			t.Fatalf("mode = %q, want %q", got, mode)
-		}
-	}
-}
-
-// TestValidateRejectsInvalidMode verifies an unrecognized mode string is
-// rejected by Validate.
-func TestValidateRejectsInvalidMode(t *testing.T) {
-	c := &Config{Pairs: []Pair{{Local: "a", Remote: "gdrive:a", Interval: 30 * time.Second, Mode: "mirror"}}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("want error for invalid mode, got nil")
-	}
-}
-
-// TestLoadParsesExclude verifies the config-level "exclude" toml key (a list
-// of gitignore-syntax patterns) is parsed onto Pair.Exclude.
-func TestLoadParsesExclude(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local = "C:/Users/x/.claude"
-remote = "gdrive:Backups/claude"
-interval = "30s"
+func TestLoadRcloneConfigOnlyReadsV2RuntimeConfig(t *testing.T) {
+	p := writeTemp(t, `schema_version = 2
+[rclone_runtime]
+config = "C:/tools/rclone.conf"
+[[job]]
+id = "job"
+source = "C:/source"
+direction = "push"
 mode = "copy"
-exclude = ["node_modules/", ".venv/", "__pycache__/", ".git/"]
+required = true
+category_policy_id = "policy"
+category_policy_version = 1
+category_policy_digest = "sha256:policy"
+symlink_policy = "preserve"
+schedule = "30s"
+[[job.destination]]
+backend = "drive"
+path = "Backups/job"
+required = true
+min_complete_restore_sets = 2
+delete_policy = "none"
 `)
-	c, err := Load(p)
+	got, err := LoadRcloneConfigOnly(p)
 	if err != nil {
-		t.Fatalf("load: %v", err)
+		t.Fatalf("LoadRcloneConfigOnly: %v", err)
 	}
-	if err := c.Validate(); err != nil {
-		t.Fatalf("validate: %v", err)
-	}
-	want := []string{"node_modules/", ".venv/", "__pycache__/", ".git/"}
-	if !reflect.DeepEqual(c.Pairs[0].Exclude, want) {
-		t.Fatalf("Exclude = %#v, want %#v", c.Pairs[0].Exclude, want)
-	}
-}
-
-// TestLoadDefaultsExcludeToNil verifies a pair with no "exclude" key gets a
-// nil Exclude (not an empty-but-non-nil slice, and not an error).
-func TestLoadDefaultsExcludeToNil(t *testing.T) {
-	p := writeTemp(t, `
-[[pair]]
-local = "a"
-remote = "gdrive:a"
-interval = "30s"
-`)
-	c, err := Load(p)
-	if err != nil {
-		t.Fatalf("load: %v", err)
-	}
-	if c.Pairs[0].Exclude != nil {
-		t.Fatalf("Exclude = %#v, want nil", c.Pairs[0].Exclude)
-	}
-}
-
-func TestValidateRejectsEmptyLocal(t *testing.T) {
-	c := &Config{Pairs: []Pair{{Local: "", Remote: "gdrive:a", Interval: 30 * time.Second}}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("want error for empty local, got nil")
-	}
-}
-
-func TestValidateRejectsZeroInterval(t *testing.T) {
-	c := &Config{Pairs: []Pair{{Local: "a", Remote: "gdrive:a", Interval: 0}}}
-	if err := c.Validate(); err == nil {
-		t.Fatal("want error for zero interval, got nil")
+	if got != "C:/tools/rclone.conf" {
+		t.Fatalf("config = %q, want explicit v2 runtime config", got)
 	}
 }
 
@@ -229,26 +102,7 @@ func TestLoadRcloneConfigOnlyAllowsMissingFile(t *testing.T) {
 		t.Fatalf("LoadRcloneConfigOnly(missing): %v", err)
 	}
 	if got != "" {
-		t.Fatalf("rclone_config = %q, want empty discovery fallback", got)
-	}
-}
-
-func TestLoadRcloneConfigOnlyDoesNotValidatePairs(t *testing.T) {
-	p := writeTemp(t, `
-rclone_config = "X:/rclone.conf"
-
-[[pair]]
-local = ""
-remote = ""
-interval = "not-a-duration"
-mode = "not-a-mode"
-`)
-	got, err := LoadRcloneConfigOnly(p)
-	if err != nil {
-		t.Fatalf("LoadRcloneConfigOnly: %v", err)
-	}
-	if got != "X:/rclone.conf" {
-		t.Fatalf("rclone_config = %q, want %q", got, "X:/rclone.conf")
+		t.Fatalf("config = %q, want empty for mount-only missing file", got)
 	}
 }
 

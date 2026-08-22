@@ -138,26 +138,16 @@ func TestExistingBaselineSkipsResync(t *testing.T) {
 	}
 }
 
-// TestForeignPairListingsDoNotCountAsBaseline is the regression test for a
-// pair that syncs once and is then stuck forever: when workdirs were keyed by
-// a pair's POSITION in the config, changing that position (reordering,
-// inserting or deleting a [[pair]] block) handed a pair a directory full of
-// ANOTHER pair's listings. baselineExists only asks whether any *.lst file is
-// present, so the loop skipped --resync, rclone aborted with "must run
-// --resync" because it has no listing for this path1/path2 session, and every
-// later run repeated that exact sequence.
-//
-// Keying the workdir on the pair's identity is what actually fixes it, so the
-// two directories here are built from the real paths.PairWorkdir names (only
-// relocated under a temp root, to keep the test off the user's real config
-// tree) rather than from names invented by the test.
-func TestForeignPairListingsDoNotCountAsBaseline(t *testing.T) {
+// TestForeignJobListingsDoNotCountAsBaseline is the regression test for a job
+// that syncs once and is then stuck forever: a workdir from another stable job
+// ID must never satisfy the current job's baseline check.
+func TestForeignJobListingsDoNotCountAsBaseline(t *testing.T) {
 	root := t.TempDir()
-	dirFor := func(local, remote string) string {
-		return filepath.Join(root, filepath.Base(paths.PairWorkdir(local, remote)))
+	dirFor := func(jobID string) string {
+		return filepath.Join(root, filepath.Base(paths.JobWorkdir(jobID)))
 	}
-	foreign := dirFor("C:/other", "gdrive:other")
-	mine := dirFor("C:/mine", "gdrive:mine")
+	foreign := dirFor("foreign-job")
+	mine := dirFor("mine-job")
 	if err := os.MkdirAll(foreign, 0o700); err != nil {
 		t.Fatal(err)
 	}
