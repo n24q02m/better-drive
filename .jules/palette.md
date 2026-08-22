@@ -14,3 +14,6 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+## 2024-08-22 - Disable irrelevant actions on broken state
+**Learning:** Tray menu items like "Pause" remain interactable even when the app is in a broken state (NeedsResync) requiring manual CLI intervention, leading to silent failures or user confusion since interacting with these items does not resolve the core issue.
+**Action:** Always disable contextual menu items when the application state makes them irrelevant or non-functional, and update their tooltip to provide actionable recovery instructions.
