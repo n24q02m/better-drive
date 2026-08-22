@@ -359,6 +359,11 @@ func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 type BisyncParams struct {
 	Path1, Path2, Workdir string
 	Resync                bool
+	// Optional state evidence enables safety guards without making the legacy
+	// call shape infer destructive history from an empty default.
+	SourceWasNonEmpty *bool
+	SourceObjectCount *int64
+	DeleteBudget      *DeleteBudget
 	// DryRun previews the cycle (including its delete propagation) via
 	// rclone's own --dry-run, applying no change.
 	DryRun  bool
@@ -394,6 +399,9 @@ func (e *Engine) ensureRemoteDir(ctx context.Context, stderrOut io.Writer, path 
 // telling the caller to (re-)run --resync is mapped to the ErrNeedsResync
 // sentinel; any other error is wrapped with rclone's stderr for diagnostics.
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
+	if err := validateTransferSafety("bisync", p.SourceWasNonEmpty, p.SourceObjectCount, p.DeleteBudget); err != nil {
+		return BisyncResult{}, err
+	}
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if !p.DryRun {
@@ -473,12 +481,12 @@ func needsResync(stderr string) bool {
 		strings.Contains(s, "cannot find prior path1 or path2 listings")
 }
 
-// CopyParams configures a 1-way `rclone copy` or `rclone sync` call. Unlike
-// BisyncParams there is no Resync/baseline concept: copy/sync are stateless
-// per invocation, and `rclone copy`/`rclone sync` auto-create the destination
-// directory, so no ensureRemoteDir call is needed either.
 type CopyParams struct {
 	Local, Remote, Workdir string
+	// Optional state evidence enables safety guards before a destructive sync.
+	SourceWasNonEmpty *bool
+	SourceObjectCount *int64
+	DeleteBudget      *DeleteBudget
 	// DryRun previews the operation via rclone's own --dry-run, applying no
 	// change - the mode this matters most for is "sync" (Sync below), which
 	// deletes remote files absent locally.
@@ -617,6 +625,11 @@ func (e *Engine) Sync(p CopyParams) error { return e.copyOrSync("sync", p) }
 // subcommand (copy vs sync), otherwise sharing the same argv shape, filter
 // handling, and file-local dispatch.
 func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
+	if subcommand == "sync" {
+		if err := validateTransferSafety("sync", p.SourceWasNonEmpty, p.SourceObjectCount, p.DeleteBudget); err != nil {
+			return err
+		}
+	}
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if isFileLocal(p.Local) {

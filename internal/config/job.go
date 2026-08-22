@@ -127,6 +127,14 @@ func containsString(values []string, want string) bool {
 	return false
 }
 
+func isSHA256Digest(value string) bool {
+	if !strings.HasPrefix(value, "sha256:") {
+		return false
+	}
+	decoded, err := hex.DecodeString(strings.TrimPrefix(value, "sha256:"))
+	return err == nil && len(decoded) == sha256.Size
+}
+
 type Config struct {
 	SchemaVersion int           `toml:"schema_version" json:"schema_version"`
 	RcloneRuntime RcloneRuntime `toml:"rclone_runtime" json:"rclone_runtime"`
@@ -361,6 +369,14 @@ func (j Job) validate(seen map[string]struct{}) error {
 	if j.Mode == "sync" && (strings.TrimSpace(j.ModeGateRef) == "" || strings.TrimSpace(j.ModeGateDigest) == "") {
 		return fmt.Errorf("sync mode requires mode_gate_ref and mode_gate_digest")
 	}
+	if j.Mode == "sync" {
+		if !strings.HasPrefix(j.ModeGateRef, "drive-e2e:") {
+			return fmt.Errorf("sync mode_gate_ref must use drive-e2e:<ref>")
+		}
+		if !isSHA256Digest(j.ModeGateDigest) {
+			return fmt.Errorf("sync mode_gate_digest must use sha256:<64 hex chars>")
+		}
+	}
 	if j.Mode == "bisync" && j.Direction != "bidirectional" {
 		return fmt.Errorf("bisync requires bidirectional direction")
 	}
@@ -372,6 +388,9 @@ func (j Job) validate(seen map[string]struct{}) error {
 	}
 	if j.SymlinkPolicy != "preserve" && j.SymlinkPolicy != "follow" && j.SymlinkPolicy != "skip" {
 		return fmt.Errorf("symlink_policy must be one of preserve|follow|skip, got %q", j.SymlinkPolicy)
+	}
+	if j.Schedule != "" && j.SymlinkPolicy == "follow" {
+		return fmt.Errorf("scheduled jobs cannot use symlink_policy=follow")
 	}
 	if len(j.Destinations) == 0 {
 		return fmt.Errorf("at least one destination is required")

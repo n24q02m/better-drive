@@ -118,6 +118,13 @@ func replicasForJob(job config.Job) ([]engine.ReplicaSpec, error) {
 	if len(job.Destinations) == 0 {
 		return nil, fmt.Errorf("job %q has no destinations", job.ID)
 	}
+	identities := make([]engine.DestinationIdentity, 0, len(job.Destinations))
+	for _, destination := range job.Destinations {
+		identities = append(identities, engine.DestinationIdentity{Provider: destination.Backend, AccountID: destination.AccountID, RootID: destination.RootID, Namespace: destination.Path})
+	}
+	if err := engine.ValidateDestinationCollisions(identities); err != nil {
+		return nil, fmt.Errorf("job %q: %w", job.ID, err)
+	}
 	replicas := make([]engine.ReplicaSpec, 0, len(job.Destinations))
 	for i, destination := range job.Destinations {
 		target, err := destination.RcloneTarget()

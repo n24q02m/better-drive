@@ -215,8 +215,26 @@ func TestValidateRequiresRealDriveGateForSyncMode(t *testing.T) {
 		t.Fatalf("Validate error = %v, want sync gate rejection", err)
 	}
 	cfg.Jobs[0].ModeGateRef = "drive-e2e:sync-gate"
-	cfg.Jobs[0].ModeGateDigest = "sha256:gate"
+	cfg.Jobs[0].ModeGateDigest = "sha256:" + strings.Repeat("0", 64)
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate with gate: %v", err)
+	}
+}
+
+func TestValidateRejectsUnboundSyncGateReference(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Mode = "sync"
+	cfg.Jobs[0].ModeGateRef = "file:arbitrary"
+	cfg.Jobs[0].ModeGateDigest = "sha256:" + strings.Repeat("0", 64)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "drive-e2e") {
+		t.Fatalf("Validate error = %v, want drive-e2e gate reference rejection", err)
+	}
+}
+
+func TestValidateRejectsScheduledFollowSymlinkPolicy(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].SymlinkPolicy = "follow"
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "scheduled") {
+		t.Fatalf("Validate error = %v, want scheduled follow rejection", err)
 	}
 }
