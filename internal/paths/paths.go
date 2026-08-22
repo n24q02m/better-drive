@@ -41,7 +41,15 @@ func JobReplicaWorkdir(jobID, replicaID string) string {
 	return filepath.Join(JobWorkdir(jobID), "replica-"+hex.EncodeToString(sum[:4]))
 }
 
+// StateFile returns the persisted scheduler/job evidence path.
+func StateFile() string {
+	if p := os.Getenv("BETTER_DRIVE_STATE"); p != "" {
+		return p
+	}
+	return filepath.Join(base(), "state.json")
+}
+
 // LogFile returns the path of the daemon's persistent sync log
 // (base()/better-drive.log), where `better-drive run` appends one line per
-// completed sync cycle per pair.
+// completed sync cycle per job.
 func LogFile() string { return filepath.Join(base(), "better-drive.log") }

@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/n24q02m/better-drive/internal/autostart"
 	"github.com/n24q02m/better-drive/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
+	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
 	"github.com/n24q02m/better-drive/internal/version"
@@ -153,6 +155,30 @@ func replicaResults(summary engine.ReplicaSummary) []output.ReplicaResult {
 		results = append(results, item)
 	}
 	return results
+}
+
+func buildStateFromResults(results []output.PairResult, now time.Time) state.State {
+	scheduler := state.SchedulerState{
+		Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
+		ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok",
+		ObservedAt: now, FreshnessWindow: 15 * time.Minute, CatchUpGrace: 6*time.Hour + 15*time.Minute,
+	}
+	scheduler.Health = state.EvaluateSchedulerHealth(scheduler, now)
+	persisted := state.State{SchemaVersion: state.CurrentSchemaVersion, EngineVersion: version.Version, Scheduler: scheduler}
+	for _, result := range results {
+		item := state.JobState{JobID: result.JobID, Status: result.Status, ObjectCount: 0, ByteCount: 0}
+		if item.JobID == "" {
+			item.JobID = result.Local + "->" + result.Remote
+		}
+		if result.Status == "ok" || result.Status == "degraded" {
+			item.LastSuccess = now
+		}
+		for _, replica := range result.Replicas {
+			item.ReplicaOutcomes = append(item.ReplicaOutcomes, state.ReplicaState{ID: replica.ID, Target: replica.Target, Required: replica.Required, Status: replica.Status, Error: replica.Error})
+		}
+		persisted.Jobs = append(persisted.Jobs, item)
+	}
+	return persisted
 }
 
 // badFormatErr wraps an invalid --format value (output.Validate's error) as
@@ -366,6 +392,25 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			persisted, stateErr := state.Load(paths.StateFile())
+			if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+				return exitcode.WithRemediation(exitcode.ConfigError(stateErr), fmt.Sprintf("repair persisted state at %s", paths.StateFile()))
+			}
+			jobStatus := func(jobID string) string {
+				if persisted == nil {
+					return "unknown"
+				}
+				for _, item := range persisted.Jobs {
+					if item.JobID == jobID {
+						return item.Status
+					}
+				}
+				return "unknown"
+			}
+			health := "unknown-overlap"
+			if persisted != nil {
+				health = persisted.Scheduler.Health
+			}
 			if format == output.FormatJSON {
 				pairs := make([]output.PairStatus, 0, len(cfg.Jobs))
 				for _, job := range cfg.Jobs {
@@ -374,7 +419,7 @@ func statusCmd() *cobra.Command {
 						if targetErr != nil {
 							return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
 						}
-						pairs = append(pairs, output.PairStatus{Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String()})
+						pairs = append(pairs, output.PairStatus{JobID: job.ID, Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String(), JobStatus: jobStatus(job.ID), Health: health})
 					}
 				}
 				return output.RenderJSON(cmd.OutOrStdout(), pairs)
@@ -439,8 +484,14 @@ func syncCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
 			}
 			defer e.Close()
-			_, err = runSyncOnce(cmd, e, cfg, format, dryRun, resync)
-			return err
+			results, syncErr := runSyncOnce(cmd, e, cfg, format, dryRun, resync)
+			if stateErr := state.Save(paths.StateFile(), buildStateFromResults(results, time.Now().UTC())); stateErr != nil {
+				if syncErr != nil {
+					return fmt.Errorf("%v; persist state: %w", syncErr, stateErr)
+				}
+				return stateErr
+			}
+			return syncErr
 		},
 	}
 	output.AddFormatFlag(c, &format)

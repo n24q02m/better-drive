@@ -15,12 +15,15 @@ const (
 	FormatJSON  = "json"
 )
 
-// PairStatus is one configured sync pair, as reported by `status`.
+// PairStatus is one destination of a normalized job, as reported by `status`.
 type PairStatus struct {
-	Local    string `json:"local"`
-	Remote   string `json:"remote"`
-	Mode     string `json:"mode"`
-	Interval string `json:"interval"`
+	JobID     string `json:"job_id,omitempty"`
+	Local     string `json:"local"`
+	Remote    string `json:"remote"`
+	Mode      string `json:"mode"`
+	Interval  string `json:"interval"`
+	JobStatus string `json:"job_status,omitempty"`
+	Health    string `json:"health,omitempty"`
 }
 
 // ReplicaResult is one destination outcome within a job's sync cycle.

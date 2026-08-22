@@ -17,6 +17,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
+	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -954,6 +955,20 @@ func TestRunSyncOnceJSONIncludesReplicaRequiredStatus(t *testing.T) {
 	}
 	if !got[0].Replicas[0].Required || got[0].Replicas[1].Required {
 		t.Fatalf("replica required bits = %#v, want true,false", got[0].Replicas)
+	}
+}
+
+func TestBuildStateFromResultsPersistsJobAndReplicaOutcomes(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	got := buildStateFromResults([]output.PairResult{{JobID: "job-1", Status: "degraded", Replicas: []output.ReplicaResult{{ID: "r1", Target: "gdrive:backup", Required: true, Status: "ok"}}}}, now)
+	if got.SchemaVersion != state.CurrentSchemaVersion || len(got.Jobs) != 1 {
+		t.Fatalf("state = %#v, want versioned job state", got)
+	}
+	if got.Jobs[0].JobID != "job-1" || got.Jobs[0].Status != "degraded" || len(got.Jobs[0].ReplicaOutcomes) != 1 {
+		t.Fatalf("job state = %#v, want degraded replica evidence", got.Jobs[0])
+	}
+	if got.Scheduler.Health != state.HealthHealthy || got.Scheduler.OwnerJobID != "scheduled-sync" {
+		t.Fatalf("scheduler state = %#v, want healthy scheduled-sync owner", got.Scheduler)
 	}
 }
 
