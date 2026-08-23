@@ -47,6 +47,12 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 			mPause.SetTitle("Pause")
 			mPause.SetTooltip("Pause scheduled syncs for all pairs")
 		}
+		if aggregate.NeedsResync {
+			mPause.Disable()
+			mPause.SetTooltip("Run better-drive sync --resync to rebuild the bisync baseline")
+		} else {
+			mPause.Enable()
+		}
 		syncEnabled, syncTooltip := syncMenuState(aggregate)
 		if syncEnabled {
 			mSync.Enable()
