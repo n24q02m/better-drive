@@ -276,6 +276,11 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive run` | Run every configured job continuously with tray status. |
 | `better-drive status [--format table\|json]` | Print configured jobs without touching the network. |
 | `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit. |
+| `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
+| `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
+| `better-drive cleanup inventory` | Join a complete enumerated all-roots/page capture into read-only aggregate evidence. |
+| `better-drive cleanup validate --manifest <path>` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, and budgets. |
+| `better-drive cleanup apply --manifest <path>` | Preview an exact manifest; `--execute` fails closed until the owner-risk broker capability is bound. |
 | `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
 | `better-drive install` | Register the sync daemon to start at login. |
 | `better-drive uninstall` | Remove the login-autostart registration. |
