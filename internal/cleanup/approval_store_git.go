@@ -2,6 +2,8 @@ package cleanup
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -63,6 +65,17 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 	}
 	if intent.SchemaVersion != CurrentApprovalSchemaVersion || intent.IntentDigest == "" || intent.Approval.ApprovalID == "" || intent.State != ApprovalApproved {
 		return errors.New("sealed intent is incomplete or not approved")
+	}
+	canonical, err := CanonicalApproval(intent.Approval)
+	if err != nil {
+		return fmt.Errorf("sealed intent approval is invalid: %w", err)
+	}
+	if intent.IntentDigest != Digest(canonical) {
+		return errors.New("sealed intent digest does not match canonical approval")
+	}
+	signature, err := hex.DecodeString(intent.SignatureHex)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return errors.New("sealed intent signature is not valid Ed25519 hex")
 	}
 	draftPath := filepath.Join(store.Root, "cleanup-drafts", intent.Approval.ApprovalID+".json")
 	if _, err := os.Stat(draftPath); err != nil {

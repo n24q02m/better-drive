@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"crypto/ed25519"
 	"os"
 	"path/filepath"
 	"strings"
@@ -36,7 +37,11 @@ func TestApprovalStoreActivateAndReadState(t *testing.T) {
 	if _, err := store.Prepare(approval); err != nil {
 		t.Fatal(err)
 	}
-	intent := Intent{SchemaVersion: CurrentApprovalSchemaVersion, IntentDigest: strings.Repeat("c", 64), Approval: approval, SignatureHex: "sig", State: ApprovalApproved}
+	canonical, err := CanonicalApproval(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := Intent{SchemaVersion: CurrentApprovalSchemaVersion, IntentDigest: Digest(canonical), Approval: approval, SignatureHex: strings.Repeat("00", ed25519.SignatureSize), State: ApprovalApproved}
 	if err := store.Activate(intent); err != nil {
 		t.Fatalf("Activate() error = %v", err)
 	}
@@ -51,7 +56,24 @@ func TestApprovalStoreActivateAndReadState(t *testing.T) {
 		t.Fatalf("idempotent Activate() error = %v", err)
 	}
 	intent.IntentDigest = strings.Repeat("d", 64)
-	if err := store.Activate(intent); err == nil || !strings.Contains(err.Error(), "foreign") {
-		t.Fatalf("expected foreign intent rejection, got %v", err)
+	if err := store.Activate(intent); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("expected intent digest rejection, got %v", err)
+	}
+}
+func TestApprovalStoreRejectsIntentDigestDrift(t *testing.T) {
+	store := NewApprovalStore(t.TempDir())
+	approval := validApproval()
+	if _, err := store.Prepare(approval); err != nil {
+		t.Fatal(err)
+	}
+	intent := Intent{
+		SchemaVersion: CurrentApprovalSchemaVersion,
+		IntentDigest:  strings.Repeat("c", 64),
+		Approval:      approval,
+		SignatureHex:  strings.Repeat("00", 64),
+		State:         ApprovalApproved,
+	}
+	if err := store.Activate(intent); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("expected intent digest rejection, got %v", err)
 	}
 }
