@@ -138,26 +138,16 @@ func TestExistingBaselineSkipsResync(t *testing.T) {
 	}
 }
 
-// TestForeignPairListingsDoNotCountAsBaseline is the regression test for a
-// pair that syncs once and is then stuck forever: when workdirs were keyed by
-// a pair's POSITION in the config, changing that position (reordering,
-// inserting or deleting a [[pair]] block) handed a pair a directory full of
-// ANOTHER pair's listings. baselineExists only asks whether any *.lst file is
-// present, so the loop skipped --resync, rclone aborted with "must run
-// --resync" because it has no listing for this path1/path2 session, and every
-// later run repeated that exact sequence.
-//
-// Keying the workdir on the pair's identity is what actually fixes it, so the
-// two directories here are built from the real paths.PairWorkdir names (only
-// relocated under a temp root, to keep the test off the user's real config
-// tree) rather than from names invented by the test.
-func TestForeignPairListingsDoNotCountAsBaseline(t *testing.T) {
+// TestForeignJobListingsDoNotCountAsBaseline is the regression test for a job
+// that syncs once and is then stuck forever: a workdir from another stable job
+// ID must never satisfy the current job's baseline check.
+func TestForeignJobListingsDoNotCountAsBaseline(t *testing.T) {
 	root := t.TempDir()
-	dirFor := func(local, remote string) string {
-		return filepath.Join(root, filepath.Base(paths.PairWorkdir(local, remote)))
+	dirFor := func(jobID string) string {
+		return filepath.Join(root, filepath.Base(paths.JobWorkdir(jobID)))
 	}
-	foreign := dirFor("C:/other", "gdrive:other")
-	mine := dirFor("C:/mine", "gdrive:mine")
+	foreign := dirFor("foreign-job")
+	mine := dirFor("mine-job")
 	if err := os.MkdirAll(foreign, 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -754,5 +744,47 @@ func TestModeDefaultsToBisyncWhenEmpty(t *testing.T) {
 	l.runOnce()
 	if len(f.calls) != 1 {
 		t.Fatalf("bisync calls=%d, want 1 (empty mode must default to bisync)", len(f.calls))
+	}
+}
+
+type directionReplicaSyncer struct {
+	copies      []engine.CopyParams
+	errByRemote map[string]error
+}
+
+func (f *directionReplicaSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
+	return engine.BisyncResult{}, f.errByRemote[p.Path2]
+}
+func (f *directionReplicaSyncer) Copy(p engine.CopyParams) error {
+	f.copies = append(f.copies, p)
+	return f.errByRemote[p.Remote]
+}
+func (f *directionReplicaSyncer) Sync(engine.CopyParams) error { return nil }
+
+func TestNewWithReplicasSupportsPullDirection(t *testing.T) {
+	f := &directionReplicaSyncer{errByRemote: map[string]error{}}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Workdir: "wd/r1", Required: true}}, "copy", "pull", func() ([]string, error) { return nil, nil })
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.copies) != 1 || f.copies[0].Local != "gdrive:backup" || f.copies[0].Remote != "C:/source" {
+		t.Fatalf("copy calls = %#v, want reversed pull direction", f.copies)
+	}
+}
+
+func TestNewWithReplicasPreservesOptionalFailureAsDegraded(t *testing.T) {
+	f := &directionReplicaSyncer{errByRemote: map[string]error{"r2:optional": errors.New("optional failed")}}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{
+		{ID: "r1", Target: "gdrive:required", Workdir: "wd/r1", Required: true},
+		{ID: "r2", Target: "r2:optional", Workdir: "wd/r2", Required: false},
+	}, "copy", "push", func() ([]string, error) { return nil, nil })
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("optional failure: %v, want nil", err)
+	}
+	if l.State() != StateIdle {
+		t.Fatalf("state = %v, want idle for optional failure", l.State())
+	}
+	if len(f.copies) != 2 {
+		t.Fatalf("copy calls = %#v, want both replicas attempted", f.copies)
 	}
 }

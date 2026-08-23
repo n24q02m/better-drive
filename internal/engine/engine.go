@@ -17,36 +17,25 @@ import (
 var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
 type Engine struct {
-	// bin is the resolved rclone binary path (from a successful exec.LookPath,
-	// or the bare "rclone" name when lookup fails - the error surfaces on first
-	// use instead of at New()). cfg is the rclone config file path to pass via
-	// --config; empty means let rclone fall back to its own default discovery
-	// (including honoring the RCLONE_CONFIG env var itself). run and stream are
-	// the short-lived captured and long-lived streaming seams tests inject
-	// fakes into; New wires them to the real execRunner/execStreamRunner(bin).
+	// bin and cfg are only used by the explicit foreground compatibility
+	// constructor below. Scheduled sync/account operations use NewVerified,
+	// which requires an enrolled absolute executable/config identity and an
+	// allowlisted child environment.
 	bin    string
 	cfg    string
 	run    runner
 	stream streamRunner
-	// syncMu serializes the sync operations (Bisync/Copy/Sync). The previous
-	// librclone rc engine applied its _filter (and other run options) to
-	// PROCESS-GLOBAL state for the duration of a sync, so two concurrent syncs
-	// with different filters raced: verified E2E that concurrent Copy calls
-	// silently crossed their filters and one dest ended up empty with err=nil.
-	// Each rclone subprocess is now independent, but the lock is kept as cheap
-	// insurance and to guard the temp filter-file's lifetime (a second sync
-	// must not remove the first one's still-in-use file).
+	// syncMu serializes the sync operations (Bisync/Copy/Sync). Each rclone
+	// subprocess is independent, but the lock protects temp filter-file
+	// lifetimes and keeps one sync operation's state isolated from another.
 	syncMu sync.Mutex
 }
 
-// New builds an Engine that shells out to the system rclone binary.
-// rcloneConfigPath, when non-empty, is passed to every rclone invocation via
-// --config (e.g. a scoop portable install's rclone.conf); an empty value is
-// passed through as-is (no --config flag), letting rclone fall back to its
-// own default config discovery, including the RCLONE_CONFIG env var, which
-// the rclone CLI honors natively.
-func New(rcloneConfigPath string) *Engine {
-	bin := "rclone" // lookup failures surface on first use
+// NewForeground builds an Engine for the separate foreground mount path.
+// Unlike NewVerified, it may use rclone's foreground discovery semantics;
+// scheduled transfer code must never call it.
+func NewForeground(rcloneConfigPath string) *Engine {
+	bin := "rclone"
 	if resolved, err := exec.LookPath(bin); err == nil {
 		bin = resolveRcloneExecutable(resolved)
 	}
@@ -370,6 +359,11 @@ func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 type BisyncParams struct {
 	Path1, Path2, Workdir string
 	Resync                bool
+	// Optional state evidence enables safety guards without making the legacy
+	// call shape infer destructive history from an empty default.
+	SourceWasNonEmpty *bool
+	SourceObjectCount *int64
+	DeleteBudget      *DeleteBudget
 	// DryRun previews the cycle (including its delete propagation) via
 	// rclone's own --dry-run, applying no change.
 	DryRun  bool
@@ -405,6 +399,9 @@ func (e *Engine) ensureRemoteDir(ctx context.Context, stderrOut io.Writer, path 
 // telling the caller to (re-)run --resync is mapped to the ErrNeedsResync
 // sentinel; any other error is wrapped with rclone's stderr for diagnostics.
 func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
+	if err := validateTransferSafety("bisync", p.SourceWasNonEmpty, p.SourceObjectCount, p.DeleteBudget); err != nil {
+		return BisyncResult{}, err
+	}
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if !p.DryRun {
@@ -484,12 +481,12 @@ func needsResync(stderr string) bool {
 		strings.Contains(s, "cannot find prior path1 or path2 listings")
 }
 
-// CopyParams configures a 1-way `rclone copy` or `rclone sync` call. Unlike
-// BisyncParams there is no Resync/baseline concept: copy/sync are stateless
-// per invocation, and `rclone copy`/`rclone sync` auto-create the destination
-// directory, so no ensureRemoteDir call is needed either.
 type CopyParams struct {
 	Local, Remote, Workdir string
+	// Optional state evidence enables safety guards before a destructive sync.
+	SourceWasNonEmpty *bool
+	SourceObjectCount *int64
+	DeleteBudget      *DeleteBudget
 	// DryRun previews the operation via rclone's own --dry-run, applying no
 	// change - the mode this matters most for is "sync" (Sync below), which
 	// deletes remote files absent locally.
@@ -628,6 +625,11 @@ func (e *Engine) Sync(p CopyParams) error { return e.copyOrSync("sync", p) }
 // subcommand (copy vs sync), otherwise sharing the same argv shape, filter
 // handling, and file-local dispatch.
 func (e *Engine) copyOrSync(subcommand string, p CopyParams) error {
+	if subcommand == "sync" {
+		if err := validateTransferSafety("sync", p.SourceWasNonEmpty, p.SourceObjectCount, p.DeleteBudget); err != nil {
+			return err
+		}
+	}
 	e.syncMu.Lock()
 	defer e.syncMu.Unlock()
 	if isFileLocal(p.Local) {

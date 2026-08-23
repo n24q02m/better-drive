@@ -42,6 +42,30 @@ need curl
 need tar
 need uname
 
+safe_extract_tar() {
+  archive="$1"
+  destination="$2"
+  mkdir -p "$destination"
+  count=0
+  while IFS= read -r entry; do
+    count=$((count + 1))
+    [ "$count" -le 1000 ] || err "archive contains too many entries"
+    case "$entry" in
+      /*|../*|*/../*|*:/|*:/\*|*"$HOME"*) err "unsafe archive path: $entry" ;;
+    esac
+  done <<EOF
+$(tar -tzf "$archive")
+EOF
+  tar -tvzf "$archive" > "$destination/.archive-list"
+  while IFS= read -r listing; do
+    case "$listing" in
+      l*|h*) err "archive symlink/hardlink is forbidden: $listing" ;;
+    esac
+  done < "$destination/.archive-list"
+  rm -f "$destination/.archive-list"
+  tar -xzf "$archive" -C "$destination"
+}
+
 os=$(uname -s | tr '[:upper:]' '[:lower:]')
 case "$os" in
   linux|darwin) ;;
@@ -77,7 +101,6 @@ if [ -z "$PREFIX" ]; then
     PREFIX="$HOME/.local/bin"
   fi
 fi
-mkdir -p "$PREFIX"
 
 # Darwin -> darwin, Linux -> linux (lowercase matches release archives)
 asset="better-drive_${ver_trim}_${os}_${arch}.tar.gz"
@@ -103,30 +126,28 @@ expected=$(grep "  $asset" "$tmp/checksums.txt" | awk '{print $1}')
 [ -n "$expected" ] || err "no checksum row for $asset"
 [ "$expected" = "$actual" ] || err "checksum mismatch (expected $expected, got $actual)"
 
-if command -v cosign >/dev/null 2>&1; then
-  log "Verifying cosign Sigstore signature"
-  curl -fsSL "$cert_url" -o "$tmp/checksums.txt.pem"
-  curl -fsSL "$sig_url" -o "$tmp/checksums.txt.sig"
-  cosign verify-blob \
-    --certificate "$tmp/checksums.txt.pem" \
-    --signature "$tmp/checksums.txt.sig" \
-    --certificate-identity-regexp "https://github.com/$REPO/.+" \
-    --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
-    "$tmp/checksums.txt" \
-    >/dev/null 2>&1 || log "WARN: cosign verify failed -continuing (checksum already matched)"
-else
-  log "cosign not installed -skipping signature check (checksum already verified)"
-fi
+need cosign
+log "Verifying cosign Sigstore signature"
+curl -fsSL "$cert_url" -o "$tmp/checksums.txt.pem"
+curl -fsSL "$sig_url" -o "$tmp/checksums.txt.sig"
+cosign verify-blob \
+  --certificate "$tmp/checksums.txt.pem" \
+  --signature "$tmp/checksums.txt.sig" \
+  --certificate-identity-regexp "https://github.com/$REPO/.+" \
+  --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+  "$tmp/checksums.txt" >/dev/null 2>&1 || err "cosign Sigstore verification failed"
 
-log "Extracting to $tmp"
-tar -xzf "$tmp/better-drive.tar.gz" -C "$tmp"
-
+extract="$tmp/extract"
+log "Extracting through SAFE-ARCHIVE-V1 preflight"
+safe_extract_tar "$tmp/better-drive.tar.gz" "$extract"
+[ -f "$extract/better-drive" ] || err "archive does not contain better-drive at its root"
 dest="$PREFIX/better-drive"
+mkdir -p "$PREFIX"
 log "Installing $dest"
 if [ -n "${USE_SUDO:-}" ]; then
-  sudo install -m 0755 "$tmp/better-drive" "$dest"
+  sudo install -m 0755 "$extract/better-drive" "$dest"
 else
-  install -m 0755 "$tmp/better-drive" "$dest"
+  install -m 0755 "$extract/better-drive" "$dest"
 fi
 
 if [ "$NO_COMPLETION" = 0 ]; then

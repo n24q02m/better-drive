@@ -1,6 +1,6 @@
 [semantic_release]
 tag_format = "v{version}"
-commit_message = "feat(release): v{version} [skip ci]"
+commit_message = "fix(release): v{version} [skip ci]"
 major_on_zero = false
 
 [semantic_release.changelog]

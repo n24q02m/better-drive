@@ -13,15 +13,15 @@ import (
 )
 
 // Run starts the systray icon and blocks until Quit is chosen. loops and
-// pairs must be the same length and index-aligned (loops[i] is the Loop
-// driving pairs[i]); agg must already be wired to loops via agg.Register so
+// jobs must be the same length and index-aligned (loops[i] is the Loop
+// driving jobs[i]); agg must already be wired to loops via agg.Register so
 // it reflects their combined state.
-func Run(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) error {
-	systray.Run(func() { onReady(loops, pairs, agg) }, func() {})
+func Run(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) error {
+	systray.Run(func() { onReady(loops, jobs, agg) }, func() {})
 	return nil
 }
 
-func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
+func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 	systray.SetIcon(trayIcon)
 	systray.SetTitle("better-drive")
 	systray.SetTooltip("better-drive")
@@ -74,8 +74,8 @@ func onReady(loops []*syncloop.Loop, pairs []config.Pair, agg *Aggregator) {
 					}
 				}
 			case <-mOpen.ClickedCh:
-				for _, p := range pairs {
-					openFolder(p.Local)
+				for _, job := range jobs {
+					openFolder(job.Source)
 				}
 			case <-mQuit.ClickedCh:
 				systray.Quit()

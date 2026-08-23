@@ -33,9 +33,14 @@
 <!-- END: AUTO-GENERATED-CROSS-PROMO -->
 
 
-Cross-platform Google Drive sync and virtual-drive mount — bisync (2-way), copy, sync (1-way mirror), or a foreground mounted filesystem. A thin, lean wrapper around the [rclone](https://rclone.org) binary: better-drive owns the ergonomics (`.driveignore`, multi-pair config, a system-tray daemon, per-OS autostart, and a safe mount contract) while your installed `rclone` performs transfers and filesystem mounting.
+Cross-platform Google Drive sync and virtual-drive mount — copy, sync, explicitly
+enrolled bisync, or a foreground mounted filesystem. A thin wrapper around the
+[rclone](https://rclone.org) binary: better-drive owns the job schema,
+`.driveignore`, system-tray daemon, per-OS autostart, and mount contract while
+rclone performs transfers and filesystem mounting.
 
-Runs on Windows, Linux, and macOS. The standalone binary requires `rclone` on `PATH` (installed automatically by the scoop/brew packages below).
+Runs on Windows, Linux, and macOS. Sync/account jobs require an enrolled
+absolute `rclone_runtime`; mount remains a separate foreground compatibility path.
 
 ## Contents
 
@@ -81,16 +86,16 @@ better-drive setup      # create the rclone Google Drive remote (opens browser O
 better-drive mount gdrive: G: # mount Drive in the foreground; Ctrl+C unmounts it
 better-drive install    # register the daemon to start at login (HKCU Run key / LaunchAgent / systemd-user)
 better-drive run        # start the sync daemon (system-tray on Windows/Linux/macOS)
-better-drive status     # show configured pairs and their state
-better-drive sync       # one-shot sync of every pair (for scripts/cron), then exit
+better-drive status     # show configured jobs and their state
+better-drive sync       # one-shot sync of every job (for scripts/cron), then exit
 better-drive uninstall  # remove the login autostart
 ```
 
-The daemon syncs each pair once on start, then again every `interval`, and logs each cycle to `<config-dir>/better-drive.log`.
+The daemon runs each job once on start, then again every `schedule`, and logs each cycle to `<config-dir>/better-drive.log`.
 
 ## Mount a virtual drive
 
-`better-drive mount` exposes an already-configured rclone remote as a foreground filesystem. It is independent of sync pairs: `config.toml` may be absent or contain only an optional `rclone_config` path. The command verifies that the Drive remote has an OAuth token or service-account file before mounting, always uses `--vfs-cache-mode full` for application compatibility, streams rclone output live, and unmounts when you press Ctrl+C.
+`better-drive mount` exposes an already-configured rclone remote as a foreground filesystem. It is independent of sync jobs: `config.toml` may be absent or contain only an optional `rclone_config` path. The command verifies that the Drive remote has an OAuth token or service-account file before mounting, always uses `--vfs-cache-mode full` for application compatibility, streams rclone output live, and unmounts when you press Ctrl+C.
 
 ```powershell
 # Windows drive letter
@@ -117,95 +122,117 @@ The first argument must be `<remote>:<path>`; the second is passed through to rc
 
 ## Accounts
 
-Each Google Drive account is an rclone remote; a `[[pair]]` block points its `remote` at one of them by name, so any number of accounts can be synced side by side by one `better-drive run` daemon.
+Each Google Drive account is an enrolled rclone remote referenced by a v2
+`[[job.destination]]` through `credential_ref = "rclone:<remote>"`. Jobs, not
+legacy `[[pair]]` blocks, are the runtime source of truth.
 
 ```bash
-better-drive account list                 # table: each account's state and pair count, offline, no network call
-better-drive account list --quota         # same, plus each configured account's Drive storage usage (one rclone call per account)
-better-drive account list --format json   # same data as JSON
-better-drive account add --remote NAME    # same command as `better-drive setup`, under the account group
+better-drive account list                 # account state and job count
+better-drive account list --quota         # also query Drive quota
+better-drive account list --format json   # machine-readable output
+better-drive account add --remote NAME    # same command as `better-drive setup`
 better-drive account remove NAME          # delete an account's rclone remote
 ```
 
-```
-$ better-drive account list
-account testdrive: ready, 1 pair(s)
-account testdrive2: not set up, 0 pair(s)
-
-$ better-drive account list --format json
-[
-  {
-    "name": "testdrive",
-    "configured": true,
-    "pairs": [
-      "C:/Users/you/Documents"
-    ]
-  }
-]
-```
-
-`account remove NAME` refuses while a `[[pair]]` still references the account — the error names the pairs holding it — unless `--force` is passed. `account add` is the exact same command as `setup`, reachable under either name.
+`account remove NAME` refuses while a `[[job.destination]]` still references the
+remote unless `--force` is passed. Account commands also require the pinned
+`rclone_runtime`; they never fall back to PATH or ambient `RCLONE_*` discovery.
 
 ### Multiple accounts
 
-Point different `[[pair]]` blocks at different remotes to sync more than one Google account from a single daemon:
-
-```toml
-[[pair]]
-local = "C:\\Users\\YourName\\GoogleDrive"
-remote = "gdrive:/"
-interval = "30s"
-
-[[pair]]
-local = "C:\\Users\\YourName\\WorkDrive"
-remote = "gdrive-work:Backups"
-interval = "6h"
-```
-
-Both pairs run concurrently under the same `better-drive run` process; `better-drive account list` reports both `gdrive` and `gdrive-work`.
+Point destinations at different enrolled remotes to use more than one Google
+account. The destination path is not provider authority; `account_id` and
+`root_id` are persisted identity fields and must be enrolled before execution.
 
 ## Configuration
 
-Edit the config at your OS config dir (`%APPDATA%\better-drive\config.toml` on Windows, `~/.config/better-drive/config.toml` on Linux/macOS). Multiple `[[pair]]` blocks are supported — each is an independent sync with its own mode, interval, and excludes, all running concurrently under one `better-drive run` process:
+Edit the config at your OS config dir (`%APPDATA%\better-drive\config.toml` on
+Windows, `~/.config/better-drive/config.toml` on Linux/macOS). Runtime sync
+configuration is schema v2; legacy `[[pair]]` blocks are accepted only by the
+read-only migration preview.
 
 ```toml
-# Optional: point at a specific rclone.conf. If omitted, better-drive auto-detects
-# (scoop portable config, then the standard rclone config location).
-# rclone_config = "C:\\Users\\YourName\\scoop\\apps\\rclone\\current\\rclone.conf"
+schema_version = 2
 
-[[pair]]
-local = "C:\\Users\\YourName\\GoogleDrive"
-remote = "MyGoogleDrive:/"
-interval = "30s"
+[rclone_runtime]
+executable = "C:\\Program Files\\rclone\\rclone.exe"
+executable_file_id = "enrolled-file-id"
+executable_digest = "sha256:..."
+version = "1.67.0"
+provenance = "approved-release"
+signature = "signature-ref"
+owner = "home-role"
+acl = "owner-only"
+config = "C:\\Users\\YourName\\AppData\\Roaming\\rclone\\rclone.conf"
+config_file_id = "enrolled-config-id"
+config_digest = "sha256:..."
+allowed_remotes = ["gdrive"]
+allowed_backends = ["drive"]
+environment = { RCLONE_LOCAL_NO_CHECK_UPDATED = "true" }
 
-[[pair]]
-local = "C:\\Users\\YourName\\Documents"
-remote = "gdrive:Backups/documents"
-interval = "6h"
+[[job]]
+id = "home-claude"
+source = "C:\\Users\\YourName\\.claude"
+direction = "push"
 mode = "copy"
+required = true
+category_policy_id = "claude-state"
+category_policy_version = 1
+category_policy_digest = "sha256:..."
+symlink_policy = "preserve"
+schedule = "6h"
 exclude = ["node_modules/", ".venv/", "__pycache__/", ".git/"]
+
+[[job.destination]]
+backend = "drive"
+path = "Backups/home/Claude"
+account_id = "google-account-id"
+root_id = "drive-root-id"
+credential_ref = "rclone:gdrive"
+required = true
+retention = "30d"
+min_complete_restore_sets = 2
+delete_policy = "none"
 ```
 
-- `local`: local folder path to sync
-- `remote`: rclone remote reference (format: `<remote>:<path>`)
-- `interval`: check interval for this pair (e.g. "30s", "5m", "6h")
-- `mode`: `bisync` (default) | `copy` | `sync` — see below
-- `exclude`: optional list of gitignore-syntax patterns, evaluated as part of this pair's filters (see `.driveignore` below). Use this to exclude paths from a real, already-existing directory (e.g. a home dir) without ever writing a `.driveignore` file into it.
+- `id` is the stable job identity used for logs, status and bisync state.
+- `direction` is `push`, `pull`, or `bidirectional`; Task 1 scheduled execution
+  accepts only explicit `push`.
+- `mode` is exactly `copy`, `sync`, or `bisync`. The safe migration/default is
+  `copy + push`; `bisync + bidirectional` requires explicit enrollment.
+- `required` applies to the source. Missing required sources fail; optional
+  sources are reported as `skipped_optional`.
+- `sync` additionally requires `mode_gate_ref` and `mode_gate_digest` bound to a
+  real Drive E2E gate; without that evidence it fails closed.
+- Every destination explicitly declares `required`, `min_complete_restore_sets
+  >= 2`, and `delete_policy` (`none` or `quarantine`).
+- `rclone_runtime` is pinned. Sync/account operations reject relative paths,
+  missing identity/digest/provenance/ACL, PATH/default discovery, ambient
+  `RCLONE_*`, and command hooks before endpoint or child-process access.
+
+Preview legacy migration without writing:
+
+```bash
+better-drive config migrate --dry-run --format json
+```
+
+The preview redacts user path segments and materializes deterministic job IDs.
+It maps missing/default/copy to `copy + push`, sync to `sync + push`, and rejects
+legacy bisync unless the stable job ID is explicitly enrolled.
 
 ### Modes
 
-- `bisync` (default): 2-way sync, deletions propagate both directions. Needs a `--resync` on first run (handled automatically) and keeps a baseline in the workdir.
-- `copy`: 1-way, local -> remote. Nothing on remote is ever deleted (safe backup semantics — mirrors a no-delete `rclone copy` cron).
-- `sync`: 1-way, remote is made to exactly mirror local, including deleting anything on remote not present locally.
-
-Each pair's bisync baseline lives in its own workdir subdirectory, keyed by that pair's local and remote identity — reordering, adding, or removing `[[pair]]` blocks never disturbs another pair's baseline. If a bisync pair's baseline is missing or unusable, `sync` reports it as failed and names the fix: `better-drive sync --resync` rebuilds the baseline for every bisync-mode pair. This is a recovery command, not something to run routinely — a resync does not propagate deletions, so any file deleted on one side since the baseline broke reappears from the other side. Combine it with `--dry-run` to preview the rebuild first.
+- `copy + push`: one-way local-to-remote backup; remote content is never deleted.
+- `sync + push`: one-way mirror; scheduled use remains behind its real Drive E2E gate.
+- `bisync + bidirectional`: two-way transfer only for an explicitly enrolled,
+  non-default profile; its baseline is keyed by the stable job ID.
 
 ## .driveignore + config excludes
 
-Two ways to filter what a pair syncs, and they combine (gitignore syntax, both optional):
+Two ways to filter what a job syncs, and they combine (gitignore syntax, both optional):
 
-1. **`.driveignore` file** at the root of the pair's local folder — good for filters that belong with the folder itself.
-2. **`exclude` config key** on the `[[pair]]` block — good for folders you don't want to drop a hidden ignore file into, or for backup-style pairs where the filters belong with the sync config, not the source directory.
+1. **`.driveignore` file** at the root of the job's local source — good for filters that belong with the source itself.
+2. **`exclude` config key** on the `[[job]]` block — good for filters that belong with the sync configuration.
 
 ```
 # Ignore system files
@@ -228,21 +255,33 @@ Rules are evaluated top-to-bottom, gitignore-style (config `exclude` entries fir
 
 ## How it works
 
-better-drive builds an `rclone` command line from each pair's config and runs the system `rclone` binary (`rclone bisync`/`copy`/`sync`), translating `.driveignore`/`exclude` rules into an rclone filter file and applying safe defaults (`--fast-list`, tuned `--transfers`/`--checkers`/`--tpslimit`, `--retries`, `--local-no-check-updated` for live directories, `--drive-skip-gdocs`). Because rclone does the transfers, better-drive stays tiny and inherits rclone's config, auth, and reliability.
+better-drive builds an `rclone` command line from each normalized job and runs
+the pinned executable/config from `rclone_runtime`, translating `.driveignore`
+and `exclude` rules into an rclone filter file. Sync/account operations use an
+allowlisted child environment and never inherit PATH, default config discovery,
+ambient `RCLONE_*`, or hooks.
 
-`better-drive run` is a long-lived process that starts one `syncloop` (with its own ticker) per configured pair. On Windows, Linux and macOS it shows a system-tray icon with one combined status across all pairs ("Sync now" / "Pause" act on every pair at once); on any other platform it runs headless (use the log + `better-drive status`).
-
-`better-drive mount` instead runs one foreground `rclone mount <remote:path> <mountpoint> --vfs-cache-mode full` process. It does not take the sync mutex and therefore does not block independent sync cycles. `--read-only` appends rclone's write-protection flag; Ctrl+C cancels the child process and unmounts the filesystem.
+`better-drive run` starts one `syncloop` per configured job. Each bisync baseline
+is keyed by the stable job ID, so reordering config blocks cannot transfer one
+job's state to another. `better-drive mount` remains a separate foreground
+compatibility path; it does not participate in scheduled job/runtime guarantees.
 
 ## Command reference
 
 | Command | Purpose |
 |---|---|
+| `better-drive config migrate --dry-run --format json` | Preview deterministic, redacted v1-to-v2 migration without writing. |
 | `better-drive setup [flags]` | Create or repair a Google Drive rclone remote through OAuth. |
 | `better-drive account list\|add\|remove` | Inspect, create, or remove Drive accounts/remotes. |
-| `better-drive run` | Run every configured sync pair continuously with tray status. |
-| `better-drive status [--format table\|json]` | Print configured pairs without touching the network. |
-| `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every pair and exit. |
+| `better-drive run` | Run every configured job continuously with tray status. |
+| `better-drive status [--format table\|json]` | Print configured jobs without touching the network. |
+| `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit. |
+| `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
+| `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
+| `better-drive cleanup inventory` | Join a complete enumerated all-roots/page capture into read-only aggregate evidence. |
+| `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
+| `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
+| `better-drive cleanup approval prepare|canonicalize|activate` | Create a create-only draft, render canonical bytes for offline signing, and activate a detached signature only against an enrolled trust root and named capability. |
 | `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
 | `better-drive install` | Register the sync daemon to start at login. |
 | `better-drive uninstall` | Remove the login-autostart registration. |
@@ -251,9 +290,14 @@ Run `better-drive <command> --help` for complete flags, examples, and prerequisi
 
 ## Requirements
 
-- [`rclone`](https://rclone.org) on `PATH` (installed automatically by the scoop and brew packages).
-- A configured rclone Google Drive remote — run `better-drive setup`, or reuse a remote you already have (`rclone config`). Tip: create your own Google [client_id](https://rclone.org/drive/#making-your-own-client-id) to avoid the shared-client rate limits (pass it to `setup`/`account add` as `--client-id`/`--client-secret`).
-- Mount mode additionally needs WinFsp on Windows, FUSE 3 plus `/dev/fuse` access on Linux, or a mount backend supported by the installed rclone on macOS. Sync-only commands do not need these filesystem drivers.
+- A pinned schema-v2 `rclone_runtime` with absolute executable/config paths,
+  file identity, digest, version, provenance, signature, owner/ACL, allowed
+  remotes/backends, and no ambient PATH/default discovery.
+- A configured rclone Google Drive remote enrolled by `credential_ref`; run
+  `better-drive setup` or reuse a remote you already have.
+- Mount mode additionally needs WinFsp on Windows, FUSE 3 plus `/dev/fuse`
+  access on Linux, or a supported mount backend on macOS. Sync-only commands
+  do not need filesystem drivers.
 
 ### Non-interactive setup
 

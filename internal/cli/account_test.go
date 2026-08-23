@@ -65,6 +65,25 @@ func newAccountTestCmd() (*cobra.Command, *bytes.Buffer, *bytes.Buffer) {
 	return cmd, &out, &errOut
 }
 
+func testJob(local, remote string) config.Job {
+	return testJobMode(local, remote, "copy")
+}
+
+func testJobMode(local, remote, mode string) config.Job {
+	name, path, _ := strings.Cut(remote, ":")
+	direction := "push"
+	if mode == "bisync" {
+		direction = "bidirectional"
+	}
+	return config.Job{
+		ID: "test-" + name + "-" + strings.ReplaceAll(path, "/", "-"), Source: local,
+		Direction: direction, Mode: mode, Required: true, CategoryPolicyID: "test-policy",
+		CategoryPolicyVersion: 1, CategoryPolicyDigest: "sha256:test", SymlinkPolicy: "preserve",
+		Interval: time.Second, Schedule: "1s",
+		Destinations: []config.Destination{{Backend: "drive", Path: path, AccountID: "test-account", RootID: "test-root", CredentialRef: "rclone:" + name, Required: true, MinCompleteRestoreSets: 2, DeletePolicy: "none"}},
+	}
+}
+
 // TestAccountList_TableShowsPairCount verifies the default table format names
 // every Drive remote, reports whether each one is usable, and says how many
 // configured pairs depend on it - the three facts a user needs before adding
@@ -74,9 +93,7 @@ func TestAccountList_TableShowsPairCount(t *testing.T) {
 		remotes:    []string{"gdrive", "work"},
 		configured: map[string]bool{"gdrive": true},
 	}
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: "C:/pair0", Remote: "gdrive:Backups", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob("C:/pair0", "gdrive:Backups")}}
 	cmd, out, _ := newAccountTestCmd()
 
 	if err := runAccountList(cmd, e, cfg, output.FormatTable, false); err != nil {
@@ -84,7 +101,7 @@ func TestAccountList_TableShowsPairCount(t *testing.T) {
 	}
 
 	got := out.String()
-	for _, want := range []string{"gdrive", "work", "ready", "not set up", "1 pair(s)", "0 pair(s)"} {
+	for _, want := range []string{"gdrive", "work", "ready", "not set up", "1 job(s)", "0 job(s)"} {
 		if !strings.Contains(got, want) {
 			t.Errorf("table output missing %q; got:\n%s", want, got)
 		}
@@ -100,9 +117,7 @@ func TestAccountList_JSONShape(t *testing.T) {
 		remotes:    []string{"gdrive"},
 		configured: map[string]bool{"gdrive": true},
 	}
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: "C:/pair0", Remote: "gdrive:Backups", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob("C:/pair0", "gdrive:Backups")}}
 	cmd, out, _ := newAccountTestCmd()
 
 	if err := runAccountList(cmd, e, cfg, output.FormatJSON, false); err != nil {
@@ -279,26 +294,23 @@ func TestAccountList_ReportsListFailure(t *testing.T) {
 	}
 }
 
-// TestPairsUsingRemote_MatchesOnRemoteNameOnly verifies the pair lookup splits
-// on the first ":" rather than matching a prefix: "gdrive-work:" starts with
-// "gdrive" as a string but is a different account, and treating it as the same
-// one would let `account remove gdrive` be refused (or allowed) for the wrong
-// reason.
-func TestPairsUsingRemote_MatchesOnRemoteNameOnly(t *testing.T) {
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: "C:/a", Remote: "gdrive:Backups/x"},
-		{Local: "C:/b", Remote: "gdrive-work:/"},
-		{Local: "C:/c", Remote: "gdrive:/"},
+// TestJobsUsingRemote_MatchesOnRemoteNameOnly verifies the job lookup splits
+// on the first ":" rather than matching a prefix.
+func TestJobsUsingRemote_MatchesOnRemoteNameOnly(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{
+		testJob("C:/a", "gdrive:Backups/x"),
+		testJob("C:/b", "gdrive-work:/"),
+		testJob("C:/c", "gdrive:/"),
 	}}
 
-	got := pairsUsingRemote(cfg, "gdrive")
+	got := jobsUsingRemote(cfg, "gdrive")
 	want := []string{"C:/a", "C:/c"}
 	if len(got) != len(want) {
-		t.Fatalf("pairsUsingRemote = %v, want %v", got, want)
+		t.Fatalf("jobsUsingRemote = %v, want %v", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
-			t.Fatalf("pairsUsingRemote = %v, want %v", got, want)
+			t.Fatalf("jobsUsingRemote = %v, want %v", got, want)
 		}
 	}
 }
@@ -306,14 +318,14 @@ func TestPairsUsingRemote_MatchesOnRemoteNameOnly(t *testing.T) {
 // TestPairsUsingRemote_NilConfigIsNoPairs verifies a missing config.toml is
 // treated as "no pair uses this remote". An account can exist before any pair
 // does, so `account list` must survive a config that is not there yet.
-func TestPairsUsingRemote_NilConfigIsNoPairs(t *testing.T) {
-	if got := pairsUsingRemote(nil, "gdrive"); got != nil {
-		t.Errorf("pairsUsingRemote(nil, ...) = %v, want nil", got)
+// TestJobsUsingRemote_NilConfigIsNoJobs verifies a missing config.toml is
+// treated as "no job uses this remote".
+func TestJobsUsingRemote_NilConfigIsNoJobs(t *testing.T) {
+	if got := jobsUsingRemote(nil, "gdrive"); got != nil {
+		t.Errorf("jobsUsingRemote(nil, ...) = %v, want nil", got)
 	}
 }
 
-// TestHumanBytes covers the boundaries of the unit ladder: zero, the last
-// value that stays in bytes, the first that rolls over to KiB, and a
 // terabyte-scale reading like a real Drive quota.
 func TestHumanBytes(t *testing.T) {
 	for _, tc := range []struct {
@@ -682,9 +694,7 @@ func removeFixture() (*fakeAccountEngine, *config.Config) {
 		remotes:    []string{"gdrive"},
 		configured: map[string]bool{"gdrive": true},
 	}
-	cfg := &config.Config{Pairs: []config.Pair{
-		{Local: "C:/pair0", Remote: "gdrive:Backups", Interval: time.Second, Mode: "bisync"},
-	}}
+	cfg := &config.Config{Jobs: []config.Job{testJob("C:/pair0", "gdrive:Backups")}}
 	return e, cfg
 }
 

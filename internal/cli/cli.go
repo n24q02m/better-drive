@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/n24q02m/better-drive/internal/autostart"
 	"github.com/n24q02m/better-drive/internal/config"
@@ -16,6 +17,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
+	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
 	"github.com/n24q02m/better-drive/internal/version"
@@ -68,28 +70,122 @@ func newRootCmd() *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), mountCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), cleanupCmd(), configCmd(), restoreCmd(), scheduleCmd(), setupCmd(), runCmd(), statusCmd(), syncCmd(), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
 
-// loadConfig reads and validates config.toml (the same two-step Load +
-// Validate that run/status/sync all did inline), wrapping either failure as
-// an exitcode.ConfigError with a remediation hint that names the resolved
-// config path - so all three commands report the same actionable hint
-// instead of each carrying its own copy of the wrapping.
+// loadConfig reads and validates config.toml without making a network call.
+// Sync-capable commands add the runtime/endpoint gate through
+// loadExecutionConfig before constructing an engine.
 func loadConfig() (*config.Config, error) {
 	path := paths.ConfigFile()
 	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
-			fmt.Sprintf("create or fix %s (TOML syntax) - see README for the [[pair]] schema", path))
+			fmt.Sprintf("create or fix %s (TOML syntax) - see README for the [[job]] schema", path))
 	}
 	if err := cfg.Validate(); err != nil {
 		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
-			fmt.Sprintf("edit %s and fix the pair(s) reported above", path))
+			fmt.Sprintf("edit %s and fix the job(s) reported above", path))
 	}
 	return cfg, nil
+}
+
+func loadExecutionConfig() (*config.Config, error) {
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateForExecution(); err != nil {
+		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
+			fmt.Sprintf("enroll the pinned rclone_runtime in %s before running transfers", paths.ConfigFile()))
+	}
+	for _, job := range cfg.Jobs {
+		if len(job.Destinations) == 0 {
+			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q has no destinations", job.ID)),
+				"add at least one [[job.destination]] block")
+		}
+		for _, destination := range job.Destinations {
+			if _, err := destination.RcloneTarget(); err != nil {
+				return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q: %w", job.ID, err)),
+					"set destination.credential_ref to an enrolled rclone:<remote> reference")
+			}
+		}
+	}
+	return cfg, nil
+}
+
+func replicasForJob(job config.Job) ([]engine.ReplicaSpec, error) {
+	if len(job.Destinations) == 0 {
+		return nil, fmt.Errorf("job %q has no destinations", job.ID)
+	}
+	identities := make([]engine.DestinationIdentity, 0, len(job.Destinations))
+	for _, destination := range job.Destinations {
+		identities = append(identities, engine.DestinationIdentity{Provider: destination.Backend, AccountID: destination.AccountID, RootID: destination.RootID, Namespace: destination.Path})
+	}
+	if err := engine.ValidateDestinationCollisions(identities); err != nil {
+		return nil, fmt.Errorf("job %q: %w", job.ID, err)
+	}
+	replicas := make([]engine.ReplicaSpec, 0, len(job.Destinations))
+	for i, destination := range job.Destinations {
+		target, err := destination.RcloneTarget()
+		if err != nil {
+			return nil, fmt.Errorf("job %q destination %d: %w", job.ID, i, err)
+		}
+		replicaID := destination.RootID
+		if replicaID == "" {
+			replicaID = fmt.Sprintf("%s-%d", job.ID, i)
+		}
+		replicas = append(replicas, engine.ReplicaSpec{
+			ID: replicaID, Target: target, Workdir: paths.JobReplicaWorkdir(job.ID, replicaID),
+			Required: destination.Required, MinCompleteRestoreSets: destination.MinCompleteRestoreSets,
+		})
+	}
+	return replicas, nil
+}
+
+func replicaResults(summary engine.ReplicaSummary) []output.ReplicaResult {
+	results := make([]output.ReplicaResult, 0, len(summary.Outcomes))
+	for _, outcome := range summary.Outcomes {
+		item := output.ReplicaResult{ID: outcome.ID, Target: outcome.Target, Required: outcome.Required, Status: outcome.Status}
+		if outcome.Err != nil {
+			item.Error = outcome.Err.Error()
+		}
+		results = append(results, item)
+	}
+	return results
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
+}
+
+func buildStateFromResults(results []output.PairResult, now time.Time) state.State {
+	scheduler := state.SchedulerState{
+		Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
+		ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok",
+		ObservedAt: now, FreshnessWindow: 15 * time.Minute, CatchUpGrace: 6*time.Hour + 15*time.Minute,
+	}
+	scheduler.Health = state.EvaluateSchedulerHealth(scheduler, now)
+	persisted := state.State{SchemaVersion: state.CurrentSchemaVersion, EngineVersion: version.Version, Scheduler: scheduler}
+	for _, result := range results {
+		item := state.JobState{JobID: result.JobID, Status: result.Status, ObjectCount: 0, ByteCount: 0}
+		if item.JobID == "" {
+			item.JobID = result.Local + "->" + result.Remote
+		}
+		if result.Status == "ok" || result.Status == "degraded" {
+			item.LastSuccess = now
+		}
+		for _, replica := range result.Replicas {
+			item.ReplicaOutcomes = append(item.ReplicaOutcomes, state.ReplicaState{ID: replica.ID, Target: replica.Target, Required: replica.Required, Status: replica.Status, Error: replica.Error})
+		}
+		persisted.Jobs = append(persisted.Jobs, item)
+	}
+	return persisted
 }
 
 // badFormatErr wraps an invalid --format value (output.Validate's error) as
@@ -195,24 +291,34 @@ func setupCmd() *cobra.Command {
 func runCmd() *cobra.Command {
 	return &cobra.Command{
 		Use:   "run",
-		Short: "Start the sync daemon (all configured pairs) with a tray icon showing combined status",
-		Long: "Start the continuous sync daemon: one sync loop per pair in config.toml,\n" +
+		Short: "Start the sync daemon (all configured jobs) with a tray icon showing combined status",
+		Long: "Start the continuous sync daemon: one sync loop per job in config.toml,\n" +
 			"each on its own interval/mode, plus a system-tray icon showing the\n" +
 			"combined status. Blocks until the tray is quit. Every remote referenced\n" +
-			"by a pair must already be set up (`better-drive setup`).",
+			"by a job must already be set up (`better-drive setup`).",
 		Example: "  better-drive run",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			cfg, err := loadConfig()
+			cfg, err := loadExecutionConfig()
 			if err != nil {
 				return err
 			}
 
-			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
-			for _, p := range cfg.Pairs {
-				remoteName, _, _ := strings.Cut(p.Remote, ":")
-				if configured, _ := e.RemoteConfigured(remoteName); !configured {
+			e, err := engine.NewVerified(cfg.RcloneRuntime)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
+			}
+			for _, job := range cfg.Jobs {
+				replicas, replicaErr := replicasForJob(job)
+				if replicaErr != nil {
 					e.Close()
-					return remoteNotConfiguredErr(remoteName)
+					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
+				}
+				for _, replica := range replicas {
+					remoteName, _, _ := strings.Cut(replica.Target, ":")
+					if configured, _ := e.RemoteConfigured(remoteName); !configured {
+						e.Close()
+						return remoteNotConfiguredErr(remoteName)
+					}
 				}
 			}
 
@@ -226,44 +332,72 @@ func runCmd() *cobra.Command {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open log file %q: %v (continuing without sync logging)\n", paths.LogFile(), logErr)
 			} else {
 				logger = log.New(logFile, "", log.LstdFlags)
-				logger.Printf("daemon started, %d pairs", len(cfg.Pairs))
+				logger.Printf("daemon started, %d jobs", len(cfg.Jobs))
 			}
 
-			// One syncloop per pair, each with its own mode/interval/filters
-			// and its own workdir (bisync baselines must not collide across
-			// pairs). agg.Register wires each loop's OnChange into the shared
-			// aggregator so the tray shows one combined status.
+			var stateMu sync.Mutex
+			stateResults := make(map[string]output.PairResult, len(cfg.Jobs))
+			persistDaemonResult := func(job config.Job, loop *syncloop.Loop, cycleErr error) {
+				summary := loop.LastReplicaSummary()
+				status := summary.Status
+				if cycleErr != nil {
+					status = "failed"
+				}
+				targets := make([]string, 0, len(summary.Outcomes))
+				for _, outcome := range summary.Outcomes {
+					targets = append(targets, outcome.Target)
+				}
+				result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: strings.Join(targets, ","), Mode: job.Mode, Status: status, Error: errorString(cycleErr), Replicas: replicaResults(summary)}
+				stateMu.Lock()
+				stateResults[job.ID] = result
+				snapshot := make([]output.PairResult, 0, len(stateResults))
+				for _, item := range stateResults {
+					snapshot = append(snapshot, item)
+				}
+				stateMu.Unlock()
+				if err := state.Save(paths.StateFile(), buildStateFromResults(snapshot, time.Now().UTC())); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not persist state: %v\n", err)
+				}
+			}
+
 			agg := tray.NewAggregator()
-			loops := make([]*syncloop.Loop, len(cfg.Pairs))
+			loops := make([]*syncloop.Loop, len(cfg.Jobs))
 			ctx, cancel := context.WithCancel(context.Background())
 			var wg sync.WaitGroup
-			for i, p := range cfg.Pairs {
-				p := p
-				loop := syncloop.New(e, p.Local, p.Remote, paths.PairWorkdir(p.Local, p.Remote), p.Mode,
-					func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
+			for i, job := range cfg.Jobs {
+				job := job
+				replicas, replicaErr := replicasForJob(job)
+				if replicaErr != nil {
+					cancel()
+					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
+				}
+				loop := syncloop.NewWithReplicas(e, job.Source, replicas, job.Mode, job.Direction,
+					func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 				loops[i] = loop
 				agg.Register(i, loop)
-				if logger != nil {
-					loop.OnResult(func(err error) {
-						if err != nil {
-							logger.Printf("%s <-> %s [mode=%s]: FAILED: %v", p.Local, p.Remote, p.Mode, err)
-							return
-						}
-						logger.Printf("%s <-> %s [mode=%s]: OK", p.Local, p.Remote, p.Mode)
-					})
-				}
+				loop.OnResult(func(err error) {
+					persistDaemonResult(job, loop, err)
+					if logger == nil {
+						return
+					}
+					if err != nil {
+						logger.Printf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
+						return
+					}
+					logger.Printf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
+				})
 				wg.Add(1)
 				go func() {
 					defer wg.Done()
-					loop.Start(ctx, p.Interval)
+					loop.Start(ctx, job.Interval)
 				}()
 			}
 
-			err = tray.Run(loops, cfg.Pairs, agg) // blocks on the systray event loop until Quit
+			err = tray.Run(loops, cfg.Jobs, agg)
 			cancel()
-			syncloop.ShutdownAll(loops) // reject new SyncNow requests and drain every accepted manual cycle
-			wg.Wait()                   // wait for every sync loop goroutine to finish its current cycle
-			e.Close()                   // safe to Finalize the engine now that no goroutine can touch it
+			syncloop.ShutdownAll(loops)
+			wg.Wait()
+			e.Close()
 			if logFile != nil {
 				if closeErr := logFile.Close(); closeErr != nil {
 					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not close log file: %v\n", closeErr)
@@ -278,8 +412,8 @@ func statusCmd() *cobra.Command {
 	var format string
 	c := &cobra.Command{
 		Use:   "status",
-		Short: "Print current config (every pair)",
-		Long: "Print every pair from config.toml: local path, remote, interval and mode.\n" +
+		Short: "Print current config (every job)",
+		Long: "Print every job from config.toml: source, destination, interval and mode.\n" +
 			"Read-only - makes no rclone call and never touches the network. Use\n" +
 			"--format json for machine-readable output.",
 		Example: "  better-drive status\n" +
@@ -292,15 +426,46 @@ func statusCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+			persisted, stateErr := state.Load(paths.StateFile())
+			if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
+				return exitcode.WithRemediation(exitcode.ConfigError(stateErr), fmt.Sprintf("repair persisted state at %s", paths.StateFile()))
+			}
+			jobStatus := func(jobID string) string {
+				if persisted == nil {
+					return "unknown"
+				}
+				for _, item := range persisted.Jobs {
+					if item.JobID == jobID {
+						return item.Status
+					}
+				}
+				return "unknown"
+			}
+			health := "unknown-overlap"
+			if persisted != nil {
+				health = persisted.Scheduler.Health
+			}
 			if format == output.FormatJSON {
-				pairs := make([]output.PairStatus, 0, len(cfg.Pairs))
-				for _, p := range cfg.Pairs {
-					pairs = append(pairs, output.PairStatus{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Interval: p.Interval.String()})
+				pairs := make([]output.PairStatus, 0, len(cfg.Jobs))
+				for _, job := range cfg.Jobs {
+					for _, destination := range job.Destinations {
+						target, targetErr := destination.RcloneTarget()
+						if targetErr != nil {
+							return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+						}
+						pairs = append(pairs, output.PairStatus{JobID: job.ID, Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String(), JobStatus: jobStatus(job.ID), Health: health})
+					}
 				}
 				return output.RenderJSON(cmd.OutOrStdout(), pairs)
 			}
-			for _, p := range cfg.Pairs {
-				fmt.Fprintf(cmd.OutOrStdout(), "pair: %s <-> %s every %s [mode=%s]\n", p.Local, p.Remote, p.Interval, p.Mode)
+			for _, job := range cfg.Jobs {
+				for _, destination := range job.Destinations {
+					target, targetErr := destination.RcloneTarget()
+					if targetErr != nil {
+						return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
+					}
+					fmt.Fprintf(cmd.OutOrStdout(), "job %s: %s <-> %s every %s [mode=%s]\n", job.ID, job.Source, target, job.Interval, job.Mode)
+				}
 			}
 			fmt.Fprintln(cmd.OutOrStdout(), "run `better-drive run` to start")
 			return nil
@@ -343,15 +508,24 @@ func syncCmd() *cobra.Command {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
-			cfg, err := loadConfig()
+			cfg, err := loadExecutionConfig()
 			if err != nil {
 				return err
 			}
 
-			e := engine.New(config.ResolveRcloneConfig(cfg.RcloneConfig))
+			e, err := engine.NewVerified(cfg.RcloneRuntime)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
+			}
 			defer e.Close()
-			_, err = runSyncOnce(cmd, e, cfg, format, dryRun, resync)
-			return err
+			results, syncErr := runSyncOnce(cmd, e, cfg, format, dryRun, resync)
+			if stateErr := state.Save(paths.StateFile(), buildStateFromResults(results, time.Now().UTC())); stateErr != nil {
+				if syncErr != nil {
+					return fmt.Errorf("%v; persist state: %w", syncErr, stateErr)
+				}
+				return stateErr
+			}
+			return syncErr
 		},
 	}
 	output.AddFormatFlag(c, &format)
@@ -378,40 +552,52 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		fmt.Fprintln(cmd.ErrOrStderr(), "dry-run: no changes will be made")
 	}
 	failed := false
-	// Whether any pair failed because rclone has no usable baseline for it,
-	// which changes what the aggregate failure tells the user to do next.
 	needsResync := false
-	results := make([]output.PairResult, 0, len(cfg.Pairs))
-	for _, p := range cfg.Pairs {
-		p := p
-		// Skip a pair whose local source does not exist (e.g. a machine that
-		// doesn't have hermes), matching the backup script's Test-Path guard,
-		// instead of failing the whole run on a missing optional source.
-		if _, err := os.Stat(p.Local); errors.Is(err, os.ErrNotExist) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: SKIPPED (local not found)\n", p.Local, p.Remote, p.Mode)
-			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "skipped"})
+	results := make([]output.PairResult, 0, len(cfg.Jobs))
+	for _, job := range cfg.Jobs {
+		replicas, err := replicasForJob(job)
+		if err != nil {
+			return results, err
+		}
+		targets := make([]string, 0, len(replicas))
+		for _, replica := range replicas {
+			targets = append(targets, replica.Target)
+		}
+		remoteSummary := strings.Join(targets, ",")
+		if _, statErr := os.Stat(job.Source); errors.Is(statErr, os.ErrNotExist) {
+			status := "skipped_optional"
+			if job.Required {
+				status = "failed"
+				failed = true
+			}
+			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: %s (local not found)\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
+			results = append(results, output.PairResult{Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status})
 			continue
 		}
-		loop := syncloop.New(s, p.Local, p.Remote, paths.PairWorkdir(p.Local, p.Remote), p.Mode,
-			func() ([]string, error) { return config.PairFilters(p.Local, p.Exclude) })
+		loop := syncloop.NewWithReplicas(s, job.Source, replicas, job.Mode, job.Direction,
+			func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 		loop.SetDryRun(dryRun)
 		loop.SetForceResync(forceResync)
 		loop.SetExecution(cmd.Context(), cmd.ErrOrStderr())
-		fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: RUNNING\n", p.Local, p.Remote, p.Mode)
+		fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: RUNNING\n", job.ID, job.Source, remoteSummary, job.Mode)
 		if err := loop.RunOnce(); err != nil {
 			if errors.Is(err, context.Canceled) {
 				return results, err
 			}
 			failed = true
 			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)
-			fmt.Fprintf(cmd.ErrOrStderr(), "pair %s <-> %s [mode=%s]: FAILED: %v\n", p.Local, p.Remote, p.Mode, err)
-			results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "failed", Error: err.Error(), DryRun: dryRun})
+			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: FAILED: %v\n", job.ID, job.Source, remoteSummary, job.Mode, err)
+			results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: "failed", Error: err.Error(), Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
 			continue
 		}
-		if format == output.FormatTable {
-			fmt.Fprintf(cmd.OutOrStdout(), "pair %s <-> %s [mode=%s]: OK\n", p.Local, p.Remote, p.Mode)
+		status := loop.LastReplicaSummary().Status
+		if status == "" {
+			status = "ok"
 		}
-		results = append(results, output.PairResult{Local: p.Local, Remote: p.Remote, Mode: p.Mode, Status: "ok", DryRun: dryRun})
+		if format == output.FormatTable {
+			fmt.Fprintf(cmd.OutOrStdout(), "job %s %s <-> %s [mode=%s]: %s\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
+		}
+		results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status, Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
 	}
 	if format == output.FormatJSON {
 		if err := output.RenderJSON(cmd.OutOrStdout(), results); err != nil {

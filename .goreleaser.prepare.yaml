@@ -1,0 +1,75 @@
+version: 2
+
+builds:
+  - id: better-drive
+    main: .
+    binary: better-drive
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+      - linux
+      - darwin
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w
+      - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+      - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+      - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+    overrides:
+      - goos: windows
+        goarch: amd64
+        ldflags:
+          - -s -w
+          - -H windowsgui
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - goos: windows
+        goarch: arm64
+        ldflags:
+          - -s -w
+          - -H windowsgui
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - goos: darwin
+        goarch: arm64
+        env:
+          - CGO_ENABLED=1
+        ldflags:
+          - -s -w
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - goos: darwin
+        goarch: amd64
+        env:
+          - CGO_ENABLED=1
+          - CC=clang -arch x86_64
+        ldflags:
+          - -s -w
+          - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
+          - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+
+archives:
+  - id: default
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: "better-drive_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+sboms:
+  - artifacts: archive
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^Merge"
