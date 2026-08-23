@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -133,5 +136,107 @@ func TestCleanupApplyPreviewWritesJournal(t *testing.T) {
 	}
 	if len(journal.Records) != 1 || journal.Records[0].Action != "preview" {
 		t.Fatalf("unexpected preview journal: %+v", journal.Records)
+	}
+}
+func TestCleanupApprovalPrepareCanonicalizeAndActivate(t *testing.T) {
+	dir := t.TempDir()
+	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := cleanup.Approval{
+		SchemaVersion:  cleanup.CurrentApprovalSchemaVersion,
+		ApprovalID:     "approval-cli-1",
+		ManifestDigest: strings.Repeat("a", 64),
+		AccountID:      "account-1",
+		RootID:         "root-1",
+		Mode:           cleanup.ModeQuarantine,
+		MaxObjects:     1,
+		MaxBytes:       5,
+		ExpiresAt:      time.Now().UTC().Add(time.Hour),
+		Nonce:          "nonce-cli-1",
+		Issuer:         "issuer-cli-1",
+		FixtureDigest:  strings.Repeat("b", 64),
+	}
+	approvalPath := filepath.Join(dir, "approval.json")
+	approvalData, err := json.Marshal(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(approvalPath, approvalData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(dir, "store")
+
+	root := newRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"cleanup", "approval", "prepare", "--approval", approvalPath, "--store", storePath})
+	if _, err := root.ExecuteC(); err == nil || !strings.Contains(err.Error(), "BD-CLEANUP-DRAFT-RW") {
+		t.Fatalf("expected draft capability rejection, got %v", err)
+	}
+
+	root = newRootCmd()
+	var prepareOutput bytes.Buffer
+	root.SetOut(&prepareOutput)
+	root.SetErr(&prepareOutput)
+	root.SetArgs([]string{"cleanup", "approval", "prepare", "--approval", approvalPath, "--store", storePath, "--capability", "BD-CLEANUP-DRAFT-RW", "--format", "json"})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("approval prepare error = %v", err)
+	}
+	if !strings.Contains(prepareOutput.String(), `"draft_digest"`) {
+		t.Fatalf("unexpected prepare output: %s", prepareOutput.String())
+	}
+
+	root = newRootCmd()
+	var canonicalOutput bytes.Buffer
+	root.SetOut(&canonicalOutput)
+	root.SetErr(&canonicalOutput)
+	root.SetArgs([]string{"cleanup", "approval", "canonicalize", "--approval", approvalPath})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("approval canonicalize error = %v", err)
+	}
+	if !strings.Contains(canonicalOutput.String(), `"approval_id":"approval-cli-1"`) {
+		t.Fatalf("unexpected canonical output: %s", canonicalOutput.String())
+	}
+
+	trustRoot, err := cleanup.NewTrustRoot("root-cli-1", approval.Issuer, cleanup.CleanupTrustPurpose, publicKey, time.Now().UTC().Add(-time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustRootPath := filepath.Join(dir, "trust-root.json")
+	trustRootData, err := json.Marshal(trustRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(trustRootPath, trustRootData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signature, err := cleanup.SignApproval(approval, privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	signaturePath := filepath.Join(dir, "signature.hex")
+	if err := os.WriteFile(signaturePath, []byte(hex.EncodeToString(signature)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root = newRootCmd()
+	var activateOutput bytes.Buffer
+	root.SetOut(&activateOutput)
+	root.SetErr(&activateOutput)
+	root.SetArgs([]string{"cleanup", "approval", "activate", "--approval", approvalPath, "--signature", signaturePath, "--trust-root", trustRootPath, "--store", storePath, "--capability", "BD-CLEANUP-APPROVAL-RW", "--format", "json"})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("approval activate error = %v", err)
+	}
+	if !strings.Contains(activateOutput.String(), `"state": "approved"`) {
+		t.Fatalf("unexpected activate output: %s", activateOutput.String())
+	}
+	state, err := cleanup.NewApprovalStore(storePath).ReadState(approval.ApprovalID)
+	if err != nil {
+		t.Fatalf("read activated state: %v", err)
+	}
+	if state.State != cleanup.ApprovalApproved {
+		t.Fatalf("unexpected activated state: %+v", state)
 	}
 }

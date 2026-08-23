@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,6 +16,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const (
+	cleanupDraftCapability    = "BD-CLEANUP-DRAFT-RW"
+	cleanupApprovalCapability = "BD-CLEANUP-APPROVAL-RW"
+)
+
 func cleanupCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:     "cleanup",
@@ -22,7 +28,137 @@ func cleanupCmd() *cobra.Command {
 		Long:    "Cleanup inventory and validation are read-only. Apply defaults to preview and refuses live mutation without the named owner-risk capability.",
 		Example: "  better-drive cleanup validate --manifest cleanup.json --format json",
 	}
-	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd())
+	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd())
+	return command
+}
+
+func cleanupApprovalCmd() *cobra.Command {
+	command := &cobra.Command{
+		Use:   "approval",
+		Short: "Prepare and activate signed cleanup approvals",
+		Long:  "Approval prepare/canonicalize/activate keep private signing outside the cleanup client and require explicit capability labels.",
+	}
+	command.AddCommand(cleanupApprovalPrepareCmd(), cleanupApprovalCanonicalizeCmd(), cleanupApprovalActivateCmd())
+	return command
+}
+
+func cleanupApprovalPrepareCmd() *cobra.Command {
+	var approvalPath string
+	var storePath string
+	var capability string
+	var format string
+	command := &cobra.Command{
+		Use:   "prepare",
+		Short: "Create a create-only cleanup approval draft",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			if capability != cleanupDraftCapability {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup approval prepare requires BD-CLEANUP-DRAFT-RW")), "provide the named draft capability from the protected control plane")
+			}
+			approval, err := readApproval(approvalPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a canonical approval JSON record")
+			}
+			record, err := cleanup.NewApprovalStore(storePath).Prepare(approval)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "use a private create-only approval store and reject foreign drafts")
+			}
+			if format == output.FormatJSON {
+				return output.RenderJSON(cmd.OutOrStdout(), record)
+			}
+			canonical, _ := cleanup.CanonicalApproval(approval)
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "draft prepared: approval=%s digest=%s\n", approval.ApprovalID, cleanup.Digest(canonical))
+			return err
+		},
+	}
+	output.AddFormatFlag(command, &format)
+	command.Flags().StringVar(&approvalPath, "approval", "", "canonical approval JSON")
+	command.Flags().StringVar(&storePath, "store", "", "private create-only approval store root")
+	command.Flags().StringVar(&capability, "capability", "", "exact protected capability")
+	return command
+}
+
+func cleanupApprovalCanonicalizeCmd() *cobra.Command {
+	var approvalPath string
+	command := &cobra.Command{
+		Use:   "canonicalize",
+		Short: "Render canonical approval bytes for offline signing",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			approval, err := readApproval(approvalPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a canonical approval JSON record")
+			}
+			canonical, err := cleanup.CanonicalApproval(approval)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix the approval before offline signing")
+			}
+			_, err = cmd.OutOrStdout().Write(append(canonical, '\n'))
+			return err
+		},
+	}
+	command.Flags().StringVar(&approvalPath, "approval", "", "approval JSON to canonicalize")
+	return command
+}
+
+func cleanupApprovalActivateCmd() *cobra.Command {
+	var approvalPath string
+	var signaturePath string
+	var trustRootPath string
+	var storePath string
+	var capability string
+	var format string
+	command := &cobra.Command{
+		Use:   "activate",
+		Short: "Activate a signed approval against an enrolled trust root",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			if capability != cleanupApprovalCapability {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup approval activate requires BD-CLEANUP-APPROVAL-RW")), "provide the named protected approval capability")
+			}
+			approval, err := readApproval(approvalPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a canonical approval JSON record")
+			}
+			trustRootData, err := os.ReadFile(trustRootPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide the enrolled public trust-root record")
+			}
+			var trustRoot cleanup.TrustRoot
+			if err := json.Unmarshal(trustRootData, &trustRoot); err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide valid trust-root JSON without private key material")
+			}
+			signatureHex, err := os.ReadFile(signaturePath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide the detached signature from the protected signer")
+			}
+			signature, err := hex.DecodeString(strings.TrimSpace(string(signatureHex)))
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "signature input must be lowercase or uppercase hexadecimal")
+			}
+			intent, err := cleanup.ActivateApproval(approval, signature, trustRoot, time.Now().UTC())
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "reject unknown issuer, trust-root drift, expiry, or signature mismatch")
+			}
+			if err := cleanup.NewApprovalStore(storePath).Activate(intent); err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "keep split/foreign intent state in reconciliation and do not overwrite it")
+			}
+			if format == output.FormatJSON {
+				return output.RenderJSON(cmd.OutOrStdout(), intent)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "approval activated: approval=%s state=%s digest=%s\n", approval.ApprovalID, intent.State, intent.IntentDigest)
+			return err
+		},
+	}
+	output.AddFormatFlag(command, &format)
+	command.Flags().StringVar(&approvalPath, "approval", "", "canonical approval JSON")
+	command.Flags().StringVar(&signaturePath, "signature", "", "detached signature hex file")
+	command.Flags().StringVar(&trustRootPath, "trust-root", "", "enrolled public trust-root JSON")
+	command.Flags().StringVar(&storePath, "store", "", "private create-only approval store root")
+	command.Flags().StringVar(&capability, "capability", "", "exact protected capability")
 	return command
 }
 
@@ -174,6 +310,24 @@ func cleanupApplyCmd() *cobra.Command {
 	command.Flags().BoolVar(&execute, "execute", false, "request live mutation (requires separate capability; currently fail-closed)")
 	command.Flags().StringVar(&journalPath, "journal", "", "append-only preview/apply journal path")
 	return command
+}
+
+func readApproval(path string) (cleanup.Approval, error) {
+	if strings.TrimSpace(path) == "" {
+		return cleanup.Approval{}, errors.New("--approval is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cleanup.Approval{}, err
+	}
+	var approval cleanup.Approval
+	if err := json.Unmarshal(data, &approval); err != nil {
+		return cleanup.Approval{}, fmt.Errorf("decode approval: %w", err)
+	}
+	if _, err := cleanup.CanonicalApproval(approval); err != nil {
+		return cleanup.Approval{}, err
+	}
+	return approval, nil
 }
 
 func readManifest(path string) (cleanup.Manifest, error) {
