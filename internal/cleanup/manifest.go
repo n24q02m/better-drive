@@ -140,6 +140,9 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 			return Validation{}, fmt.Errorf("duplicate object ID %q in canonical provider context", object.ID)
 		}
 		seen[key] = object
+		if object.Size > manifest.Budget.MaxBytes || totalBytes > manifest.Budget.MaxBytes-object.Size {
+			return Validation{}, fmt.Errorf("byte budget exceeded while adding object %q", object.ID)
+		}
 		totalBytes += object.Size
 	}
 	for _, object := range manifest.Objects {
