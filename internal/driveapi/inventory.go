@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/n24q02m/better-drive/internal/cleanup"
@@ -14,6 +15,44 @@ type RootRequest struct {
 	AccountID string
 	RootID    string
 	Namespace string
+}
+
+func (client *Client) CollectAllRoots(ctx context.Context, accountID string, requests []RootRequest, maxPages int) (cleanup.RootSet, error) {
+	if client == nil || client.provider == nil {
+		return cleanup.RootSet{}, errors.New("Drive provider is not configured")
+	}
+	if strings.TrimSpace(accountID) == "" {
+		return cleanup.RootSet{}, errors.New("account is required")
+	}
+	if len(requests) == 0 {
+		return cleanup.RootSet{}, errors.New("all-roots request set must not be empty")
+	}
+	if maxPages <= 0 {
+		return cleanup.RootSet{}, errors.New("max page limit must be positive")
+	}
+	seen := make(map[string]struct{}, len(requests))
+	roots := make([]cleanup.Root, 0, len(requests))
+	for index, request := range requests {
+		if request.AccountID != accountID {
+			return cleanup.RootSet{}, fmt.Errorf("root request %d account %q does not match requested account %q", index, request.AccountID, accountID)
+		}
+		key := strings.Join([]string{request.Provider, request.AccountID, request.RootID, request.Namespace}, "\x00")
+		if _, exists := seen[key]; exists {
+			return cleanup.RootSet{}, fmt.Errorf("duplicate root %q", key)
+		}
+		seen[key] = struct{}{}
+		root, err := client.CollectRoot(ctx, request, maxPages)
+		if err != nil {
+			return cleanup.RootSet{}, fmt.Errorf("collect root %q: %w", key, err)
+		}
+		roots = append(roots, root)
+	}
+	sort.Slice(roots, func(i, j int) bool {
+		left := strings.Join([]string{roots[i].Provider, roots[i].AccountID, roots[i].RootID, roots[i].Namespace}, "\x00")
+		right := strings.Join([]string{roots[j].Provider, roots[j].AccountID, roots[j].RootID, roots[j].Namespace}, "\x00")
+		return left < right
+	})
+	return cleanup.RootSet{SchemaVersion: cleanup.CurrentInventorySchemaVersion, Roots: roots}, nil
 }
 
 func (client *Client) CollectRoot(ctx context.Context, request RootRequest, maxPages int) (cleanup.Root, error) {
