@@ -80,12 +80,13 @@ func cleanupInventoryCmd() *cobra.Command {
 
 func cleanupValidateCmd() *cobra.Command {
 	var manifestPath string
+	var inventoryPath string
 	var format string
 	command := &cobra.Command{
 		Use:     "validate",
 		Short:   "Validate an exact-ID cleanup manifest without mutation",
 		Long:    "Validate safe classes, canonical provider scope, restore evidence, ownership markers, expiry, and object/byte budgets.",
-		Example: "  better-drive cleanup validate --manifest cleanup.json --format json",
+		Example: "  better-drive cleanup validate --manifest cleanup.json --inventory inventory-aggregate.json --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
@@ -98,6 +99,16 @@ func cleanupValidateCmd() *cobra.Command {
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "regenerate the manifest from complete provider metadata and restore evidence")
 			}
+			if inventoryPath != "" {
+				inventory, inventoryErr := readInventoryAggregate(inventoryPath)
+				if inventoryErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(inventoryErr), "provide a complete current-schema inventory aggregate")
+				}
+				validation, err = cleanup.ValidateManifestAgainstInventory(manifest, inventory, time.Now().UTC())
+				if err != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(err), "refresh the live inventory and regenerate the manifest before any owner-risk request")
+				}
+			}
 			if format == output.FormatJSON {
 				return output.RenderJSON(cmd.OutOrStdout(), validation)
 			}
@@ -107,6 +118,7 @@ func cleanupValidateCmd() *cobra.Command {
 	}
 	output.AddFormatFlag(command, &format)
 	command.Flags().StringVar(&manifestPath, "manifest", "", "exact-ID cleanup manifest")
+	command.Flags().StringVar(&inventoryPath, "inventory", "", "complete provider inventory aggregate for exact metadata binding")
 	return command
 }
 
@@ -173,6 +185,17 @@ func readManifest(path string) (cleanup.Manifest, error) {
 		return cleanup.Manifest{}, err
 	}
 	return cleanup.DecodeManifest(data)
+}
+
+func readInventoryAggregate(path string) (cleanup.InventoryAggregate, error) {
+	if strings.TrimSpace(path) == "" {
+		return cleanup.InventoryAggregate{}, errors.New("--inventory is empty")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cleanup.InventoryAggregate{}, err
+	}
+	return cleanup.DecodeAggregate(data)
 }
 
 func writeJSONAtomically(path string, value any) error {

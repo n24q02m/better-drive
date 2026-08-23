@@ -174,6 +174,36 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 	}, nil
 }
 
+func ValidateManifestAgainstInventory(manifest Manifest, inventory InventoryAggregate, now time.Time) (Validation, error) {
+	validation, err := ValidateManifest(manifest, now)
+	if err != nil {
+		return Validation{}, err
+	}
+	if inventory.SchemaVersion != CurrentInventorySchemaVersion || inventory.Status != InventoryComplete {
+		return Validation{}, errors.New("inventory is not a complete current-schema aggregate")
+	}
+	if inventory.AccountID != manifest.AccountID {
+		return Validation{}, errors.New("inventory account does not match manifest account")
+	}
+	if inventory.InventoryHash != manifest.SourceInventoryHash {
+		return Validation{}, errors.New("inventory hash does not match manifest source_inventory_hash")
+	}
+	objects := make(map[string]Object, len(inventory.Objects))
+	for _, object := range inventory.Objects {
+		objects[objectKey(object)] = object
+	}
+	for _, selected := range manifest.Objects {
+		observed, exists := objects[objectKey(selected)]
+		if !exists {
+			return Validation{}, fmt.Errorf("manifest object %q is absent from inventory", selected.ID)
+		}
+		if observed.Name != selected.Name || observed.ContentHash != selected.ContentHash || observed.Size != selected.Size || observed.Version != selected.Version || observed.ETag != selected.ETag || observed.ParentID != selected.ParentID {
+			return Validation{}, fmt.Errorf("object %q metadata drifted from inventory", selected.ID)
+		}
+	}
+	return validation, nil
+}
+
 func validateObject(manifest Manifest, object Object) error {
 	for name, value := range map[string]string{
 		"id": object.ID, "name": object.Name, "provider": object.Provider,

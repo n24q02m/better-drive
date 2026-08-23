@@ -70,6 +70,17 @@ func DecodeRootSet(data []byte) (RootSet, error) {
 	return rootSet, nil
 }
 
+func DecodeAggregate(data []byte) (InventoryAggregate, error) {
+	var aggregate InventoryAggregate
+	if err := json.Unmarshal(data, &aggregate); err != nil {
+		return InventoryAggregate{}, fmt.Errorf("decode inventory aggregate: %w", err)
+	}
+	if aggregate.SchemaVersion != CurrentInventorySchemaVersion {
+		return InventoryAggregate{}, fmt.Errorf("unsupported inventory aggregate schema_version %d", aggregate.SchemaVersion)
+	}
+	return aggregate, nil
+}
+
 func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, error) {
 	if rootSet.SchemaVersion != CurrentInventorySchemaVersion {
 		return InventoryAggregate{}, fmt.Errorf("unsupported all-roots schema_version %d", rootSet.SchemaVersion)
