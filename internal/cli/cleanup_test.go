@@ -50,7 +50,7 @@ func writeCleanupTestRootSet(t *testing.T, dir string) string {
 		Roots: []cleanup.Root{{
 			Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", ExpectedPages: 1,
 			Pages: []cleanup.Page{{Number: 1, Cursor: "cursor-1", Status: cleanup.PageComplete, Objects: []cleanup.Object{{
-				ID: "object-1", Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Size: 5,
+				ID: "object-1", Name: "object.bin", ContentHash: strings.Repeat("a", 64), Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Version: "v1", ETag: "etag-1", Size: 5,
 			}}},
 			}}},
 	}

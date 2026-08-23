@@ -6,7 +6,7 @@ import (
 )
 
 func inventoryObject(id string) Object {
-	return Object{ID: id, Name: id + ".bin", ContentHash: strings.Repeat("a", 64), Size: 4, Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Class: ClassUnknown}
+	return Object{ID: id, Name: id + ".bin", ContentHash: strings.Repeat("a", 64), Size: 4, Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Version: "v1", ETag: "etag-" + id, Class: ClassUnknown}
 }
 
 func validRootSet() RootSet {

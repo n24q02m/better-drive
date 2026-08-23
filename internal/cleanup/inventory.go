@@ -124,6 +124,12 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 				if object.ID == "" {
 					return InventoryAggregate{}, errors.New("inventory object ID is required")
 				}
+				if object.Name == "" || object.ContentHash == "" || object.Version == "" || object.ETag == "" {
+					return InventoryAggregate{}, fmt.Errorf("object %q is missing exact name/hash/version/etag metadata", object.ID)
+				}
+				if object.Size < 0 {
+					return InventoryAggregate{}, fmt.Errorf("object %q has negative size", object.ID)
+				}
 				objectID := objectKey(object)
 				if _, exists := seenObjects[objectID]; exists {
 					return InventoryAggregate{}, fmt.Errorf("duplicate object %q", objectID)
