@@ -88,8 +88,8 @@ func VerifyApproval(approval Approval, signature []byte, publicKey ed25519.Publi
 	return nil
 }
 
-func ActivateApproval(approval Approval, signature []byte, publicKey ed25519.PublicKey, now time.Time) (Intent, error) {
-	if err := VerifyApproval(approval, signature, publicKey, now); err != nil {
+func ActivateApproval(approval Approval, signature []byte, root TrustRoot, now time.Time) (Intent, error) {
+	if err := VerifyApprovalAgainstTrustRoot(approval, signature, root, now); err != nil {
 		return Intent{}, err
 	}
 	canonical, err := CanonicalApproval(approval)
