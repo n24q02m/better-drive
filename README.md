@@ -279,8 +279,8 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
 | `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
 | `better-drive cleanup inventory` | Join a complete enumerated all-roots/page capture into read-only aggregate evidence. |
-| `better-drive cleanup validate --manifest <path>` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, and budgets. |
-| `better-drive cleanup apply --manifest <path>` | Preview an exact manifest; `--execute` fails closed until the owner-risk broker capability is bound. |
+| `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
+| `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
 | `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
 | `better-drive install` | Register the sync daemon to start at login. |
 | `better-drive uninstall` | Remove the login-autostart registration. |
