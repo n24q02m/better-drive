@@ -18,16 +18,18 @@ func writeTemp(t *testing.T, body string) string {
 
 func validV2Config(t *testing.T) *Config {
 	t.Helper()
+	runtimeDir := t.TempDir()
+	sourceDir := t.TempDir()
 	return &Config{
 		SchemaVersion: CurrentSchemaVersion,
 		RcloneRuntime: RcloneRuntime{
-			Executable: "C:/tools/rclone.exe", ExecutableFileID: "exe-id", ExecutableDigest: "sha256:exe",
+			Executable: filepath.Join(runtimeDir, "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:exe",
 			Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
-			Config: "C:/tools/rclone.conf", ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg",
+			Config: filepath.Join(runtimeDir, "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg",
 			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		},
 		Jobs: []Job{{
-			ID: "home-claude", Source: "C:/Users/me/.claude", Direction: "push", Mode: "copy", Required: true,
+			ID: "home-claude", Source: sourceDir, Direction: "push", Mode: "copy", Required: true,
 			CategoryPolicyID: "claude-state", CategoryPolicyVersion: 1, CategoryPolicyDigest: "sha256:policy",
 			SymlinkPolicy: "preserve", Schedule: "30s", Interval: 30_000_000_000,
 			Destinations: []Destination{{Backend: "drive", Path: "Backups/home/Claude", AccountID: "account", RootID: "root", CredentialRef: "rclone:gdrive", Required: true, Retention: "30d", MinCompleteRestoreSets: 2, DeletePolicy: "none"}},
