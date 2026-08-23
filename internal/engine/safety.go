@@ -67,23 +67,35 @@ type DestinationIdentity struct {
 	Namespace string
 }
 
-func (d DestinationIdentity) canonical() (string, error) {
+type canonicalIdentity struct {
+	provider  string
+	account   string
+	root      string
+	namespace string
+}
+
+func (d DestinationIdentity) canonical() (canonicalIdentity, error) {
 	provider := strings.ToLower(strings.TrimSpace(d.Provider))
 	account := strings.ToLower(strings.TrimSpace(d.AccountID))
 	root := strings.ToLower(strings.TrimSpace(d.RootID))
 	namespace := strings.Trim(strings.ReplaceAll(strings.TrimSpace(d.Namespace), "\\", "/"), "/")
 	namespace = strings.ToLower(namespace)
 	if provider == "" || account == "" || root == "" || namespace == "" {
-		return "", fmt.Errorf("destination identity requires provider, account, root, and namespace")
+		return canonicalIdentity{}, fmt.Errorf("destination identity requires provider, account, root, and namespace")
 	}
 	if filepath.IsAbs(namespace) || namespace == "." || strings.HasPrefix(namespace, "../") || strings.Contains(namespace, "/../") {
-		return "", fmt.Errorf("destination namespace must stay relative")
+		return canonicalIdentity{}, fmt.Errorf("destination namespace must stay relative")
 	}
-	return provider + "\x00" + account + "\x00" + root + "\x00" + namespace, nil
+	return canonicalIdentity{
+		provider:  provider,
+		account:   account,
+		root:      root,
+		namespace: namespace,
+	}, nil
 }
 
 func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
-	canonical := make([]string, len(destinations))
+	canonical := make([]canonicalIdentity, len(destinations))
 	for i, destination := range destinations {
 		value, err := destination.canonical()
 		if err != nil {
@@ -93,16 +105,16 @@ func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
 	}
 	for i := range canonical {
 		for j := i + 1; j < len(canonical); j++ {
-			left := strings.Split(canonical[i], "\x00")
-			right := strings.Split(canonical[j], "\x00")
-			if len(left) != 4 || len(right) != 4 || left[0] != right[0] || left[1] != right[1] || left[2] != right[2] {
+			left := canonical[i]
+			right := canonical[j]
+			if left.provider != right.provider || left.account != right.account || left.root != right.root {
 				continue
 			}
-			if left[3] == right[3] {
-				return fmt.Errorf("destination identities collide exactly: %q", left[3])
+			if left.namespace == right.namespace {
+				return fmt.Errorf("destination identities collide exactly: %q", left.namespace)
 			}
-			if strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
-				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left[3], right[3])
+			if strings.HasPrefix(left.namespace, right.namespace+"/") || strings.HasPrefix(right.namespace, left.namespace+"/") {
+				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left.namespace, right.namespace)
 			}
 		}
 	}
@@ -110,18 +122,16 @@ func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
 }
 
 func ValidateQuarantineIdentity(transfer, quarantine DestinationIdentity) error {
-	transferKey, err := transfer.canonical()
+	left, err := transfer.canonical()
 	if err != nil {
 		return fmt.Errorf("transfer identity: %w", err)
 	}
-	quarantineKey, err := quarantine.canonical()
+	right, err := quarantine.canonical()
 	if err != nil {
 		return fmt.Errorf("quarantine identity: %w", err)
 	}
-	left := strings.Split(transferKey, "\x00")
-	right := strings.Split(quarantineKey, "\x00")
-	if len(left) == 4 && len(right) == 4 && left[0] == right[0] && left[1] == right[1] && left[2] == right[2] {
-		if left[3] == right[3] || strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
+	if left.provider == right.provider && left.account == right.account && left.root == right.root {
+		if left.namespace == right.namespace || strings.HasPrefix(left.namespace, right.namespace+"/") || strings.HasPrefix(right.namespace, left.namespace+"/") {
 			return fmt.Errorf("quarantine identity overlaps transfer namespace")
 		}
 	}
