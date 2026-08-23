@@ -102,6 +102,7 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 		}
 		seenRoots[key] = struct{}{}
 		seenPages := make(map[int]struct{}, len(root.Pages))
+		seenCursors := make(map[string]struct{}, len(root.Pages))
 		for _, page := range root.Pages {
 			if page.Number < 1 || page.Number > root.ExpectedPages {
 				return InventoryAggregate{}, fmt.Errorf("root %q page %d is outside expected range", key, page.Number)
@@ -116,6 +117,10 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 			if strings.TrimSpace(page.Cursor) == "" {
 				return InventoryAggregate{}, fmt.Errorf("root %q page %d has no cursor readback", key, page.Number)
 			}
+			if _, exists := seenCursors[page.Cursor]; exists {
+				return InventoryAggregate{}, fmt.Errorf("duplicate cursor %q for root %q", page.Cursor, key)
+			}
+			seenCursors[page.Cursor] = struct{}{}
 			pageCount++
 			for _, object := range page.Objects {
 				if object.AccountID != root.AccountID || object.RootID != root.RootID || object.Namespace != root.Namespace || object.Provider != root.Provider {

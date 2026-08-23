@@ -54,6 +54,12 @@ func TestBuildAggregateRejectsMissingAndDuplicatePages(t *testing.T) {
 	if _, err := BuildAggregate(roots, "account-1"); err == nil || !strings.Contains(err.Error(), "duplicate page") {
 		t.Fatalf("expected duplicate page rejection, got %v", err)
 	}
+
+	roots = validRootSet()
+	roots.Roots[0].Pages[1].Cursor = roots.Roots[0].Pages[0].Cursor
+	if _, err := BuildAggregate(roots, "account-1"); err == nil || !strings.Contains(err.Error(), "duplicate cursor") {
+		t.Fatalf("expected duplicate cursor rejection, got %v", err)
+	}
 }
 
 func TestBuildAggregateRejectsAccountMismatchAndIncompletePage(t *testing.T) {
