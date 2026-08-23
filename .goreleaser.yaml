@@ -1,7 +1,9 @@
 version: 2
 
 release:
-  replace_existing_artifacts: true
+  # Reconciliation must reject foreign or mismatched release state; a retry
+  # must never replace an existing artifact under a new digest.
+  replace_existing_artifacts: false
   # Mark -beta/-rc tags as GitHub pre-releases so they don't take the "Latest" slot.
   prerelease: auto
 

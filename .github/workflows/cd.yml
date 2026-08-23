@@ -1,8 +1,8 @@
 name: CD
 
-# CD handles:
-#  - Release on workflow_dispatch (semantic-release -> tag -> goreleaser -> publish)
-#  - Tag push -> goreleaser publish (still works for manual `git tag v*` && `git push --tags` flow)
+# CD is dispatch-only. Tag pushes are read-only observers; publication must
+# remain one transaction owned by workflow_dispatch and a protected channel
+# environment.
 #
 # Repo Secrets required:
 #   GITHUB_TOKEN         - built-in
@@ -13,9 +13,6 @@ name: CD
 #   CI_APP_ID            - n24q02m-ci GitHub App ID (3200052)
 
 on:
-  push:
-    tags:
-      - "v*"
   workflow_dispatch:
     inputs:
       release_type:
@@ -31,7 +28,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: cd-${{ github.ref }}
+  group: cd-better-drive
   cancel-in-progress: false
 
 jobs:
@@ -72,16 +69,14 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           tag: ${{ steps.release.outputs.tag }}
 
-  # ==================== Goreleaser ====================
-  # Triggered by:
-  #  - tag push (git tag v* && git push --tags)
-  #  - semantic-release output (workflow_dispatch flow above)
+  # A dispatch-owned run is the only publisher. The protected environment
+  # pauses the same run before it receives channel credentials.
   goreleaser:
     name: Build and Publish Binaries
-    if: |
-      startsWith(github.ref, 'refs/tags/v') ||
-      (github.event_name == 'workflow_dispatch' && needs.release.outputs.released == 'true')
+    if: needs.release.outputs.released == 'true'
     needs: [release]
+    environment:
+      name: ${{ github.event.inputs.release_type == 'beta' && 'beta-publish' || 'stable-publish' }}
     runs-on: macos-latest
     permissions:
       contents: write
