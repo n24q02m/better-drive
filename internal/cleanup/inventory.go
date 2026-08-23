@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 )
@@ -151,6 +152,9 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 					return InventoryAggregate{}, fmt.Errorf("duplicate object %q", objectID)
 				}
 				seenObjects[objectID] = struct{}{}
+				if object.Size > math.MaxInt64-byteCount {
+					return InventoryAggregate{}, fmt.Errorf("root %q byte count would overflow", key)
+				}
 				objects = append(objects, object)
 				byteCount += object.Size
 			}

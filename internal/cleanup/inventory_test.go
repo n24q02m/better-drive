@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"math"
 	"strings"
 	"testing"
 )
@@ -39,6 +40,16 @@ func TestValidateRootSetAndAggregate(t *testing.T) {
 	}
 	if aggregate.RootSetHash == "" || aggregate.InventoryHash == "" {
 		t.Fatal("expected root-set and inventory hashes")
+	}
+}
+
+func TestBuildAggregateRejectsByteCountOverflow(t *testing.T) {
+	roots := validRootSet()
+	roots.Roots[0].Pages[0].Objects[0].Size = math.MaxInt64
+	roots.Roots[0].Pages[1].Objects[0].Size = 1
+
+	if _, err := BuildAggregate(roots, "account-1"); err == nil || !strings.Contains(err.Error(), "byte count") {
+		t.Fatalf("expected byte count overflow rejection, got %v", err)
 	}
 }
 
