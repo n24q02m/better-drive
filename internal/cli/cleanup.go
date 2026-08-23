@@ -114,11 +114,12 @@ func cleanupApplyCmd() *cobra.Command {
 	var manifestPath string
 	var format string
 	var execute bool
+	var journalPath string
 	command := &cobra.Command{
 		Use:     "apply",
 		Short:   "Preview an approved cleanup manifest",
 		Long:    "Apply defaults to preview. Live mutation requires the separate BD-DRIVE-MUTATION-RW owner-risk capability and is fail-closed here until a provider broker is bound.",
-		Example: "  better-drive cleanup apply --manifest cleanup.json --format json",
+		Example: "  better-drive cleanup apply --manifest cleanup.json --journal cleanup.jsonl --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
@@ -134,6 +135,17 @@ func cleanupApplyCmd() *cobra.Command {
 			if execute {
 				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup apply --execute is disabled without BD-DRIVE-MUTATION-RW and a provider broker")), "use preview only until the exact signed owner-risk capability and broker readback are present")
 			}
+			if journalPath != "" {
+				journal, journalErr := cleanup.OpenFileJournal(journalPath)
+				if journalErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(journalErr), "use a writable owner-only journal path")
+				}
+				for _, object := range manifest.Objects {
+					if journalErr := journal.Append(cleanup.JournalRecord{Action: "preview", ObjectID: object.ID, Before: string(object.Class), After: "preview"}); journalErr != nil {
+						return journalErr
+					}
+				}
+			}
 			preview := struct {
 				Status     string             `json:"status"`
 				Validation cleanup.Validation `json:"validation"`
@@ -148,6 +160,7 @@ func cleanupApplyCmd() *cobra.Command {
 	output.AddFormatFlag(command, &format)
 	command.Flags().StringVar(&manifestPath, "manifest", "", "exact-ID cleanup manifest")
 	command.Flags().BoolVar(&execute, "execute", false, "request live mutation (requires separate capability; currently fail-closed)")
+	command.Flags().StringVar(&journalPath, "journal", "", "append-only preview/apply journal path")
 	return command
 }
 

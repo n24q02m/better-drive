@@ -115,3 +115,23 @@ func TestCleanupApplyExecuteFailsClosed(t *testing.T) {
 		t.Fatalf("expected fail-closed mutation gate, got %v", err)
 	}
 }
+
+func TestCleanupApplyPreviewWritesJournal(t *testing.T) {
+	dir := t.TempDir()
+	manifestPath := writeCleanupTestManifest(t, dir)
+	journalPath := filepath.Join(dir, "cleanup.jsonl")
+	root := newRootCmd()
+	root.SetOut(&bytes.Buffer{})
+	root.SetErr(&bytes.Buffer{})
+	root.SetArgs([]string{"cleanup", "apply", "--manifest", manifestPath, "--journal", journalPath, "--format", "json"})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("cleanup preview error = %v", err)
+	}
+	journal, err := cleanup.OpenFileJournal(journalPath)
+	if err != nil {
+		t.Fatalf("open preview journal error = %v", err)
+	}
+	if len(journal.Records) != 1 || journal.Records[0].Action != "preview" {
+		t.Fatalf("unexpected preview journal: %+v", journal.Records)
+	}
+}
