@@ -4,28 +4,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
-
 	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/restore"
 	"github.com/spf13/cobra"
+	"os"
+	"path/filepath"
+	"strings"
 )
 
 func restoreCmd() *cobra.Command {
-	return restoreCmdWithResolver(nil)
+	return restoreCmdWithDependencies(RuntimeDependencies{})
 }
 
-func restoreCmdWithResolver(resolver artifactcrypto.Resolver) *cobra.Command {
+func restoreCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 	c := &cobra.Command{
 		Use:     "restore",
 		Short:   "Plan and stage safe isolated restores",
 		Long:    "Plan is read-only. Fetch and apply write only below an explicit isolated root with create-only no-overwrite semantics. Live source replacement is disabled.",
 		Example: "  better-drive restore plan --root C:/staging --manifest restore.json --format json",
 	}
-	c.AddCommand(restorePlanCmd(), restoreFetchCmd(resolver), restoreApplyCmd(resolver), restoreRecoverCmd())
+	c.AddCommand(restorePlanCmd(), restoreFetchCmd(deps.ArtifactResolver, deps.StagingVerifier), restoreApplyCmd(deps.ArtifactResolver, deps.StagingVerifier), restoreRecoverCmd())
 	return c
 }
 
@@ -45,11 +45,31 @@ func readRestorePlan(root, manifest string) (restore.Plan, error) {
 	return restore.BuildPlan(root, entries)
 }
 
-func requireRestoreResolver(resolver artifactcrypto.Resolver) error {
+func requireRestoreDependencies(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
+	missing := make([]string, 0, 2)
 	if resolver == nil {
+		missing = append(missing, "artifact resolver")
+	}
+	if verifier == nil {
+		missing = append(missing, "staging verifier")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return exitcode.WithRemediation(
+		exitcode.ConfigError(fmt.Errorf("restore execution requires %s", strings.Join(missing, " and "))),
+		"configure an artifact resolver and staging verifier before executing restore",
+	)
+}
+
+func preflightRestore(plan restore.Plan, resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
+	if err := requireRestoreDependencies(resolver, verifier); err != nil {
+		return err
+	}
+	if _, err := restore.VerifyStagingEvidence(plan.Root, plan.RootIdentity, verifier); err != nil {
 		return exitcode.WithRemediation(
-			exitcode.ConfigError(errors.New("restore execution requires an artifact resolver")),
-			"configure an artifact key resolver before executing restore",
+			exitcode.ConfigError(err),
+			"verify encrypted-at-rest, owner-only, non-inherited ACL, and backup-excluded staging evidence before executing restore",
 		)
 	}
 	return nil
@@ -89,7 +109,7 @@ func restorePlanCmd() *cobra.Command {
 	return c
 }
 
-func restoreFetchCmd(resolver artifactcrypto.Resolver) *cobra.Command {
+func restoreFetchCmd(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) *cobra.Command {
 	var root string
 	var manifest string
 	var format string
@@ -117,7 +137,7 @@ func restoreFetchCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 			if len(plan.Conflicts) != 0 {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
-			if err := requireRestoreResolver(resolver); err != nil {
+			if err := preflightRestore(plan, resolver, verifier); err != nil {
 				return err
 			}
 			journal := restore.Journal{Path: filepath.Join(plan.Root, ".restore-apply.jsonl")}
@@ -149,7 +169,7 @@ func restoreFetchCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 					return recoverFailure(err)
 				}
 				runRecords = append(runRecords, record)
-				if err := restore.StageFile(plan, entry, resolver); err != nil {
+				if err := restore.StageFile(plan, entry, resolver, verifier); err != nil {
 					return recoverFailure(err)
 				}
 				record.After = "created"
@@ -170,7 +190,7 @@ func restoreFetchCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 	return c
 }
 
-func restoreApplyCmd(resolver artifactcrypto.Resolver) *cobra.Command {
+func restoreApplyCmd(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) *cobra.Command {
 	var root string
 	var manifest string
 	var transactionID string
@@ -207,14 +227,14 @@ func restoreApplyCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 			if len(plan.Conflicts) != 0 {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
-			if err := requireRestoreResolver(resolver); err != nil {
+			if err := preflightRestore(plan, resolver, verifier); err != nil {
 				return err
 			}
 			tx, err := restore.BeginTransaction(plan.Root, transactionID)
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "choose a new transaction ID and preserve prior transaction evidence")
 			}
-			if err := applyRestorePlan(plan, tx, resolver); err != nil {
+			if err := applyRestorePlan(plan, tx, resolver, verifier); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "applied %d entries into isolated root %s (transaction %s)\n", len(plan.Entries), plan.Root, transactionID)
@@ -232,7 +252,7 @@ func restoreApplyCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 	return c
 }
 
-func applyRestorePlan(plan restore.Plan, tx *restore.Transaction, resolver artifactcrypto.Resolver) error {
+func applyRestorePlan(plan restore.Plan, tx *restore.Transaction, resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
 	runRecords := make([]restore.JournalRecord, 0, len(plan.Entries)*2)
 	recoverFailure := func(cause error) error {
 		if len(runRecords) == 0 {
@@ -259,7 +279,7 @@ func applyRestorePlan(plan restore.Plan, tx *restore.Transaction, resolver artif
 			return recoverFailure(err)
 		}
 		runRecords = append(runRecords, record)
-		if err := restore.StageFile(plan, entry, resolver); err != nil {
+		if err := restore.StageFile(plan, entry, resolver, verifier); err != nil {
 			return recoverFailure(err)
 		}
 		record.After = "created"

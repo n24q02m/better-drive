@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/config"
 	"github.com/n24q02m/better-drive/internal/credentials"
 	"github.com/n24q02m/better-drive/internal/engine"
+	"github.com/n24q02m/better-drive/internal/restore"
 )
 
 // DestinationCredentialResolver resolves metadata for one exact configured
@@ -31,6 +33,8 @@ type RetentionCoordinator interface {
 type RuntimeDependencies struct {
 	CredentialResolver   DestinationCredentialResolver
 	RetentionCoordinator RetentionCoordinator
+	ArtifactResolver     artifactcrypto.Resolver
+	StagingVerifier      restore.StagingVerifier
 }
 
 func (deps RuntimeDependencies) validateForConfig(cfg *config.Config) error {

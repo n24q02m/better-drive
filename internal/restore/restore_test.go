@@ -6,8 +6,10 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 )
@@ -25,6 +27,29 @@ func (r testArtifactResolver) Resolve(reference artifactcrypto.KeyReference) ([]
 		return nil, os.ErrNotExist
 	}
 	return append([]byte(nil), key...), nil
+}
+
+type testStagingVerifier struct {
+	calls  int
+	mutate func(StagingEvidence, int) StagingEvidence
+}
+
+func (v *testStagingVerifier) Verify(_ string, identity RootIdentity) (StagingEvidence, error) {
+	v.calls++
+	evidence := StagingEvidence{
+		RootIdentity:       identity,
+		ProofDigest:        digestBytes(identity.Path + "|staging-proof"),
+		ProofID:            "proof-1",
+		VerifiedAt:         time.Unix(1700000000, 0).UTC(),
+		EncryptedAtRest:    true,
+		OwnerOnly:          true,
+		ExcludedFromBackup: true,
+		NonInheritedACL:    true,
+	}
+	if v.mutate != nil {
+		evidence = v.mutate(evidence, v.calls)
+	}
+	return evidence, nil
 }
 
 func sealedEntry(t *testing.T, relative string, payload []byte, metadata artifactcrypto.Metadata, resolver artifactcrypto.Resolver) Entry {
@@ -109,15 +134,83 @@ func TestStageFileWritesAuthenticatedEnvelopeCreateOnly(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if err := StageFile(plan, entry, resolver); err != nil {
+	if err := StageFile(plan, entry, resolver, &testStagingVerifier{}); err != nil {
 		t.Fatalf("StageFile: %v", err)
 	}
-	if err := StageFile(plan, entry, resolver); err == nil || !strings.Contains(err.Error(), "exists") {
+	if err := StageFile(plan, entry, resolver, &testStagingVerifier{}); err == nil || !strings.Contains(err.Error(), "exists") {
 		t.Fatal("StageFile overwrote an existing destination")
 	}
 	got, err := os.ReadFile(filepath.Join(root, "category", "state.txt"))
 	if err != nil || string(got) != "restore-data" {
 		t.Fatalf("staged data = %q err=%v", got, err)
+	}
+}
+
+func TestStageFileRejectsUnverifiedStagingWithoutResidue(t *testing.T) {
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	for _, tc := range []struct {
+		name   string
+		mutate func(StagingEvidence, int) StagingEvidence
+	}{
+		{name: "encrypted at rest", mutate: func(e StagingEvidence, _ int) StagingEvidence { e.EncryptedAtRest = false; return e }},
+		{name: "owner only", mutate: func(e StagingEvidence, _ int) StagingEvidence { e.OwnerOnly = false; return e }},
+		{name: "excluded from backup", mutate: func(e StagingEvidence, _ int) StagingEvidence { e.ExcludedFromBackup = false; return e }},
+		{name: "non inherited acl", mutate: func(e StagingEvidence, _ int) StagingEvidence { e.NonInheritedACL = false; return e }},
+		{name: "proof digest", mutate: func(e StagingEvidence, _ int) StagingEvidence { e.ProofDigest = "sha256:ABC"; return e }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if tc.name == "non inherited acl" && runtime.GOOS != "windows" {
+				t.Skip("Windows-only ACL evidence")
+			}
+			root := t.TempDir()
+			entry := sealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+			plan, err := BuildPlan(root, []Entry{entry})
+			if err != nil {
+				t.Fatal(err)
+			}
+			verifier := &testStagingVerifier{mutate: tc.mutate}
+			if err := StageFile(plan, entry, resolver, verifier); err == nil {
+				t.Fatal("StageFile accepted unverified staging evidence")
+			}
+			entries, err := os.ReadDir(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(entries) != 0 {
+				t.Fatalf("staging root residue after preflight failure: %#v", entries)
+			}
+		})
+	}
+}
+
+func TestStageFileRejectsEvidenceDriftBeforeTempCreation(t *testing.T) {
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	root := t.TempDir()
+	entry := sealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+	plan, err := BuildPlan(root, []Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	verifier := &testStagingVerifier{mutate: func(e StagingEvidence, calls int) StagingEvidence {
+		if calls >= 2 {
+			e.RootIdentity.Token = "drifted"
+		}
+		return e
+	}}
+	if err := StageFile(plan, entry, resolver, verifier); err == nil || !strings.Contains(err.Error(), "evidence") {
+		t.Fatalf("StageFile evidence drift error = %v", err)
+	}
+	if verifier.calls != 2 {
+		t.Fatalf("verifier calls = %d, want pre-open and pre-temp checks", verifier.calls)
+	}
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("staging root residue after evidence drift: %#v", entries)
 	}
 }
 
@@ -205,7 +298,7 @@ func TestStageFileRejectsEnvelopeAndManifestFailuresWithoutCommit(t *testing.T) 
 			if err != nil {
 				t.Fatalf("BuildPlan: %v", err)
 			}
-			if err := StageFile(plan, entry, caseResolver); err == nil {
+			if err := StageFile(plan, entry, caseResolver, &testStagingVerifier{}); err == nil {
 				t.Fatal("StageFile accepted an invalid envelope or manifest")
 			}
 			if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {
@@ -361,7 +454,7 @@ func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := StageFile(plan, entry, resolver); err == nil || !strings.Contains(err.Error(), "identity") {
+	if err := StageFile(plan, entry, resolver, &testStagingVerifier{}); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("StageFile root drift error = %v, want identity refusal", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {

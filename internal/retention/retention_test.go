@@ -11,12 +11,23 @@ import (
 	"github.com/n24q02m/better-drive/internal/r2api"
 )
 
-func retentionObject(key string, modified time.Time) Object {
-	return Object{Provider: string(ProviderR2), AccountID: "acct-1", RootID: "root-1", Namespace: "backup", Bucket: "source", Key: key, ObjectID: key, Version: "v1", Generation: "g1", ETag: "e-" + key, ParentID: "parent", Size: 4, Hash: "h-" + key, ModifiedAt: modified}
+func validRestoreReplica(id string) ReplicaEvidence {
+	return ReplicaEvidence{ID: id, Provider: string(ProviderR2), AccountID: "acct-1", RootID: "root-1", Namespace: "backup", Required: true, Complete: true, Evidence: "evidence-" + id}
+}
+
+func optionalRestoreReplica(id string) ReplicaEvidence {
+	return ReplicaEvidence{ID: id, Provider: string(ProviderR2), AccountID: "acct-1", RootID: "root-1", Namespace: "backup", Complete: true, Evidence: "evidence-" + id}
+}
+func retentionObject(id string, modifiedAt time.Time) Object {
+	return Object{
+		Provider: string(ProviderR2), AccountID: "acct-1", RootID: "root-1", Namespace: "backup",
+		Bucket: "source", Key: id, ObjectID: id, Version: "v1", Generation: "g1",
+		ETag: "etag-" + id, Size: 4, Hash: "h-" + id, ModifiedAt: modifiedAt,
+	}
 }
 
 func retentionInventory(now time.Time) Inventory {
-	return Inventory{AccountID: "acct-1", RootID: "root-1", Namespace: "backup", CapturedAt: now.Add(-time.Minute), Objects: []Object{retentionObject("one", now.Add(-time.Hour)), retentionObject("two", now.Add(-time.Hour))}, RestoreSets: []RestoreSet{{ID: "old", CreatedAt: now.Add(-2 * time.Hour), Complete: true, Replicas: []ReplicaEvidence{{ID: "r-old", Required: true, Complete: true}}}, {ID: "new", CreatedAt: now.Add(-time.Hour), Complete: true, Replicas: []ReplicaEvidence{{ID: "r-new", Required: true, Complete: true}}}}}
+	return Inventory{AccountID: "acct-1", RootID: "root-1", Namespace: "backup", CapturedAt: now.Add(-time.Minute), Objects: []Object{retentionObject("one", now.Add(-time.Hour)), retentionObject("two", now.Add(-time.Hour))}, RestoreSets: []RestoreSet{{ID: "old", CreatedAt: now.Add(-2 * time.Hour), Complete: true, Replicas: []ReplicaEvidence{validRestoreReplica("r-old")}}, {ID: "new", CreatedAt: now.Add(-time.Hour), Complete: true, Replicas: []ReplicaEvidence{validRestoreReplica("r-new")}}}}
 }
 
 func ownerMarker() OwnershipMarker {
@@ -163,6 +174,86 @@ func TestNewestCompleteRestoreSetsRejectIncompleteRequiredReplica(t *testing.T) 
 	}
 	if len(sets) != 1 || sets[0].ID != "new" {
 		t.Fatalf("sets = %+v", sets)
+	}
+}
+
+func TestNewestCompleteRestoreSetsRejectsEmptyCompleteRecords(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	inventory := retentionInventory(now)
+	inventory.RestoreSets = []RestoreSet{
+		{ID: "empty-old", CreatedAt: now.Add(-2 * time.Hour), Complete: true},
+		{ID: "empty-new", CreatedAt: now.Add(-time.Hour), Complete: true},
+	}
+	if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+		t.Fatalf("empty complete restore sets error = %v, want required replica rejection", err)
+	}
+}
+
+func TestNewestCompleteRestoreSetsRejectsOptionalOnlyRecords(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	inventory := retentionInventory(now)
+	inventory.RestoreSets = []RestoreSet{
+		{ID: "optional-old", CreatedAt: now.Add(-2 * time.Hour), Complete: true, Replicas: []ReplicaEvidence{optionalRestoreReplica("optional-old")}},
+		{ID: "optional-new", CreatedAt: now.Add(-time.Hour), Complete: true, Replicas: []ReplicaEvidence{optionalRestoreReplica("optional-new")}},
+	}
+	if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+		t.Fatalf("optional-only restore sets error = %v, want required replica rejection", err)
+	}
+}
+
+func TestNewestCompleteRestoreSetsRejectsMissingRequiredEvidence(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReplicaEvidence)
+	}{
+		{name: "id", mutate: func(replica *ReplicaEvidence) { replica.ID = "" }},
+		{name: "provider", mutate: func(replica *ReplicaEvidence) { replica.Provider = "" }},
+		{name: "account", mutate: func(replica *ReplicaEvidence) { replica.AccountID = "" }},
+		{name: "root", mutate: func(replica *ReplicaEvidence) { replica.RootID = "" }},
+		{name: "namespace", mutate: func(replica *ReplicaEvidence) { replica.Namespace = "" }},
+		{name: "evidence", mutate: func(replica *ReplicaEvidence) { replica.Evidence = "" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := retentionInventory(now)
+			test.mutate(&inventory.RestoreSets[1].Replicas[0])
+			if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+				t.Fatalf("missing %s error = %v, want required replica rejection", test.name, err)
+			}
+		})
+	}
+}
+
+func TestNewestCompleteRestoreSetsRejectsRequiredReplicaScopeDrift(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name   string
+		mutate func(*ReplicaEvidence)
+	}{
+		{name: "account", mutate: func(replica *ReplicaEvidence) { replica.AccountID = "foreign-account" }},
+		{name: "root", mutate: func(replica *ReplicaEvidence) { replica.RootID = "foreign-root" }},
+		{name: "namespace", mutate: func(replica *ReplicaEvidence) { replica.Namespace = "foreign-namespace" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := retentionInventory(now)
+			test.mutate(&inventory.RestoreSets[1].Replicas[0])
+			if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "scope") {
+				t.Fatalf("scope drift %s error = %v, want scope rejection", test.name, err)
+			}
+		})
+	}
+}
+
+func TestNewestCompleteRestoreSetsAcceptsAuthenticatedRequiredEvidence(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	inventory := retentionInventory(now)
+	inventory.RestoreSets[0].CreatedAt = inventory.RestoreSets[1].CreatedAt
+	sets, err := NewestCompleteRestoreSets(inventory, 2)
+	if err != nil {
+		t.Fatalf("NewestCompleteRestoreSets() error = %v", err)
+	}
+	if len(sets) != 2 || sets[0].ID != "old" || sets[1].ID != "new" {
+		t.Fatalf("sets = %+v, want deterministic descending-ID tie order", sets)
 	}
 }
 

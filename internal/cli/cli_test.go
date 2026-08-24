@@ -25,15 +25,19 @@ import (
 )
 
 type cliBindingResolver struct {
-	role   config.BindingReadback
-	policy config.BindingReadback
+	role     config.BindingReadback
+	policy   config.BindingReadback
+	category config.BindingReadback
 }
 
 func (r cliBindingResolver) ReadRoleBinding(string) (config.BindingReadback, error) {
 	return r.role, nil
 }
 
-func (r cliBindingResolver) ReadPolicyBinding(string) (config.BindingReadback, error) {
+func (r cliBindingResolver) ReadPolicyBinding(ref string) (config.BindingReadback, error) {
+	if ref == r.category.Ref {
+		return r.category, nil
+	}
 	return r.policy, nil
 }
 
@@ -51,7 +55,7 @@ func TestValidateExecutionConfigWithBindingsRejectsFreshBindingDrift(t *testing.
 			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		},
 		CategoryPolicies: []config.CategoryPolicy{{
-			ID: "policy", Version: 1, Digest: policyDigest, AllowlistedRoot: source,
+			ID: "policy", Version: 1, Digest: policyDigest, BindingRef: "category-policy:policy", AllowlistedRoot: source,
 			MandatoryDenylist: []string{"node_modules/"}, SizeGuard: config.CategorySizeGuard{MaxBytes: 1 << 20},
 			RestoreExpectation: "empty-or-exact-hash",
 		}},
@@ -63,8 +67,9 @@ func TestValidateExecutionConfigWithBindingsRejectsFreshBindingDrift(t *testing.
 		}},
 	}
 	resolver := cliBindingResolver{
-		role:   config.BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: cfg.RoleBinding.RoleDigest},
-		policy: config.BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		role:     config.BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: cfg.RoleBinding.RoleDigest},
+		policy:   config.BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		category: config.BindingReadback{Ref: cfg.CategoryPolicies[0].BindingRef, Digest: cfg.CategoryPolicies[0].Digest},
 	}
 	if err := validateExecutionConfigWithBindings(cfg, resolver, resolver); err != nil {
 		t.Fatalf("validateExecutionConfigWithBindings: %v", err)

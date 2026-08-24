@@ -114,6 +114,7 @@ func TestLoadV2PreservesCategoryPolicyRegistry(t *testing.T) {
 id = "vscode-insiders-user"
 version = 1
 digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+binding_ref = "policy:vscode-insiders-user"
 allowlisted_root = "C:/Users/me/AppData/Roaming/Code - Insiders/User"
 mandatory_denylist = ["Cache/", "logs/"]
 restore_expectation = "empty-or-exact-hash"
@@ -136,7 +137,7 @@ max_bytes = 1073741824
 
 func TestCategoryPolicyRejectsMissingRequiredFields(t *testing.T) {
 	base := CategoryPolicy{
-		ID: "policy", Version: 1, Digest: "sha256:" + strings.Repeat("a", 64),
+		ID: "policy", Version: 1, Digest: "sha256:" + strings.Repeat("a", 64), BindingRef: "policy:category",
 		AllowlistedRoot: "C:/Users/me/source", MandatoryDenylist: []string{"Cache/"},
 		SizeGuard: CategorySizeGuard{MaxBytes: 1024}, RestoreExpectation: "empty-or-exact-hash",
 	}
@@ -145,6 +146,8 @@ func TestCategoryPolicyRejectsMissingRequiredFields(t *testing.T) {
 		mutate func(*CategoryPolicy)
 		want   string
 	}{
+		{name: "binding ref", mutate: func(policy *CategoryPolicy) { policy.BindingRef = "" }, want: "binding_ref"},
+		{name: "binding ref control", mutate: func(policy *CategoryPolicy) { policy.BindingRef = "policy:\ncategory" }, want: "binding_ref"},
 		{name: "digest", mutate: func(policy *CategoryPolicy) { policy.Digest = "sha256:bad" }, want: "digest"},
 		{name: "allowlisted root", mutate: func(policy *CategoryPolicy) { policy.AllowlistedRoot = "" }, want: "allowlisted_root"},
 		{name: "denylist", mutate: func(policy *CategoryPolicy) { policy.MandatoryDenylist = nil }, want: "mandatory_denylist"},

@@ -173,6 +173,29 @@ func validateObjectScope(policy Policy, inventory Inventory, owner OwnershipMark
 	return nil
 }
 
+func validateRequiredRestoreReplica(inventory Inventory, setID string, replica ReplicaEvidence) error {
+	switch {
+	case strings.TrimSpace(replica.ID) == "":
+		return fmt.Errorf("restore set %q required replica ID is required", setID)
+	case strings.TrimSpace(replica.Provider) == "":
+		return fmt.Errorf("restore set %q required replica %q provider is required", setID, replica.ID)
+	case strings.TrimSpace(replica.AccountID) == "":
+		return fmt.Errorf("restore set %q required replica %q account is required", setID, replica.ID)
+	case strings.TrimSpace(replica.RootID) == "":
+		return fmt.Errorf("restore set %q required replica %q root is required", setID, replica.ID)
+	case strings.TrimSpace(replica.Namespace) == "":
+		return fmt.Errorf("restore set %q required replica %q namespace is required", setID, replica.ID)
+	case strings.TrimSpace(replica.Evidence) == "":
+		return fmt.Errorf("restore set %q required replica %q evidence is required", setID, replica.ID)
+	case replica.AccountID != inventory.AccountID || replica.RootID != inventory.RootID || replica.Namespace != inventory.Namespace:
+		return fmt.Errorf("restore set %q required replica %q scope does not match inventory", setID, replica.ID)
+	case !replica.Complete:
+		return fmt.Errorf("restore set %q required replica %q is incomplete", setID, replica.ID)
+	default:
+		return nil
+	}
+}
+
 func NewestCompleteRestoreSets(inventory Inventory, minimum int) ([]RestoreSet, error) {
 	if minimum < 0 {
 		return nil, errors.New("minimum restore sets must not be negative")
@@ -189,14 +212,18 @@ func NewestCompleteRestoreSets(inventory Inventory, minimum int) ([]RestoreSet, 
 		if set.ID == "" || set.CreatedAt.IsZero() {
 			return nil, errors.New("restore set identity and timestamp are required")
 		}
-		requiredComplete := true
+		requiredReplicas := 0
 		for _, replica := range set.Replicas {
-			if replica.Required && !replica.Complete {
-				requiredComplete = false
+			if !replica.Required {
+				continue
+			}
+			requiredReplicas++
+			if err := validateRequiredRestoreReplica(inventory, set.ID, replica); err != nil {
+				return nil, err
 			}
 		}
-		if !requiredComplete {
-			return nil, fmt.Errorf("restore set %q has incomplete required replica", set.ID)
+		if set.Complete && requiredReplicas == 0 {
+			return nil, fmt.Errorf("restore set %q marked complete without a required replica", set.ID)
 		}
 		if set.Complete {
 			complete = append(complete, set)

@@ -29,11 +29,15 @@ import (
 
 const maxInt64 = int64(1<<63 - 1)
 
-// Execute runs the CLI against the real process args and reports the
-// resolved --format alongside the error, so main can render a failure (see
-// RenderError) in the format the user asked for instead of always printing
-// plain text.
+// Execute runs with zero-value dependencies; restore execution therefore
+// fails closed until an enrolled host uses ExecuteWithDependencies.
 func Execute() (string, error) { return execute(nil) }
+
+// ExecuteWithDependencies runs the CLI against the real process args using
+// the enrolled runtime services supplied by the host.
+func ExecuteWithDependencies(deps RuntimeDependencies) (string, error) {
+	return executeWithDependencies(nil, deps)
+}
 
 // execute is Execute's args-injectable body: nil means "use the real
 // os.Args[1:]" (cobra's own default, for the production binary); a non-nil
@@ -83,7 +87,7 @@ func newRootCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), cleanupCmd(), configCmd(), restoreCmd(), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }

@@ -1,7 +1,6 @@
 package cleanup
 
 import (
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -28,7 +27,10 @@ const (
 // every state other than claimed, and Reconcile is accepted only from
 // needs_reconciliation.
 
-var ErrUnknownSettlement = errors.New("unknown settlement; broker fence retained")
+var (
+	ErrBrokerSignerRequired = errors.New("broker signer is required")
+	ErrUnknownSettlement    = errors.New("unknown settlement")
+)
 
 // BrokerSigner signs canonical, non-secret readback bytes. The broker has no
 // provider transport and never carries bearer material.
@@ -430,19 +432,16 @@ func (b *Broker) now() time.Time {
 }
 
 func (b *Broker) sign(value any) error {
+	if b.Signer == nil {
+		return ErrBrokerSignerRequired
+	}
 	canonical, err := json.Marshal(value)
 	if err != nil {
 		return fmt.Errorf("canonical broker readback: %w", err)
 	}
-	var signature []byte
-	if b.Signer != nil {
-		signature, err = b.Signer.Sign(canonical)
-		if err != nil {
-			return fmt.Errorf("sign broker readback: %w", err)
-		}
-	} else {
-		sum := sha256.Sum256(canonical)
-		signature = sum[:]
+	signature, err := b.Signer.Sign(canonical)
+	if err != nil {
+		return fmt.Errorf("sign broker readback: %w", err)
 	}
 	if len(signature) == 0 {
 		return errors.New("broker signer returned empty signature")

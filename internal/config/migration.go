@@ -242,6 +242,9 @@ func mergeCategoryPolicy(source, binding CategoryPolicy) (CategoryPolicy, error)
 	if merged.Digest, err = mergeMigrationString("category_policy.digest", source.Digest, binding.Digest); err != nil {
 		return CategoryPolicy{}, err
 	}
+	if merged.BindingRef, err = mergeMigrationString("category_policy.binding_ref", source.BindingRef, binding.BindingRef); err != nil {
+		return CategoryPolicy{}, err
+	}
 	if merged.AllowlistedRoot, err = mergeMigrationString("category_policy.allowlisted_root", source.AllowlistedRoot, binding.AllowlistedRoot); err != nil {
 		return CategoryPolicy{}, err
 	}
@@ -294,10 +297,22 @@ func cloneCategoryPolicy(policy CategoryPolicy) CategoryPolicy {
 }
 
 type MigrationPreview struct {
-	SchemaVersion int                     `json:"schema_version"`
-	RcloneRuntime MigrationRuntimePreview `json:"rclone_runtime"`
-	Blockers      []string                `json:"blockers,omitempty"`
-	Jobs          []MigrationJobPreview   `json:"jobs"`
+	SchemaVersion    int                              `json:"schema_version"`
+	RcloneRuntime    MigrationRuntimePreview          `json:"rclone_runtime"`
+	CategoryPolicies []MigrationCategoryPolicyPreview `json:"category_policies"`
+	Blockers         []string                         `json:"blockers,omitempty"`
+	Jobs             []MigrationJobPreview            `json:"jobs"`
+}
+
+type MigrationCategoryPolicyPreview struct {
+	ID                 string   `json:"id"`
+	Version            int      `json:"version"`
+	Digest             string   `json:"digest"`
+	BindingRef         string   `json:"binding_ref"`
+	AllowlistedRoot    string   `json:"allowlisted_root"`
+	MandatoryDenylist  []string `json:"mandatory_denylist"`
+	MaxBytes           int64    `json:"max_bytes"`
+	RestoreExpectation string   `json:"restore_expectation"`
 }
 
 type MigrationRuntimePreview struct {
@@ -346,8 +361,9 @@ type MigrationDestinationPreview struct {
 
 func Preview(c *Config) MigrationPreview {
 	preview := MigrationPreview{
-		SchemaVersion: c.SchemaVersion,
-		Blockers:      migrationBlockers(c),
+		SchemaVersion:    c.SchemaVersion,
+		CategoryPolicies: make([]MigrationCategoryPolicyPreview, 0, len(c.CategoryPolicies)),
+		Blockers:         migrationBlockers(c),
 		RcloneRuntime: MigrationRuntimePreview{
 			Executable:       redactUserPath(c.RcloneRuntime.Executable),
 			ExecutableFileID: c.RcloneRuntime.ExecutableFileID,
@@ -363,6 +379,15 @@ func Preview(c *Config) MigrationPreview {
 			AllowedRemotes:   append([]string(nil), c.RcloneRuntime.AllowedRemotes...),
 			AllowedBackends:  append([]string(nil), c.RcloneRuntime.AllowedBackends...),
 		},
+	}
+	for _, policy := range c.CategoryPolicies {
+		preview.CategoryPolicies = append(preview.CategoryPolicies, MigrationCategoryPolicyPreview{
+			ID: policy.ID, Version: policy.Version, Digest: policy.Digest,
+			BindingRef:        redactUserPath(policy.BindingRef),
+			AllowlistedRoot:   redactUserPath(policy.AllowlistedRoot),
+			MandatoryDenylist: append([]string(nil), policy.MandatoryDenylist...),
+			MaxBytes:          policy.SizeGuard.MaxBytes, RestoreExpectation: policy.RestoreExpectation,
+		})
 	}
 	for _, job := range c.Jobs {
 		item := MigrationJobPreview{ID: job.ID, Source: redactUserPath(job.Source), Direction: job.Direction, Mode: job.Mode,

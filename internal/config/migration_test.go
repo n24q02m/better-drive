@@ -38,6 +38,7 @@ func migrationBindingsFixture(t *testing.T) MigrationBindings {
 			ID:                 "claude-state",
 			Version:            7,
 			Digest:             "sha256:" + strings.Repeat("a", 64),
+			BindingRef:         "policy:claude-state",
 			AllowlistedRoot:    sourceRoot,
 			MandatoryDenylist:  []string{"node_modules/"},
 			SizeGuard:          CategorySizeGuard{MaxBytes: 1 << 20},
@@ -72,8 +73,9 @@ func TestApplyMigrationBindingsFillsLegacyRuntimeAndPolicyWithSuppliedVersion(t 
 	if !reflect.DeepEqual(got.RcloneRuntime, bindings.RcloneRuntime) {
 		t.Fatalf("runtime = %#v, want %#v", got.RcloneRuntime, bindings.RcloneRuntime)
 	}
-	if len(got.CategoryPolicies) != 1 || got.CategoryPolicies[0].Version != bindings.CategoryPolicy.Version {
-		t.Fatalf("category policies = %#v, want supplied version %d", got.CategoryPolicies, bindings.CategoryPolicy.Version)
+	if len(got.CategoryPolicies) != 1 || got.CategoryPolicies[0].Version != bindings.CategoryPolicy.Version ||
+		got.CategoryPolicies[0].BindingRef != bindings.CategoryPolicy.BindingRef {
+		t.Fatalf("category policies = %#v, want supplied version/ref %d/%q", got.CategoryPolicies, bindings.CategoryPolicy.Version, bindings.CategoryPolicy.BindingRef)
 	}
 	job := got.Jobs[0]
 	if job.CategoryPolicyID != bindings.CategoryPolicy.ID || job.CategoryPolicyVersion != bindings.CategoryPolicy.Version || job.CategoryPolicyDigest != bindings.CategoryPolicy.Digest {
@@ -84,6 +86,32 @@ func TestApplyMigrationBindingsFillsLegacyRuntimeAndPolicyWithSuppliedVersion(t 
 	}
 	if source.RcloneRuntime.Executable != "" || len(source.CategoryPolicies) != 0 || source.Jobs[0].CategoryPolicyID != "" {
 		t.Fatal("ApplyMigrationBindings mutated legacy source")
+	}
+}
+
+func TestPreviewIncludesRedactedCategoryPolicyBindingInputs(t *testing.T) {
+	bindings := migrationBindingsFixture(t)
+	policy := bindings.CategoryPolicy
+	policy.AllowlistedRoot = `C:/Users/alice/.config`
+	policy.BindingRef = `file:C:/Users/alice/policy.json`
+	cfg := migrationLegacyConfig(bindings)
+	cfg.CategoryPolicies = []CategoryPolicy{policy}
+
+	preview := Preview(cfg)
+	if len(preview.CategoryPolicies) != 1 {
+		t.Fatalf("category policy preview = %#v, want one policy", preview.CategoryPolicies)
+	}
+	got := preview.CategoryPolicies[0]
+	if got.ID != policy.ID || got.Version != policy.Version || got.Digest != policy.Digest ||
+		got.MandatoryDenylist[0] != policy.MandatoryDenylist[0] ||
+		got.MaxBytes != policy.SizeGuard.MaxBytes || got.RestoreExpectation != policy.RestoreExpectation {
+		t.Fatalf("category policy preview = %#v, want canonical policy inputs", got)
+	}
+	if strings.Contains(got.AllowlistedRoot, "alice") || strings.Contains(got.BindingRef, "alice") {
+		t.Fatalf("category policy preview leaked user path: %#v", got)
+	}
+	if !strings.Contains(got.AllowlistedRoot, "<user>") || !strings.Contains(got.BindingRef, "<user>") {
+		t.Fatalf("category policy preview did not redact user path: %#v", got)
 	}
 }
 
@@ -98,6 +126,13 @@ func TestApplyMigrationBindingsRejectsRuntimePolicyJobAndDestinationDrift(t *tes
 			name:   "runtime",
 			mutate: func(cfg *Config) { cfg.RcloneRuntime.Version = "1.68.0" },
 			want:   "rclone_runtime.version drift",
+		},
+		{
+			name: "category policy binding ref",
+			mutate: func(cfg *Config) {
+				cfg.CategoryPolicies = []CategoryPolicy{{BindingRef: "policy:foreign"}}
+			},
+			want: "category_policy.binding_ref drift",
 		},
 		{
 			name:   "policy",

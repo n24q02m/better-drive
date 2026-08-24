@@ -132,6 +132,9 @@ func (resolver *Resolver) ResolveSecret(ctx context.Context, ref Reference) ([]b
 }
 
 func (ref Reference) Validate() error {
+	if err := validateCompatibilityAliases(ref.Account, ref.AccountID, ref.Root, ref.RootID); err != nil {
+		return err
+	}
 	ref = normalizeReference(ref)
 	for name, value := range map[string]string{
 		"provider": ref.Provider,
@@ -282,6 +285,15 @@ func contextErr(ctx context.Context) error {
 	default:
 		return nil
 	}
+}
+func validateCompatibilityAliases(account, accountID, root, rootID string) error {
+	if account != "" && accountID != "" && account != accountID {
+		return errors.New("account and account_id must match")
+	}
+	if root != "" && rootID != "" && root != rootID {
+		return errors.New("root and root_id must match")
+	}
+	return nil
 }
 
 func normalizeReference(ref Reference) Reference {

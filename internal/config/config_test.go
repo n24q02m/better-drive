@@ -20,7 +20,7 @@ func validV2Config(t *testing.T) *Config {
 	t.Helper()
 	runtimeDir := t.TempDir()
 	sourceDir := t.TempDir()
-	policyDigest := "sha256:" + strings.Repeat("a", 64)
+	categoryBindingRef, policyDigest := bindingFile(t, "category-policy.json", `{"category":"claude-state"}`)
 	return &Config{
 		SchemaVersion: CurrentSchemaVersion,
 		RcloneRuntime: RcloneRuntime{
@@ -30,7 +30,7 @@ func validV2Config(t *testing.T) *Config {
 			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		},
 		CategoryPolicies: []CategoryPolicy{{
-			ID: "claude-state", Version: 1, Digest: policyDigest,
+			ID: "claude-state", Version: 1, Digest: policyDigest, BindingRef: categoryBindingRef,
 			AllowlistedRoot: sourceDir, MandatoryDenylist: []string{"node_modules/"},
 			SizeGuard: CategorySizeGuard{MaxBytes: 1 << 30}, RestoreExpectation: "empty-or-exact-hash",
 		}},

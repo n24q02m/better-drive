@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/BurntSushi/toml"
 )
@@ -117,11 +118,11 @@ func (r RcloneRuntime) Validate() error {
 type CategorySizeGuard struct {
 	MaxBytes int64 `toml:"max_bytes" json:"max_bytes"`
 }
-
 type CategoryPolicy struct {
 	ID                 string            `toml:"id" json:"id"`
 	Version            int               `toml:"version" json:"version"`
 	Digest             string            `toml:"digest" json:"digest"`
+	BindingRef         string            `toml:"binding_ref" json:"binding_ref"`
 	AllowlistedRoot    string            `toml:"allowlisted_root" json:"allowlisted_root"`
 	MandatoryDenylist  []string          `toml:"mandatory_denylist" json:"mandatory_denylist"`
 	SizeGuard          CategorySizeGuard `toml:"size_guard" json:"size_guard"`
@@ -137,6 +138,12 @@ func (p CategoryPolicy) Validate() error {
 	}
 	if !isSHA256Digest(p.Digest) {
 		return fmt.Errorf("digest must use sha256:<64 hex chars>")
+	}
+	if strings.TrimSpace(p.BindingRef) == "" {
+		return fmt.Errorf("binding_ref is required")
+	}
+	if strings.IndexFunc(p.BindingRef, unicode.IsControl) >= 0 {
+		return fmt.Errorf("binding_ref contains control characters")
 	}
 	if strings.TrimSpace(p.AllowlistedRoot) == "" {
 		return fmt.Errorf("allowlisted_root is required")
@@ -372,13 +379,18 @@ func roleBindingFromTOML(raw tomlRoleBinding) RoleBinding {
 }
 
 type BindingValidationError struct {
-	Kind string
-	Ref  string
-	Want string
-	Got  string
+	Kind    string
+	Ref     string
+	Want    string
+	Got     string
+	WantRef string
+	GotRef  string
 }
 
 func (e *BindingValidationError) Error() string {
+	if e.WantRef != "" || e.GotRef != "" {
+		return fmt.Sprintf("%s binding drift for %q: want ref %q digest %s, got ref %q digest %s", e.Kind, e.Ref, e.WantRef, e.Want, e.GotRef, e.Got)
+	}
 	return fmt.Sprintf("%s binding drift for %q: want %s, got %s", e.Kind, e.Ref, e.Want, e.Got)
 }
 
@@ -597,6 +609,9 @@ func (c *Config) ValidateForExecutionWithBindings(policyResolver PolicyBindingRe
 	if policyResolver == nil || roleResolver == nil {
 		return errors.New("config binding resolver is required for execution")
 	}
+	if err := c.validateCategoryPolicyBindings(policyResolver); err != nil {
+		return err
+	}
 	if err := c.RoleBinding.Validate(); err != nil {
 		return fmt.Errorf("role binding: %w", err)
 	}
@@ -613,6 +628,35 @@ func (c *Config) ValidateForExecutionWithBindings(policyResolver PolicyBindingRe
 	}
 	if policy.Ref != c.RoleBinding.PolicyRef || policy.Digest != c.RoleBinding.PolicyDigest {
 		return &BindingValidationError{Kind: "policy", Ref: c.RoleBinding.PolicyRef, Want: c.RoleBinding.PolicyDigest, Got: policy.Digest}
+	}
+	return nil
+}
+
+func (c *Config) validateCategoryPolicyBindings(resolver PolicyBindingResolver) error {
+	digests := make(map[string]string, len(c.CategoryPolicies))
+	for _, policy := range c.CategoryPolicies {
+		if digest, exists := digests[policy.BindingRef]; exists && digest != policy.Digest {
+			return fmt.Errorf("category policy binding %q has inconsistent digests", policy.BindingRef)
+		}
+		digests[policy.BindingRef] = policy.Digest
+	}
+
+	seen := make(map[string]struct{}, len(digests))
+	for _, policy := range c.CategoryPolicies {
+		if _, exists := seen[policy.BindingRef]; exists {
+			continue
+		}
+		seen[policy.BindingRef] = struct{}{}
+		readback, err := resolver.ReadPolicyBinding(policy.BindingRef)
+		if err != nil {
+			return fmt.Errorf("category policy binding readback: %w", err)
+		}
+		if readback.Ref != policy.BindingRef || readback.Digest != policy.Digest {
+			return &BindingValidationError{
+				Kind: "category policy", Ref: policy.BindingRef, Want: policy.Digest, Got: readback.Digest,
+				WantRef: policy.BindingRef, GotRef: readback.Ref,
+			}
+		}
 	}
 	return nil
 }

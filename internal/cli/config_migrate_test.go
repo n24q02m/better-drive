@@ -90,6 +90,50 @@ interval = "30s"
 	}
 }
 
+func TestConfigMigrateCreateOnlyMissingCategoryPolicyBindingRefLeavesNoOutput(t *testing.T) {
+	root := t.TempDir()
+	sourceDir := filepath.Join(root, "source")
+	if err := os.MkdirAll(sourceDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	legacyPath := filepath.Join(root, "legacy.toml")
+	if err := os.WriteFile(legacyPath, []byte(fmt.Sprintf(`[[pair]]
+local = %q
+remote = "gdrive:Backups/source"
+interval = "30s"
+exclude = ["node_modules/"]
+`, sourceDir)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outputPath := filepath.Join(root, "migrated.toml")
+	t.Setenv("BETTER_DRIVE_CONFIG", legacyPath)
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"config", "migrate", "--create-only", "--output", outputPath,
+		"--account-id", "account-1", "--root-id", "root-1",
+		"--role-ref", "profile:home", "--role-digest", "sha256:" + strings.Repeat("d", 64),
+		"--policy-ref", "policy:home", "--policy-digest", "sha256:" + strings.Repeat("e", 64),
+		"--runtime-executable", filepath.Join(root, "rclone"), "--runtime-executable-file-id", "exe-id",
+		"--runtime-executable-digest", "sha256:" + strings.Repeat("b", 64), "--runtime-version", "1.67.0",
+		"--runtime-provenance", "release", "--runtime-signature", "sig", "--runtime-owner", "release-owner",
+		"--runtime-acl", "owner-only", "--runtime-config", filepath.Join(root, "rclone.conf"), "--runtime-config-file-id", "cfg-id",
+		"--runtime-config-digest", "sha256:" + strings.Repeat("c", 64),
+		"--runtime-allowed-remote", "gdrive", "--runtime-allowed-backend", "drive",
+		"--category-policy-id", "claude-state", "--category-policy-version", "7",
+		"--category-policy-digest", "sha256:" + strings.Repeat("a", 64),
+		"--category-policy-root", sourceDir, "--category-policy-deny", "node_modules/",
+		"--category-policy-max-bytes", "1048576", "--category-policy-restore-expectation", "empty-or-exact-hash",
+	})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "category_policy") {
+		t.Fatalf("missing category-policy binding-ref error = %v, want category-policy rejection", err)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("missing category-policy binding-ref created output: stat error=%v", err)
+	}
+}
+
 func TestConfigMigrateCreateOnlyRequiresRuntimeBindings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "legacy.toml")
 	outputPath := filepath.Join(t.TempDir(), "migrated.toml")
@@ -149,6 +193,11 @@ func TestConfigMigrateCreateOnlyWritesReloadableV2FromLegacyFixture(t *testing.T
 	if err := os.WriteFile(policyPath, []byte(policyBody), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	categoryPolicyPath := filepath.Join(root, "category-policy.json")
+	categoryPolicyBody := `{"category":"home"}`
+	if err := os.WriteFile(categoryPolicyPath, []byte(categoryPolicyBody), 0o600); err != nil {
+		t.Fatal(err)
+	}
 	legacyPath := filepath.Join(root, "legacy.toml")
 	legacy := fmt.Sprintf(`rclone_config = %q
 
@@ -178,7 +227,8 @@ exclude = ["node_modules/"]
 		"--runtime-config-digest", migrationDigest("[gdrive]\ntype = drive\n"),
 		"--runtime-allowed-remote", "gdrive", "--runtime-allowed-backend", "gdrive",
 		"--category-policy-id", "claude-state", "--category-policy-version", "7",
-		"--category-policy-digest", "sha256:" + strings.Repeat("a", 64),
+		"--category-policy-digest", migrationDigest(categoryPolicyBody),
+		"--category-policy-binding-ref", categoryPolicyPath,
 		"--category-policy-root", sourceDir, "--category-policy-deny", "node_modules/",
 		"--category-policy-max-bytes", "1048576", "--category-policy-restore-expectation", "empty-or-exact-hash",
 	})
@@ -247,6 +297,7 @@ exclude = ["node_modules/"]
 		"--runtime-allowed-remote", "gdrive", "--runtime-allowed-backend", "gdrive",
 		"--category-policy-id", "claude-state", "--category-policy-version", "7",
 		"--category-policy-digest", "sha256:" + strings.Repeat("a", 64),
+		"--category-policy-binding-ref", filepath.Join(root, "category.json"),
 		"--category-policy-root", sourceDir, "--category-policy-deny", "node_modules/",
 		"--category-policy-max-bytes", "1048576", "--category-policy-restore-expectation", "empty-or-exact-hash",
 	})

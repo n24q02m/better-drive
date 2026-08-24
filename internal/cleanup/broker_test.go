@@ -39,7 +39,7 @@ func validReconcileRequest(claim ClaimReadback, requestID, targetRef, settlement
 }
 
 func TestBrokerClaimScopesExactRefsAndReturnsSignedSecretFreeReadback(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	request := validClaimRequest()
 	got, err := broker.Claim(request)
 	if err != nil {
@@ -61,7 +61,7 @@ func TestBrokerClaimScopesExactRefsAndReturnsSignedSecretFreeReadback(t *testing
 }
 
 func TestBrokerRejectsRefEscapeAndAlternateOID(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	bad := validClaimRequest()
 	bad.Scope.DesiredRef = "drive:../foreign"
 	if _, err := broker.Claim(bad); err == nil || !strings.Contains(err.Error(), "ref") {
@@ -78,7 +78,7 @@ func TestBrokerRejectsRefEscapeAndAlternateOID(t *testing.T) {
 }
 
 func TestBrokerRejectsReplayAndStaleOwnerOrGeneration(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	request := validClaimRequest()
 	claim, err := broker.Claim(request)
 	if err != nil {
@@ -110,7 +110,7 @@ func TestBrokerRejectsReplayAndStaleOwnerOrGeneration(t *testing.T) {
 }
 
 func TestBrokerUnknownSettlementRequiresReconciliationBeforeComplete(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	claim, err := broker.Claim(validClaimRequest())
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
@@ -130,7 +130,7 @@ func TestBrokerUnknownSettlementRequiresReconciliationBeforeComplete(t *testing.
 }
 
 func TestBrokerUnknownSettlementReconcileUsesExactEvidence(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	claim, err := broker.Claim(validClaimRequest())
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
@@ -162,7 +162,7 @@ func TestBrokerUnknownSettlementReconcileUsesExactEvidence(t *testing.T) {
 }
 
 func TestBrokerReconcileRejectsRequestIDEvidenceDrift(t *testing.T) {
-	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	claim, err := broker.Claim(validClaimRequest())
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
@@ -229,5 +229,81 @@ func TestBrokerSettlementSignerFailureLeavesClaimClaimedForRetry(t *testing.T) {
 	signer.fail = false
 	if readback, err := broker.Reconcile(reconcile); err != nil || readback.State != BrokerStateReconciled || readback.Fence != claim.Fence {
 		t.Fatalf("retry Reconcile readback=%+v err=%v, want reconciliation-required fence reusable", readback, err)
+	}
+}
+
+func TestBrokerClaimRequiresSignerWithoutStateChange(t *testing.T) {
+	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	if _, err := broker.Claim(validClaimRequest()); !errors.Is(err, ErrBrokerSignerRequired) {
+		t.Fatalf("Claim error = %v, want ErrBrokerSignerRequired", err)
+	}
+	if broker.nextFence != 0 || len(broker.claims) != 0 {
+		t.Fatalf("broker state after unsigned Claim = nextFence=%d claims=%d, want unchanged", broker.nextFence, len(broker.claims))
+	}
+}
+
+func TestBrokerCompleteRequiresSignerWithoutStateChange(t *testing.T) {
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	claim, err := broker.Claim(validClaimRequest())
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	before := broker.claims[claim.ClaimID]
+	broker.Signer = nil
+	request := CompleteRequest{
+		ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence,
+		RequestID: "operation-complete", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID,
+		Settlement: SettlementSettled,
+	}
+	if _, err := broker.Complete(request); !errors.Is(err, ErrBrokerSignerRequired) {
+		t.Fatalf("Complete error = %v, want ErrBrokerSignerRequired", err)
+	}
+	if got := broker.claims[claim.ClaimID]; got != before {
+		t.Fatalf("claim after unsigned Complete = %+v, want unchanged %+v", got, before)
+	}
+}
+
+func TestBrokerUnknownCompleteRequiresSignerWithoutStateChange(t *testing.T) {
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	claim, err := broker.Claim(validClaimRequest())
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	before := broker.claims[claim.ClaimID]
+	broker.Signer = nil
+	request := CompleteRequest{
+		ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence,
+		RequestID: "operation-unknown", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID,
+		Settlement: "provider-returned-something-new",
+	}
+	if _, err := broker.Complete(request); !errors.Is(err, ErrBrokerSignerRequired) {
+		t.Fatalf("unknown Complete error = %v, want ErrBrokerSignerRequired", err)
+	}
+	if got := broker.claims[claim.ClaimID]; got != before {
+		t.Fatalf("claim after unsigned unknown Complete = %+v, want unchanged %+v", got, before)
+	}
+}
+
+func TestBrokerReconcileRequiresSignerWithoutStateChange(t *testing.T) {
+	broker := &Broker{Signer: &brokerTestSigner{}, Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	claim, err := broker.Claim(validClaimRequest())
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	unknown := CompleteRequest{
+		ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence,
+		RequestID: "operation-reconcile", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID,
+		Settlement: "provider-returned-something-new",
+	}
+	if _, err := broker.Complete(unknown); !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("unknown Complete: %v", err)
+	}
+	before := broker.claims[claim.ClaimID]
+	broker.Signer = nil
+	if _, err := broker.Reconcile(validReconcileRequest(claim, unknown.RequestID, claim.Scope.DesiredRef, SettlementSettled)); !errors.Is(err, ErrBrokerSignerRequired) {
+		t.Fatalf("Reconcile error = %v, want ErrBrokerSignerRequired", err)
+	}
+	if got := broker.claims[claim.ClaimID]; got != before {
+		t.Fatalf("claim after unsigned Reconcile = %+v, want unchanged %+v", got, before)
 	}
 }

@@ -11,16 +11,21 @@ import (
 )
 
 type bindingReadbackResolver struct {
-	role   BindingReadback
-	policy BindingReadback
-	err    error
+	role        BindingReadback
+	policy      BindingReadback
+	categoryRef string
+	category    BindingReadback
+	err         error
 }
 
 func (r bindingReadbackResolver) ReadRoleBinding(string) (BindingReadback, error) {
 	return r.role, r.err
 }
 
-func (r bindingReadbackResolver) ReadPolicyBinding(string) (BindingReadback, error) {
+func (r bindingReadbackResolver) ReadPolicyBinding(ref string) (BindingReadback, error) {
+	if r.categoryRef != "" && ref == r.categoryRef {
+		return r.category, r.err
+	}
 	return r.policy, r.err
 }
 
@@ -64,6 +69,9 @@ func TestWriteCanonicalV2CreateOnlyRoundTripsExplicitBooleansAndIntegers(t *test
 	}
 	if got.SchemaVersion != CurrentSchemaVersion || got.RoleBinding != cfg.RoleBinding {
 		t.Fatalf("identity = %#v, want %#v", got.RoleBinding, cfg.RoleBinding)
+	}
+	if len(got.CategoryPolicies) != 1 || got.CategoryPolicies[0].BindingRef != cfg.CategoryPolicies[0].BindingRef {
+		t.Fatalf("category policy binding ref = %#v, want %#v", got.CategoryPolicies, cfg.CategoryPolicies)
 	}
 	job := got.Jobs[0]
 	if job.Required || job.CategoryPolicyVersion != 3 || job.Destinations[0].Required || job.Destinations[0].MinCompleteRestoreSets != 7 {
@@ -125,8 +133,10 @@ func TestValidateForExecutionWithBindingsRejectsFreshRoleOrPolicyDrift(t *testin
 	cfg := validV2Config(t)
 	cfg.RoleBinding = testRoleBinding(t)
 	resolver := bindingReadbackResolver{
-		role:   BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: "sha256:" + strings.Repeat("f", 64)},
-		policy: BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		role:        BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: "sha256:" + strings.Repeat("f", 64)},
+		policy:      BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		categoryRef: cfg.CategoryPolicies[0].BindingRef,
+		category:    BindingReadback{Ref: cfg.CategoryPolicies[0].BindingRef, Digest: cfg.CategoryPolicies[0].Digest},
 	}
 	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err == nil || !strings.Contains(err.Error(), "role binding") {
 		t.Fatalf("role drift error = %v, want role binding drift", err)
@@ -135,6 +145,67 @@ func TestValidateForExecutionWithBindingsRejectsFreshRoleOrPolicyDrift(t *testin
 	resolver.policy = BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: "sha256:" + strings.Repeat("a", 64)}
 	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err == nil || !strings.Contains(err.Error(), "policy binding") {
 		t.Fatalf("policy drift error = %v, want policy binding drift", err)
+	}
+}
+
+func TestValidateForExecutionWithBindingsAcceptsFreshCategoryPolicyReadback(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RoleBinding = testRoleBinding(t)
+	categoryRef, categoryDigest := bindingFile(t, "category.json", `{"category":"home"}`)
+	cfg.CategoryPolicies[0].BindingRef = categoryRef
+	cfg.CategoryPolicies[0].Digest = categoryDigest
+	cfg.Jobs[0].CategoryPolicyDigest = categoryDigest
+	resolver := FileBindingResolver{}
+	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err != nil {
+		t.Fatalf("fresh category policy readback: %v", err)
+	}
+}
+
+func TestValidateForExecutionWithBindingsRejectsCategoryPolicyFileDrift(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RoleBinding = testRoleBinding(t)
+	categoryRef, categoryDigest := bindingFile(t, "category.json", `{"category":"home"}`)
+	cfg.CategoryPolicies[0].BindingRef = categoryRef
+	cfg.CategoryPolicies[0].Digest = categoryDigest
+	cfg.Jobs[0].CategoryPolicyDigest = categoryDigest
+	resolver := FileBindingResolver{}
+	if err := os.WriteFile(strings.TrimPrefix(categoryRef, "file:"), []byte(`{"category":"changed"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err == nil || !strings.Contains(err.Error(), "category policy binding") {
+		t.Fatalf("category file drift error = %v, want category policy binding drift", err)
+	}
+}
+
+func TestValidateForExecutionWithBindingsRejectsCategoryPolicyWrongReadbackRef(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RoleBinding = testRoleBinding(t)
+	resolver := bindingReadbackResolver{
+		role:        BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: cfg.RoleBinding.RoleDigest},
+		policy:      BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		categoryRef: cfg.CategoryPolicies[0].BindingRef,
+		category:    BindingReadback{Ref: "policy:wrong", Digest: cfg.CategoryPolicies[0].Digest},
+	}
+	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err == nil || !strings.Contains(err.Error(), "category policy binding") {
+		t.Fatalf("category wrong-ref error = %v, want category policy binding drift", err)
+	}
+}
+
+func TestValidateForExecutionWithBindingsRejectsSharedCategoryPolicyRefDigestConflict(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RoleBinding = testRoleBinding(t)
+	duplicate := cfg.CategoryPolicies[0]
+	duplicate.ID = "other-policy"
+	duplicate.Digest = "sha256:" + strings.Repeat("f", 64)
+	cfg.CategoryPolicies = append(cfg.CategoryPolicies, duplicate)
+	resolver := bindingReadbackResolver{
+		role:        BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: cfg.RoleBinding.RoleDigest},
+		policy:      BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+		categoryRef: cfg.CategoryPolicies[0].BindingRef,
+		category:    BindingReadback{Ref: cfg.CategoryPolicies[0].BindingRef, Digest: cfg.CategoryPolicies[0].Digest},
+	}
+	if err := cfg.ValidateForExecutionWithBindings(resolver, resolver); err == nil || !strings.Contains(err.Error(), "inconsistent") {
+		t.Fatalf("shared category policy ref error = %v, want inconsistent digest rejection", err)
 	}
 }
 

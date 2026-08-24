@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/restore"
@@ -23,6 +24,34 @@ func (r cliArtifactResolver) Resolve(reference artifactcrypto.KeyReference) ([]b
 		return nil, os.ErrNotExist
 	}
 	return append([]byte(nil), key...), nil
+}
+
+type cliStagingVerifier struct {
+	calls  int
+	mutate func(restore.StagingEvidence, int) restore.StagingEvidence
+}
+
+func (v *cliStagingVerifier) Verify(_ string, identity restore.RootIdentity) (restore.StagingEvidence, error) {
+	v.calls++
+	evidence := restore.StagingEvidence{
+		RootIdentity:       identity,
+		ProofDigest:        cliDigest(identity.Path + "|staging-proof"),
+		ProofID:            "proof-1",
+		VerifiedAt:         time.Unix(1700000000, 0).UTC(),
+		EncryptedAtRest:    true,
+		OwnerOnly:          true,
+		ExcludedFromBackup: true,
+		NonInheritedACL:    true,
+	}
+	if v.mutate != nil {
+		evidence = v.mutate(evidence, v.calls)
+	}
+	return evidence, nil
+}
+
+func cliDigest(value string) string {
+	sum := sha256.Sum256([]byte(value))
+	return "sha256:" + hex.EncodeToString(sum[:])
 }
 
 func cliMetadata() artifactcrypto.Metadata {
@@ -51,10 +80,13 @@ func cliSealedEntry(t *testing.T, relative string, payload []byte, metadata arti
 	}
 }
 
-func restoreTestCmd(resolver artifactcrypto.Resolver) *cobra.Command {
-	return restoreCmdWithResolver(resolver)
+func restoreTestCmd(deps RuntimeDependencies) *cobra.Command {
+	return restoreCmdWithDependencies(deps)
 }
 
+func restoreDeps(resolver artifactcrypto.Resolver) RuntimeDependencies {
+	return RuntimeDependencies{ArtifactResolver: resolver, StagingVerifier: &cliStagingVerifier{}}
+}
 func TestRestorePlanJSONValidatesCanonicalManifest(t *testing.T) {
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
 	if err := os.WriteFile(manifest, []byte(`[{"relative_path":"category/state.txt"}]`), 0o600); err != nil {
@@ -96,7 +128,7 @@ func TestRestoreFetchJournalsRecoveryIntentBeforeCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := restoreTestCmd(resolver)
+	cmd := restoreTestCmd(restoreDeps(resolver))
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
@@ -112,6 +144,31 @@ func TestRestoreFetchJournalsRecoveryIntentBeforeCreate(t *testing.T) {
 		records[0].TransactionID == "" || records[0].TransactionID != records[1].TransactionID ||
 		records[0].PlaintextDigest != entry.PlaintextDigest || records[0].CiphertextDigest != entry.CiphertextDigest {
 		t.Fatalf("journal records=%#v, want one transaction with staged then created markers", records)
+	}
+}
+
+func TestRootRestoreUsesInjectedDependencies(t *testing.T) {
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := t.TempDir()
+	cmd := newRootCmdWithDependencies(restoreDeps(resolver))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"restore", "fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("root restore fetch: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(rootPath, "state.txt")); err != nil || string(got) != "restore-data" {
+		t.Fatalf("root restore payload = %q, err=%v", got, err)
 	}
 }
 
@@ -148,7 +205,7 @@ func TestRestoreFetchFailureDoesNotRollbackPriorSuccessfulTransaction(t *testing
 		t.Fatal(err)
 	}
 
-	cmd := restoreTestCmd(resolver)
+	cmd := restoreTestCmd(restoreDeps(resolver))
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
@@ -194,6 +251,68 @@ func TestRestoreFetchExecuteRequiresArtifactResolver(t *testing.T) {
 	}
 }
 
+func TestRestoreFetchExecuteRequiresStagingVerifierBeforeJournal(t *testing.T) {
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := t.TempDir()
+	cmd := restoreTestCmd(RuntimeDependencies{ArtifactResolver: resolver})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "staging verifier") {
+		t.Fatalf("restore fetch without staging verifier error = %v", err)
+	}
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("restore root residue after missing verifier: %#v", entries)
+	}
+}
+
+func TestRestoreFetchEvidenceFailureLeavesNoExecutionResidue(t *testing.T) {
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := t.TempDir()
+	verifier := &cliStagingVerifier{mutate: func(e restore.StagingEvidence, _ int) restore.StagingEvidence {
+		e.EncryptedAtRest = false
+		return e
+	}}
+	cmd := restoreTestCmd(RuntimeDependencies{ArtifactResolver: resolver, StagingVerifier: verifier})
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "encrypted") {
+		t.Fatalf("restore fetch evidence failure = %v", err)
+	}
+	entries, err := os.ReadDir(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("restore root residue after evidence failure: %#v", entries)
+	}
+}
+
 func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
 	payload := []byte("restore-data")
 	metadata := cliMetadata()
@@ -208,7 +327,7 @@ func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := restoreTestCmd(resolver)
+	cmd := restoreTestCmd(restoreDeps(resolver))
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"apply", "--root", rootPath, "--manifest", manifest, "--transaction", "tx-cli"})

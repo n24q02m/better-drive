@@ -208,9 +208,12 @@ func (r sanitizedArtifactResolver) Resolve(reference artifactcrypto.KeyReference
 	return key, nil
 }
 
-func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver) error {
+func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver, verifier StagingVerifier) error {
 	if resolver == nil {
 		return fmt.Errorf("artifact resolver is required for restore execution")
+	}
+	if verifier == nil {
+		return fmt.Errorf("staging verifier is required for restore execution")
 	}
 	if err := validateExecutableEntry(entry); err != nil {
 		return err
@@ -222,12 +225,22 @@ func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver) error {
 	if clean != entry.RelativePath {
 		return fmt.Errorf("entry path is not canonical")
 	}
-	if plan.RootIdentity.Path != "" {
-		if err := plan.RootIdentity.Validate(plan.Root); err != nil {
-			return err
-		}
-	} else if err := ensureSafeRoot(plan.Root); err != nil {
+	if plan.RootIdentity.Path == "" || plan.RootIdentity.Token == "" {
+		return fmt.Errorf("restore root identity is required for restore execution")
+	}
+	evidence, err := VerifyStagingEvidence(plan.Root, plan.RootIdentity, verifier)
+	if err != nil {
 		return err
+	}
+	verifyStableEvidence := func() error {
+		next, verifyErr := VerifyStagingEvidence(plan.Root, plan.RootIdentity, verifier)
+		if verifyErr != nil {
+			return verifyErr
+		}
+		if !evidence.Equivalent(next) {
+			return fmt.Errorf("staging evidence drifted")
+		}
+		return nil
 	}
 	sourceInfo, err := os.Lstat(entry.SourcePath)
 	if err != nil {
@@ -255,20 +268,18 @@ func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver) error {
 	if currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, currentInfo) {
 		return fmt.Errorf("source must be a regular non-symlink file")
 	}
-	parent, err := safeParent(plan.Root, clean)
-	if err != nil {
-		return err
-	}
-	if plan.RootIdentity.Path != "" {
-		if err := plan.RootIdentity.Validate(plan.Root); err != nil {
-			return err
-		}
-	}
 	destination := filepath.Join(plan.Root, filepath.FromSlash(clean))
 	if _, err := os.Lstat(destination); err == nil {
 		return fmt.Errorf("restore destination %q already exists", clean)
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect restore destination: %w", err)
+	}
+	if err := verifyStableEvidence(); err != nil {
+		return err
+	}
+	parent, err := safeParent(plan.Root, clean)
+	if err != nil {
+		return err
 	}
 	tmp, err := os.CreateTemp(parent, ".restore-*.tmp")
 	if err != nil {
@@ -310,23 +321,19 @@ func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("close restore file: %w", err)
 	}
-	if plan.RootIdentity.Path != "" {
-		if err := plan.RootIdentity.Validate(plan.Root); err != nil {
-			return err
-		}
-	}
 	if _, exists, err := safeExistingParent(plan.Root, clean); err != nil {
 		return err
 	} else if !exists {
 		return fmt.Errorf("restore ancestor disappeared")
 	}
+	if err := verifyStableEvidence(); err != nil {
+		return err
+	}
 	if err := commitNoReplace(tmpPath, destination); err != nil {
 		return fmt.Errorf("commit restore file without overwrite: %w", err)
 	}
-	if plan.RootIdentity.Path != "" {
-		if err := plan.RootIdentity.Validate(plan.Root); err != nil {
-			return fmt.Errorf("restore root changed after commit: %w", err)
-		}
+	if err := plan.RootIdentity.Validate(plan.Root); err != nil {
+		return fmt.Errorf("restore root changed after commit: %w", err)
 	}
 	return nil
 }

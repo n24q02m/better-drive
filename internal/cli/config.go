@@ -49,6 +49,7 @@ func configMigrateCmd() *cobra.Command {
 	var categoryPolicyID string
 	var categoryPolicyVersion int
 	var categoryPolicyDigest string
+	var categoryPolicyBindingRef string
 	var categoryPolicyRoot string
 	var categoryPolicyDeny []string
 	var categoryPolicyMaxBytes int64
@@ -93,7 +94,7 @@ func configMigrateCmd() *cobra.Command {
 					},
 					CategoryPolicy: config.CategoryPolicy{
 						ID: categoryPolicyID, Version: categoryPolicyVersion, Digest: categoryPolicyDigest,
-						AllowlistedRoot: categoryPolicyRoot, MandatoryDenylist: categoryPolicyDeny,
+						BindingRef: categoryPolicyBindingRef, AllowlistedRoot: categoryPolicyRoot, MandatoryDenylist: categoryPolicyDeny,
 						SizeGuard:          config.CategorySizeGuard{MaxBytes: categoryPolicyMaxBytes},
 						RestoreExpectation: categoryPolicyRestoreExpectation,
 					},
@@ -136,10 +137,11 @@ func configMigrateCmd() *cobra.Command {
 	c.Flags().StringVar(&runtimeConfigFileID, "runtime-config-file-id", "", "explicit rclone config file identity")
 	c.Flags().StringVar(&runtimeConfigDigest, "runtime-config-digest", "", "explicit rclone config digest")
 	c.Flags().StringArrayVar(&runtimeAllowedRemotes, "runtime-allowed-remote", nil, "explicit allowed rclone remote (repeatable)")
-	c.Flags().StringArrayVar(&runtimeAllowedBackends, "runtime-allowed-backend", nil, "explicit allowed destination backend (repeatable)")
+	c.Flags().StringArrayVar(&runtimeAllowedBackends, "runtime-allowed-backend", nil, "explicit allowed rclone backend (repeatable)")
 	c.Flags().StringVar(&categoryPolicyID, "category-policy-id", "", "explicit category policy identity")
 	c.Flags().IntVar(&categoryPolicyVersion, "category-policy-version", 0, "explicit category policy version")
 	c.Flags().StringVar(&categoryPolicyDigest, "category-policy-digest", "", "explicit category policy digest")
+	c.Flags().StringVar(&categoryPolicyBindingRef, "category-policy-binding-ref", "", "explicit category policy binding reference")
 	c.Flags().StringVar(&categoryPolicyRoot, "category-policy-root", "", "explicit category policy allowlisted root")
 	c.Flags().StringArrayVar(&categoryPolicyDeny, "category-policy-deny", nil, "explicit mandatory category-policy denylist entry (repeatable)")
 	c.Flags().Int64Var(&categoryPolicyMaxBytes, "category-policy-max-bytes", 0, "explicit category policy maximum source bytes")
