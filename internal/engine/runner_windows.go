@@ -88,11 +88,7 @@ func resolveRcloneExecutable(bin string) string {
 	if err != nil {
 		return bin
 	}
-	// Iterate through the shim file line-by-line using strings.Cut to avoid slice allocations and GC overhead caused by strings.Split.
-	remaining := string(data)
-	for len(remaining) > 0 {
-		line, rest, _ := strings.Cut(remaining, "\n")
-		remaining = rest
+	for _, line := range strings.Split(string(data), "\n") {
 		key, value, found := strings.Cut(line, "=")
 		if !found || strings.TrimSpace(strings.TrimPrefix(key, "\ufeff")) != "path" {
 			continue
