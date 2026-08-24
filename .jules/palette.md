@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2024-08-24 - Disable Operational Actions on Error State
+**Learning:** When an application is in an unrecoverable error state that requires manual CLI intervention (like NeedsResync), normal operational UI actions (like Pause/Resume) become irrelevant. Leaving them enabled causes user confusion as they appear actionable but won't resolve the underlying issue.
+**Action:** Explicitly disable normal operational UI elements when the system is in a broken/error state requiring manual intervention, and update their tooltips to point to the required resolution step.

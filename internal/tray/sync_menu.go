@@ -2,6 +2,16 @@ package tray
 
 import "github.com/n24q02m/better-drive/internal/syncloop"
 
+func pauseMenuState(aggregate AggregateState) (enabled bool, title, tooltip string) {
+	if aggregate.NeedsResync {
+		return false, "Pause", "Run better-drive sync --resync to rebuild the bisync baseline"
+	}
+	if aggregate.State == syncloop.StatePaused {
+		return true, "Resume", "Resume scheduled syncs for all pairs"
+	}
+	return true, "Pause", "Pause scheduled syncs for all pairs"
+}
+
 func syncMenuState(aggregate AggregateState) (enabled bool, tooltip string) {
 	switch {
 	case aggregate.State == syncloop.StateSyncing:
