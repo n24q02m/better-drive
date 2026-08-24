@@ -66,6 +66,53 @@ interval = "30s"
 	}
 }
 
+func TestConfigMigrateCreateOnlyRequiresCompleteExplicitBindings(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.toml")
+	if err := os.WriteFile(path, []byte(`[[pair]]
+local = "C:/source"
+remote = "gdrive:Backups/source"
+interval = "30s"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", path)
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"config", "migrate", "--create-only", "--output", filepath.Join(t.TempDir(), "migrated.toml")})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "complete") {
+		t.Fatalf("create-only without bindings error = %v, want complete-binding rejection", err)
+	}
+}
+
+func TestConfigMigrateCreateOnlyBlocksLegacyWithoutRuntimeRegistry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.toml")
+	outputPath := filepath.Join(t.TempDir(), "migrated.toml")
+	if err := os.WriteFile(path, []byte(`[[pair]]
+local = "C:/source"
+remote = "gdrive:Backups/source"
+interval = "30s"
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", path)
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{
+		"config", "migrate", "--create-only", "--output", outputPath,
+		"--account-id", "account-1", "--root-id", "root-1",
+		"--role-ref", "profile:home", "--role-digest", "sha256:" + strings.Repeat("d", 64),
+		"--policy-ref", "policy:home", "--policy-digest", "sha256:" + strings.Repeat("e", 64),
+	})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "category policy registry") {
+		t.Fatalf("create-only migration error = %v, want category-policy blocker", err)
+	}
+	if _, err := os.Stat(outputPath); !os.IsNotExist(err) {
+		t.Fatalf("blocked migration created output: stat error=%v", err)
+	}
+}
+
 func TestConfigMigrateRequiresDryRunBeforeAnyWritePath(t *testing.T) {
 	cmd := newRootCmd()
 	cmd.SetOut(&bytes.Buffer{})

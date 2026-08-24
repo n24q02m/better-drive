@@ -23,52 +23,128 @@ func runtimeDigestForTest(t *testing.T, path string) string {
 
 func enrolledRuntimeForFiles(t *testing.T, exe, cfg string) config.RcloneRuntime {
 	t.Helper()
+	enrollment, err := enrollRuntimeFiles(exe, cfg)
+	if err != nil {
+		t.Fatalf("enrollRuntimeFiles: %v", err)
+	}
 	return config.RcloneRuntime{
-		Executable: exe, ExecutableFileID: "exe-id", ExecutableDigest: runtimeDigestForTest(t, exe),
-		Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
-		Config: cfg, ConfigFileID: "cfg-id", ConfigDigest: runtimeDigestForTest(t, cfg),
+		Executable: exe, ExecutableFileID: enrollment.executableFileID, ExecutableDigest: runtimeDigestForTest(t, exe),
+		Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: enrollment.acl,
+		Config: cfg, ConfigFileID: enrollment.configFileID, ConfigDigest: runtimeDigestForTest(t, cfg),
 		AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 	}
 }
 
-func TestVerifyRuntimeFilesRejectsExecutableReplacement(t *testing.T) {
-	dir := t.TempDir()
-	exe := filepath.Join(dir, "rclone.exe")
-	cfg := filepath.Join(dir, "rclone.conf")
-	if err := os.WriteFile(exe, []byte("original executable"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	runtime := enrolledRuntimeForFiles(t, exe, cfg)
-	if err := verifyRuntimeFiles(runtime); err != nil {
-		t.Fatalf("verifyRuntimeFiles initial: %v", err)
-	}
-	if err := os.WriteFile(exe, []byte("replacement executable"), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := verifyRuntimeFiles(runtime); err == nil || !strings.Contains(err.Error(), "executable_digest") {
-		t.Fatalf("verifyRuntimeFiles replacement error = %v, want digest mismatch", err)
-	}
-}
-
-func TestVerifyRuntimeFilesRejectsNonRegularConfig(t *testing.T) {
+func TestVerifyRuntimeFilesAcceptsComputedIdentityAndACL(t *testing.T) {
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "rclone.exe")
 	cfg := filepath.Join(dir, "rclone.conf")
 	if err := os.WriteFile(exe, []byte("executable"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(cfg, 0o700); err != nil {
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	runtime := config.RcloneRuntime{
-		Executable: exe, ExecutableFileID: "exe-id", ExecutableDigest: runtimeDigestForTest(t, exe),
-		Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
-		Config: cfg, ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg", AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
+	if err := verifyRuntimeFiles(enrolledRuntimeForFiles(t, exe, cfg)); err != nil {
+		t.Fatalf("verifyRuntimeFiles: %v", err)
 	}
-	if err := verifyRuntimeFiles(runtime); err == nil || !strings.Contains(err.Error(), "config") {
-		t.Fatalf("verifyRuntimeFiles directory error = %v, want config regular-file rejection", err)
+}
+
+func TestVerifyRuntimeFilesRejectsSameContentReplacementIdentityDrift(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "rclone.exe")
+	cfg := filepath.Join(dir, "rclone.conf")
+	original := []byte("same executable bytes")
+	if err := os.WriteFile(exe, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := enrolledRuntimeForFiles(t, exe, cfg)
+	replacement := exe + ".replacement"
+	if err := os.WriteFile(replacement, original, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(replacement, exe); err != nil {
+		t.Fatal(err)
+	}
+	if err := verifyRuntimeFiles(runtime); err == nil || !strings.Contains(err.Error(), "executable_file_id") {
+		t.Fatalf("verifyRuntimeFiles replacement error = %v, want executable identity mismatch", err)
+	}
+}
+
+func TestVerifyRuntimeFilesRejectsACLOrModeDrift(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "rclone.exe")
+	cfg := filepath.Join(dir, "rclone.conf")
+	if err := os.WriteFile(exe, []byte("executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := enrolledRuntimeForFiles(t, exe, cfg)
+	runtime.ACL = runtime.ACL + "-drift"
+	if err := verifyRuntimeFiles(runtime); err == nil || !strings.Contains(err.Error(), "acl") {
+		t.Fatalf("verifyRuntimeFiles ACL drift error = %v, want ACL mismatch", err)
+	}
+}
+
+func TestVerifyRuntimeFilesRejectsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "rclone.exe")
+	cfg := filepath.Join(dir, "rclone.conf")
+	target := filepath.Join(dir, "target.exe")
+	if err := os.WriteFile(target, []byte("executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, exe); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+	runtime := config.RcloneRuntime{
+		Executable: exe, ExecutableFileID: "unused", ExecutableDigest: runtimeDigestForTest(t, target),
+		Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: runtimeACLBinding("unused", "unused"),
+		Config: cfg, ConfigFileID: "unused", ConfigDigest: runtimeDigestForTest(t, cfg),
+		AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
+	}
+	if err := verifyRuntimeFiles(runtime); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("verifyRuntimeFiles symlink error = %v, want symlink refusal", err)
+	}
+}
+
+func TestOpenRuntimeFilesReleaseIsIdempotent(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "rclone.exe")
+	cfg := filepath.Join(dir, "rclone.conf")
+	if err := os.WriteFile(exe, []byte("executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	guard, err := openRuntimeFiles(enrolledRuntimeForFiles(t, exe, cfg))
+	if err != nil {
+		t.Fatalf("openRuntimeFiles: %v", err)
+	}
+	if guard == nil || guard.executable == nil || guard.config == nil {
+		t.Fatal("openRuntimeFiles returned incomplete guard")
+	}
+	if guard.executable.file == nil || guard.config.file == nil {
+		t.Fatal("guard did not retain executable/config handles")
+	}
+	guard.release()
+	guard.release()
+	if _, err := guard.executable.file.Stat(); err == nil {
+		t.Fatal("executable handle remained open after release")
+	}
+	if _, err := guard.config.file.Stat(); err == nil {
+		t.Fatal("config handle remained open after release")
 	}
 }

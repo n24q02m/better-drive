@@ -139,3 +139,71 @@ func TestRestoreApplyRemainsOwnerGated(t *testing.T) {
 		t.Fatal("restore apply without owner gate was accepted")
 	}
 }
+
+func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
+	source := filepath.Join(t.TempDir(), "source.txt")
+	payload := []byte("restore-data")
+	if err := os.WriteFile(source, payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(payload)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{{
+		RelativePath: "category/state.txt", SourcePath: source,
+		SourceDigest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(payload)),
+		CiphertextDigest: "sha256:ciphertext",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rootPath := t.TempDir()
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"restore", "apply", "--root", rootPath, "--manifest", manifest, "--transaction", "tx-cli"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("restore apply: %v", err)
+	}
+	if got, err := os.ReadFile(filepath.Join(rootPath, "category", "state.txt")); err != nil || string(got) != string(payload) {
+		t.Fatalf("applied payload = %q, err=%v", got, err)
+	}
+	recoverCmd := newRootCmd()
+	recoverCmd.SetOut(&bytes.Buffer{})
+	recoverCmd.SetErr(&bytes.Buffer{})
+	recoverCmd.SetArgs([]string{"restore", "recover", "--root", rootPath, "--transaction", "tx-cli"})
+	if err := recoverCmd.Execute(); err != nil {
+		t.Fatalf("restore recover: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(rootPath, "category", "state.txt")); !os.IsNotExist(err) {
+		t.Fatalf("recover left destination: %v", err)
+	}
+}
+
+func TestRestoreApplyRejectsLiveReplaceAndIncompleteContract(t *testing.T) {
+	for _, args := range [][]string{
+		{"restore", "apply"},
+		{"restore", "apply", "--root", t.TempDir(), "--manifest", "missing.json"},
+		{"restore", "apply", "--root", t.TempDir(), "--manifest", "missing.json", "--transaction", "tx", "--replace"},
+	} {
+		cmd := newRootCmd()
+		cmd.SetOut(&bytes.Buffer{})
+		cmd.SetErr(&bytes.Buffer{})
+		cmd.SetArgs(args)
+		if err := cmd.Execute(); err == nil {
+			t.Fatalf("restore apply accepted unsafe args %v", args)
+		}
+	}
+}
+
+func TestRestoreRecoverRequiresExplicitTransaction(t *testing.T) {
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"restore", "recover", "--root", t.TempDir()})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "transaction") {
+		t.Fatalf("restore recover error = %v, want explicit transaction rejection", err)
+	}
+}

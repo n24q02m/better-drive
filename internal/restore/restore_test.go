@@ -119,3 +119,88 @@ func TestRecoverCreateOnlyRejectsSymlinkAncestor(t *testing.T) {
 		t.Fatalf("outside file was touched: %v", err)
 	}
 }
+
+func TestTransactionRoundTripAndScopedRead(t *testing.T) {
+	root := t.TempDir()
+	tx, err := BeginTransaction(root, "tx-round-trip")
+	if err != nil {
+		t.Fatalf("BeginTransaction: %v", err)
+	}
+	record := JournalRecord{
+		TransactionID: tx.ID, Entry: "state.txt", Action: "create",
+		Before: "absent", After: "staged", SourceDigest: digestBytes("restore-data"),
+		CiphertextDigest: "sha256:ciphertext",
+	}
+	if err := tx.Append(record); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	got, err := tx.Read()
+	if err != nil {
+		t.Fatalf("Read: %v", err)
+	}
+	if len(got) != 1 || got[0].TransactionID != tx.ID || got[0].RootIdentity == "" ||
+		got[0].CiphertextDigest != record.CiphertextDigest {
+		t.Fatalf("transaction records = %#v", got)
+	}
+}
+
+func TestRecoverTransactionOnlyRemovesRequestedTransaction(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "old.txt")
+	newPath := filepath.Join(root, "new.txt")
+	if err := os.WriteFile(oldPath, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(newPath, []byte("new"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldTx, err := BeginTransaction(root, "tx-old")
+	if err != nil {
+		t.Fatal(err)
+	}
+	newTx, err := BeginTransaction(root, "tx-new")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := oldTx.Append(JournalRecord{TransactionID: oldTx.ID, Entry: "old.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("old")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := newTx.Append(JournalRecord{TransactionID: newTx.ID, Entry: "new.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("new")}); err != nil {
+		t.Fatal(err)
+	}
+	if err := RecoverTransaction(root, newTx.ID); err != nil {
+		t.Fatalf("RecoverTransaction: %v", err)
+	}
+	if _, err := os.Lstat(newPath); !os.IsNotExist(err) {
+		t.Fatalf("new transaction path = %v, want removed", err)
+	}
+	if got, err := os.ReadFile(oldPath); err != nil || string(got) != "old" {
+		t.Fatalf("old transaction path = %q, err=%v; want preserved", got, err)
+	}
+}
+
+func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(t.TempDir(), "source.txt")
+	if err := os.WriteFile(source, []byte("restore-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := Entry{RelativePath: "state.txt", SourcePath: source, SourceDigest: digestBytes("restore-data"), Size: int64(len("restore-data"))}
+	plan, err := BuildPlan(root, []Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	replaced := root + "-replaced"
+	if err := os.Rename(root, replaced); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := StageFile(plan, entry); err == nil || !strings.Contains(err.Error(), "identity") {
+		t.Fatalf("StageFile root drift error = %v, want identity refusal", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {
+		t.Fatalf("root-drift destination exists: %v", err)
+	}
+}

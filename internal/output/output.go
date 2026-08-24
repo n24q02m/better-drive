@@ -3,11 +3,13 @@
 package output
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"io"
 	"time"
 
+	"github.com/n24q02m/better-drive/internal/runlog"
 	"github.com/spf13/cobra"
 )
 
@@ -15,6 +17,31 @@ const (
 	FormatTable = "table"
 	FormatJSON  = "json"
 )
+
+// SchedulerStatus exposes the live/persisted scheduler health and ownership
+// readback in the nested status JSON envelope.
+type SchedulerStatus struct {
+	Owner           string        `json:"owner"`
+	OwnerJobID      string        `json:"owner_job_id"`
+	Enabled         bool          `json:"enabled"`
+	LastTrigger     *time.Time    `json:"last_trigger,omitempty"`
+	NextTrigger     *time.Time    `json:"next_trigger,omitempty"`
+	ActiveInstance  string        `json:"active_instance"`
+	OverlapState    string        `json:"overlap_state"`
+	OverlapHealth   string        `json:"overlap_health"`
+	ObservedAt      time.Time     `json:"observed_at"`
+	FreshnessWindow time.Duration `json:"freshness_window"`
+	CatchUpGrace    time.Duration `json:"catch_up_grace"`
+	Health          string        `json:"health"`
+	Warnings        []string      `json:"warnings,omitempty"`
+}
+
+// StatusEnvelope combines the nested scheduler record with per-pair/job
+// evidence in one explicit machine-readable object.
+type StatusEnvelope struct {
+	Scheduler SchedulerStatus `json:"scheduler"`
+	Pairs     []PairStatus    `json:"pairs"`
+}
 
 // PairStatus is one destination of a normalized job, as reported by `status`.
 type PairStatus struct {
@@ -95,9 +122,16 @@ func Validate(format string) error {
 	}
 }
 
-// RenderJSON writes v as indented JSON followed by a newline.
+// RenderJSON writes v as indented JSON followed by a newline after redacting
+// credential-shaped values from the serialized payload.
 func RenderJSON(w io.Writer, v any) error {
-	enc := json.NewEncoder(w)
+	var buf bytes.Buffer
+	enc := json.NewEncoder(&buf)
 	enc.SetIndent("", "  ")
-	return enc.Encode(v)
+	if err := enc.Encode(v); err != nil {
+		return err
+	}
+	redacted := runlog.Redact(buf.String())
+	_, err := io.WriteString(w, redacted)
+	return err
 }

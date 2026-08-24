@@ -1,8 +1,12 @@
 package scheduler
 
 import (
+	"context"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/n24q02m/better-drive/internal/state"
 )
 
 func testDefinition() Definition {
@@ -110,5 +114,76 @@ func TestValidateOwnerRejectsUnknownOwnerUnlessReplace(t *testing.T) {
 	}
 	if err := ValidateOwner(OwnerRecord{Owner: "other", JobID: "other-job"}, testDefinition(), true); err != nil {
 		t.Fatalf("--replace should allow explicit owner replacement: %v", err)
+	}
+}
+
+func TestMemoryAdapterRoundTripAndOwnerMismatch(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	adapter := NewMemoryAdapter(PlatformLinux, func() time.Time { return now })
+	ctx := context.Background()
+
+	// Initial install
+	def := testDefinition()
+	if err := adapter.Install(ctx, def, false); err != nil {
+		t.Fatalf("initial install: %v", err)
+	}
+	readback, err := adapter.Readback(ctx, "job-1")
+	if err != nil {
+		t.Fatalf("readback: %v", err)
+	}
+	if !readback.Installed || readback.Owner.Owner != "better-drive" || readback.Owner.Generation != 1 || readback.Health != state.HealthHealthy {
+		t.Fatalf("readback = %#v, want installed healthy generation 1", readback)
+	}
+
+	// Reject overwrite from different owner without replace
+	other := testDefinition()
+	other.Owner = "foreign-agent"
+	if err := adapter.Install(ctx, other, false); err == nil || !strings.Contains(err.Error(), "differs") {
+		t.Fatalf("install with foreign owner accepted: %v", err)
+	}
+
+	// Allow replace
+	if err := adapter.Install(ctx, other, true); err != nil {
+		t.Fatalf("replace install: %v", err)
+	}
+	readback, err = adapter.Readback(ctx, "job-1")
+	if err != nil || readback.Owner.Owner != "foreign-agent" || readback.Owner.Generation != 2 {
+		t.Fatalf("after replace readback = %#v", readback)
+	}
+}
+
+func TestMemoryAdapterEnforcesSingleActiveAndDetectsOverlap(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	adapter := NewMemoryAdapter(PlatformWindows, func() time.Time { return now })
+	ctx := context.Background()
+
+	def := testDefinition()
+	if err := adapter.Install(ctx, def, false); err != nil {
+		t.Fatal(err)
+	}
+
+	adapter.SetActiveInstance("job-1", "inst-1", state.OverlapSingleActive)
+	readback, err := adapter.Readback(ctx, "job-1")
+	if err != nil || readback.ActiveInstance != "inst-1" || readback.Health != state.HealthHealthy {
+		t.Fatalf("single active readback = %#v", readback)
+	}
+
+	// Overlap state detected
+	adapter.SetActiveInstance("job-1", "inst-2", state.OverlapMultipleActive)
+	readback, err = adapter.Readback(ctx, "job-1")
+	if err != nil || readback.Health != state.HealthOverlap {
+		t.Fatalf("overlap readback = %#v, want overlap health", readback)
+	}
+
+	// Removal refuses active instance unless forced
+	if err := adapter.Remove(ctx, "job-1", false); err == nil {
+		t.Fatal("remove without force accepted active job")
+	}
+	if err := adapter.Remove(ctx, "job-1", true); err != nil {
+		t.Fatalf("forced remove failed: %v", err)
+	}
+	readback, err = adapter.Readback(ctx, "job-1")
+	if err != nil || readback.Installed || readback.Health != state.HealthMissing {
+		t.Fatalf("after remove readback = %#v, want missing", readback)
 	}
 }

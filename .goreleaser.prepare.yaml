@@ -6,6 +6,7 @@ builds:
     binary: better-drive
     env:
       - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - windows
       - linux
@@ -17,7 +18,7 @@ builds:
       - -s -w
       - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
       - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-      - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
     overrides:
       - goos: windows
         goarch: amd64
@@ -26,7 +27,7 @@ builds:
           - -H windowsgui
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       - goos: windows
         goarch: arm64
         ldflags:
@@ -34,7 +35,7 @@ builds:
           - -H windowsgui
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       - goos: darwin
         goarch: arm64
         env:
@@ -43,7 +44,7 @@ builds:
           - -s -w
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       - goos: darwin
         goarch: amd64
         env:
@@ -53,7 +54,7 @@ builds:
           - -s -w
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
 
 archives:
   - id: default

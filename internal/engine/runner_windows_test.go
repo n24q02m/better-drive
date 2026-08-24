@@ -85,3 +85,28 @@ func TestNewForegroundDoesNotResolveCWDShimAfterLookPathErrDot(t *testing.T) {
 		t.Fatalf("NewForeground().bin = %q after LookPath ErrDot, want bare fallback without reading cwd shim", got)
 	}
 }
+
+func TestOpenRuntimeFilesHoldsReplacementUntilRelease(t *testing.T) {
+	dir := t.TempDir()
+	exe := filepath.Join(dir, "rclone.exe")
+	cfg := filepath.Join(dir, "rclone.conf")
+	if err := os.WriteFile(exe, []byte("executable"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg, []byte("[gdrive]\ntype = drive\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := enrolledRuntimeForFiles(t, exe, cfg)
+	guard, err := openRuntimeFiles(runtime)
+	if err != nil {
+		t.Fatalf("openRuntimeFiles: %v", err)
+	}
+	if err := os.Remove(exe); err == nil {
+		guard.release()
+		t.Fatal("executable replacement succeeded while runtime guard held its handle")
+	}
+	guard.release()
+	if err := os.Remove(exe); err != nil {
+		t.Fatalf("executable removal after guard release: %v", err)
+	}
+}

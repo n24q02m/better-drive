@@ -18,9 +18,61 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
+	"github.com/n24q02m/better-drive/internal/runlog"
 	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/spf13/cobra"
 )
+
+type cliBindingResolver struct {
+	role   config.BindingReadback
+	policy config.BindingReadback
+}
+
+func (r cliBindingResolver) ReadRoleBinding(string) (config.BindingReadback, error) {
+	return r.role, nil
+}
+
+func (r cliBindingResolver) ReadPolicyBinding(string) (config.BindingReadback, error) {
+	return r.policy, nil
+}
+
+func TestValidateExecutionConfigWithBindingsRejectsFreshBindingDrift(t *testing.T) {
+	source := t.TempDir()
+	roleDigest := "sha256:" + strings.Repeat("a", 64)
+	policyDigest := "sha256:" + strings.Repeat("b", 64)
+	cfg := &config.Config{
+		SchemaVersion: config.CurrentSchemaVersion,
+		RoleBinding:   config.RoleBinding{RoleRef: "profile:home", RoleDigest: roleDigest, PolicyRef: "policy:home", PolicyDigest: policyDigest},
+		RcloneRuntime: config.RcloneRuntime{
+			Executable: filepath.Join(t.TempDir(), "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:" + strings.Repeat("c", 64),
+			Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
+			Config: filepath.Join(t.TempDir(), "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:" + strings.Repeat("d", 64),
+			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
+		},
+		CategoryPolicies: []config.CategoryPolicy{{
+			ID: "policy", Version: 1, Digest: policyDigest, AllowlistedRoot: source,
+			MandatoryDenylist: []string{"node_modules/"}, SizeGuard: config.CategorySizeGuard{MaxBytes: 1 << 20},
+			RestoreExpectation: "empty-or-exact-hash",
+		}},
+		Jobs: []config.Job{{
+			ID: "job", Source: source, Direction: "push", Mode: "copy", Required: true,
+			CategoryPolicyID: "policy", CategoryPolicyVersion: 1, CategoryPolicyDigest: policyDigest,
+			SymlinkPolicy: "preserve", Schedule: "30s", Interval: 30 * time.Second, Exclude: []string{"node_modules/"},
+			Destinations: []config.Destination{{Backend: "drive", Path: "Backups/job", AccountID: "account", RootID: "root", CredentialRef: "rclone:gdrive", Required: true, MinCompleteRestoreSets: 2, DeletePolicy: "none"}},
+		}},
+	}
+	resolver := cliBindingResolver{
+		role:   config.BindingReadback{Ref: cfg.RoleBinding.RoleRef, Digest: cfg.RoleBinding.RoleDigest},
+		policy: config.BindingReadback{Ref: cfg.RoleBinding.PolicyRef, Digest: cfg.RoleBinding.PolicyDigest},
+	}
+	if err := validateExecutionConfigWithBindings(cfg, resolver, resolver); err != nil {
+		t.Fatalf("validateExecutionConfigWithBindings: %v", err)
+	}
+	resolver.role.Digest = "sha256:" + strings.Repeat("e", 64)
+	if err := validateExecutionConfigWithBindings(cfg, resolver, resolver); err == nil || !strings.Contains(err.Error(), "role binding") {
+		t.Fatalf("drift error = %v, want role binding rejection", err)
+	}
+}
 
 // TestRootCmd_HasCompletionCommand verifies the root command registers the
 // standard cobra shell-completion subcommand (`completion bash|zsh|fish|
@@ -221,8 +273,8 @@ func TestStatusCmd_TableFormatUnchanged(t *testing.T) {
 	}
 }
 
-// TestStatusCmd_JSONFormat verifies --format json emits a JSON array of
-// output.PairStatus decodable by a machine consumer.
+// TestStatusCmd_JSONFormat verifies --format json emits a nested StatusEnvelope
+// with scheduler and pairs decodable by a machine consumer.
 func TestStatusCmd_JSONFormat(t *testing.T) {
 	statusFixtureConfig(t)
 
@@ -234,15 +286,18 @@ func TestStatusCmd_JSONFormat(t *testing.T) {
 		t.Fatalf("status --format json: %v", err)
 	}
 
-	var got []output.PairStatus
+	var got output.StatusEnvelope
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("Unmarshal: %v; got:\n%s", err, out.String())
 	}
-	if len(got) == 0 {
+	if len(got.Pairs) == 0 {
 		t.Fatal("want at least one pair, got none")
 	}
-	if got[0].Local == "" {
+	if got.Pairs[0].Local == "" {
 		t.Error("want a non-empty Local field")
+	}
+	if got.Scheduler.Health == "" {
+		t.Error("want a non-empty Scheduler.Health field")
 	}
 }
 
@@ -268,12 +323,38 @@ interval = "1h"
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status --format json: %v; stderr=%s", err, errOut.String())
 	}
-	var got []output.PairStatus
+	var got output.StatusEnvelope
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if len(got) != 1 || got[0].JobID == "" || len(got[0].Warnings) == 0 {
+	if len(got.Pairs) != 1 || got.Pairs[0].JobID == "" || len(got.Pairs[0].Warnings) == 0 {
 		t.Fatalf("legacy status=%#v, want one pair with validation warning", got)
+	}
+}
+
+func TestStatusCmdMissingStateUsesCanonicalMissingSchedulerEnvelope(t *testing.T) {
+	statusFixtureConfig(t)
+	t.Setenv("BETTER_DRIVE_STATE", filepath.Join(t.TempDir(), "missing-state.json"))
+
+	var out bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --format json: %v", err)
+	}
+	var got output.StatusEnvelope
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("Unmarshal: %v; output=%s", err, out.String())
+	}
+	if got.Scheduler.Health != state.HealthMissing {
+		t.Fatalf("scheduler health = %q, want %q", got.Scheduler.Health, state.HealthMissing)
+	}
+	if got.Scheduler.Enabled || got.Scheduler.ActiveInstance != "" || got.Scheduler.Owner != "" {
+		t.Fatalf("missing scheduler fabricated active state: %#v", got.Scheduler)
+	}
+	if len(got.Pairs) != 1 || got.Pairs[0].Health != state.HealthMissing {
+		t.Fatalf("pair health = %#v, want canonical missing", got.Pairs)
 	}
 }
 
@@ -289,11 +370,11 @@ func TestStatusCmdWarnsWhenConfigIsNotExecutionReady(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status --format json: %v", err)
 	}
-	var got []output.PairStatus
+	var got output.StatusEnvelope
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if len(got) != 1 || len(got[0].Warnings) == 0 || !strings.Contains(got[0].Warnings[0], "category policy registry") {
+	if len(got.Pairs) != 1 || len(got.Pairs[0].Warnings) == 0 || !strings.Contains(got.Pairs[0].Warnings[0], "category policy registry") {
 		t.Fatalf("status = %#v, want execution-readiness warning", got)
 	}
 }
@@ -308,7 +389,7 @@ func TestStatusCmdReevaluatesPersistedSchedulerFreshness(t *testing.T) {
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
 			ObservedAt: now.Add(-2 * time.Hour), FreshnessWindow: time.Minute,
-			CatchUpGrace: time.Hour, ActiveInstance: "one-shot", OverlapState: "none",
+			CatchUpGrace: time.Hour, ActiveInstance: "one-shot", OverlapState: state.OverlapNone,
 			OverlapHealth: "ok", Health: state.HealthHealthy,
 		},
 	}
@@ -325,16 +406,16 @@ func TestStatusCmdReevaluatesPersistedSchedulerFreshness(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("status --format json: %v", err)
 	}
-	var got []output.PairStatus
+	var got output.StatusEnvelope
 	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
 		t.Fatalf("unmarshal status: %v", err)
 	}
-	if len(got) != 1 || got[0].Health != state.HealthStale {
-		t.Fatalf("status=%#v, want one stale pair", got)
+	if len(got.Pairs) != 1 || got.Pairs[0].Health != state.HealthStale || got.Scheduler.Health != state.HealthStale {
+		t.Fatalf("status=%#v, want stale pair and scheduler", got)
 	}
 
-	if got[0].ObjectCount != 3 || got[0].ByteCount != 42 || got[0].NextDue == nil {
-		t.Fatalf("status evidence=%#v, want persisted counts and next_due", got[0])
+	if got.Pairs[0].ObjectCount != 3 || got.Pairs[0].ByteCount != 42 || got.Pairs[0].NextDue == nil {
+		t.Fatalf("status evidence=%#v, want persisted counts and next_due", got.Pairs[0])
 	}
 }
 
@@ -1122,5 +1203,57 @@ func TestSyncCmdFailsOnInvalidConfigWithoutNetworkCall(t *testing.T) {
 	cmd.SetArgs([]string{"sync"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("want error: config has 0 pairs, cfg.Validate() must fail")
+	}
+}
+
+func TestFinalizeDaemonLogWritesOneTerminalAndCloses(t *testing.T) {
+	cases := []struct {
+		name    string
+		runErr  error
+		outcome string
+	}{
+		{name: "success", outcome: "success"},
+		{name: "error", runErr: errors.New("tray failed"), outcome: "error"},
+		{name: "cancelled", runErr: context.Canceled, outcome: "cancelled"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "daemon.jsonl")
+			fileLog, err := runlog.OpenFile(path, "run-test", runlog.RotationOptions{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := fileLog.Sink.Emit(runlog.StreamSystem, "started"); err != nil {
+				t.Fatal(err)
+			}
+
+			gotErr := finalizeDaemonLog(fileLog, tc.runErr)
+			if !errors.Is(gotErr, tc.runErr) {
+				t.Fatalf("finalize error = %v, want run error %v", gotErr, tc.runErr)
+			}
+			data, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var terminals int
+			for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+				var event runlog.Event
+				if err := json.Unmarshal([]byte(line), &event); err != nil {
+					t.Fatalf("decode event: %v", err)
+				}
+				if event.Terminal {
+					terminals++
+					if event.Outcome != tc.outcome {
+						t.Fatalf("terminal outcome = %q, want %q", event.Outcome, tc.outcome)
+					}
+				}
+			}
+			if terminals != 1 {
+				t.Fatalf("terminal count = %d, want 1", terminals)
+			}
+			if err := os.Remove(path); err != nil {
+				t.Fatalf("audit log handle remained open: %v", err)
+			}
+		})
 	}
 }

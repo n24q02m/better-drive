@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -458,12 +459,21 @@ func TestRunOncePanicRecovers(t *testing.T) {
 	f := &panicSyncer{}
 	l := newLoop(f)
 	l.hasBaseline = true
+	results := 0
+	var resultErr error
+	l.OnResult(func(err error) {
+		results++
+		resultErr = err
+	})
 	l.runOnce() // must not panic out of the test
 	if l.State() != StateError {
 		t.Fatalf("state after panicking Syncer = %v, want StateError", l.State())
 	}
 	if l.running {
 		t.Fatal("running flag left true after panic recovery; no-overlap guard would wedge forever")
+	}
+	if results != 1 || resultErr == nil || !strings.Contains(resultErr.Error(), "simulated syncer panic") {
+		t.Fatalf("OnResult fired %d times with err=%v, want exactly 1 recovered error", results, resultErr)
 	}
 }
 

@@ -72,7 +72,7 @@ func TestOwnerRecordFromStatePreservesOwnerJobID(t *testing.T) {
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,
 			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
-			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthHealthy,
 		},
 	}
 	if err := state.Save(statePath, persisted); err != nil {
@@ -97,7 +97,7 @@ func TestOwnerRecordFromStateMapsAggregateSyncOwnerToManagedOwner(t *testing.T) 
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
 			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
-			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthHealthy,
 		},
 	}
 	if err := state.Save(statePath, persisted); err != nil {
@@ -123,7 +123,7 @@ func TestScheduleStatusReevaluatesSchedulerFreshness(t *testing.T) {
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,
 			ObservedAt: now.Add(-2 * time.Hour), FreshnessWindow: time.Minute, CatchUpGrace: time.Hour,
-			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthHealthy,
 		},
 	}
 	if err := state.Save(statePath, persisted); err != nil {

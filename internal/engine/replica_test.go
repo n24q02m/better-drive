@@ -207,12 +207,14 @@ func TestExecuteReplicasPreservesDriveR2AndCryptTargets(t *testing.T) {
 	}
 }
 
-func TestRestoreFloorCountsUniqueCompleteAcknowledgements(t *testing.T) {
+func TestRestoreFloorCountsOnlyCompleteRequiredVerifiedAcknowledgements(t *testing.T) {
 	acks := []RestoreSetAck{
-		{RestoreSetID: "set-1", Complete: true},
-		{RestoreSetID: "set-1", Complete: true},
-		{RestoreSetID: "set-2", Complete: false},
-		{RestoreSetID: "set-3", Complete: true},
+		{RestoreSetID: "set-1", ReplicaID: "required", Required: true, Complete: true, VerifiedReadback: true},
+		{RestoreSetID: "set-1", ReplicaID: "required", Required: true, Complete: true, VerifiedReadback: true},
+		{RestoreSetID: "set-2", ReplicaID: "required", Required: true, Complete: false, VerifiedReadback: true},
+		{RestoreSetID: "set-3", ReplicaID: "optional", Required: false, Complete: true, VerifiedReadback: true},
+		{RestoreSetID: "set-4", ReplicaID: "required", Required: true, Complete: true, VerifiedReadback: false},
+		{RestoreSetID: "set-5", ReplicaID: "required", Required: true, Complete: true, VerifiedReadback: true},
 	}
 	if err := ValidateRestoreFloor(2, acks); err != nil {
 		t.Fatalf("ValidateRestoreFloor: %v", err)
@@ -222,13 +224,13 @@ func TestRestoreFloorCountsUniqueCompleteAcknowledgements(t *testing.T) {
 	}
 }
 
-func TestExecuteReplicasRejectsInsufficientRestoreAcksBeforeTransfer(t *testing.T) {
+func TestExecuteReplicasAllowsInitialUploadWithInsufficientHistoricalRestoreAcks(t *testing.T) {
 	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
-	_, err := ExecuteReplicas(f, TransferSpec{
+	summary, err := ExecuteReplicas(f, TransferSpec{
 		Local: "C:/source", Mode: "copy", Direction: "push",
-		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 2, RestoreAcks: []RestoreSetAck{{RestoreSetID: "set-1", Complete: true}}}},
+		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 2, RestoreAcks: []RestoreSetAck{{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true}}}},
 	})
-	if err == nil || len(f.calls) != 0 || !strings.Contains(err.Error(), "restore") {
-		t.Fatalf("result err=%v calls=%#v, want restore-floor rejection before transfer", err, f.calls)
+	if err != nil || summary.Status != "ok" || len(f.calls) != 1 {
+		t.Fatalf("result summary=%#v err=%v calls=%#v, want upload despite historical floor not met", summary, err, f.calls)
 	}
 }

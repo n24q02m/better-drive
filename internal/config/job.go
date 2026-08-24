@@ -314,8 +314,77 @@ func isSHA256Digest(value string) bool {
 	return err == nil && len(decoded) == sha256.Size
 }
 
+// RoleBinding is the explicit role/profile and policy identity enrolled for
+// scheduled execution. References and digests are read back from their
+// authorities; they are never inferred from local environment or credentials.
+type RoleBinding struct {
+	RoleRef      string `toml:"role_ref" json:"role_ref"`
+	RoleDigest   string `toml:"role_digest" json:"role_digest"`
+	PolicyRef    string `toml:"policy_ref" json:"policy_ref"`
+	PolicyDigest string `toml:"policy_digest" json:"policy_digest"`
+}
+
+func (b RoleBinding) Validate() error {
+	if strings.TrimSpace(b.RoleRef) == "" {
+		return fmt.Errorf("role_ref is required")
+	}
+	if !isSHA256Digest(b.RoleDigest) {
+		return fmt.Errorf("role_digest must use sha256:<64 hex chars>")
+	}
+	if strings.TrimSpace(b.PolicyRef) == "" {
+		return fmt.Errorf("policy_ref is required")
+	}
+	if !isSHA256Digest(b.PolicyDigest) {
+		return fmt.Errorf("policy_digest must use sha256:<64 hex chars>")
+	}
+	return nil
+}
+
+// BindingReadback is the non-secret identity returned by an authority.
+type BindingReadback struct {
+	Ref    string
+	Digest string
+}
+
+// PolicyBindingResolver reads the current policy identity at execution time.
+type PolicyBindingResolver interface {
+	ReadPolicyBinding(ref string) (BindingReadback, error)
+}
+
+// RoleBindingResolver reads the current role/profile identity at execution time.
+type RoleBindingResolver interface {
+	ReadRoleBinding(ref string) (BindingReadback, error)
+}
+
+type tomlRoleBinding struct {
+	RoleRef      string `toml:"role_ref"`
+	RoleDigest   string `toml:"role_digest"`
+	PolicyRef    string `toml:"policy_ref"`
+	PolicyDigest string `toml:"policy_digest"`
+}
+
+func (b RoleBinding) toml() tomlRoleBinding {
+	return tomlRoleBinding{RoleRef: b.RoleRef, RoleDigest: b.RoleDigest, PolicyRef: b.PolicyRef, PolicyDigest: b.PolicyDigest}
+}
+
+func roleBindingFromTOML(raw tomlRoleBinding) RoleBinding {
+	return RoleBinding{RoleRef: raw.RoleRef, RoleDigest: raw.RoleDigest, PolicyRef: raw.PolicyRef, PolicyDigest: raw.PolicyDigest}
+}
+
+type BindingValidationError struct {
+	Kind string
+	Ref  string
+	Want string
+	Got  string
+}
+
+func (e *BindingValidationError) Error() string {
+	return fmt.Sprintf("%s binding drift for %q: want %s, got %s", e.Kind, e.Ref, e.Want, e.Got)
+}
+
 type Config struct {
 	SchemaVersion    int              `toml:"schema_version" json:"schema_version"`
+	RoleBinding      RoleBinding      `toml:"role_binding" json:"role_binding"`
 	RcloneRuntime    RcloneRuntime    `toml:"rclone_runtime" json:"rclone_runtime"`
 	CategoryPolicies []CategoryPolicy `toml:"category_policy" json:"category_policy"`
 	Jobs             []Job            `toml:"job" json:"job"`
@@ -382,6 +451,7 @@ type tomlPair struct {
 
 type rawConfig struct {
 	SchemaVersion    int              `toml:"schema_version"`
+	RoleBinding      tomlRoleBinding  `toml:"role_binding"`
 	RcloneConfig     string           `toml:"rclone_config"`
 	RcloneRuntime    tomlRuntime      `toml:"rclone_runtime"`
 	CategoryPolicies []CategoryPolicy `toml:"category_policy"`
@@ -407,7 +477,7 @@ func LoadWithOptions(path string, options LoadOptions) (*Config, error) {
 }
 
 func decodeV2(raw rawConfig) (*Config, error) {
-	cfg := &Config{SchemaVersion: CurrentSchemaVersion, RcloneRuntime: RcloneRuntime{
+	cfg := &Config{SchemaVersion: CurrentSchemaVersion, RoleBinding: roleBindingFromTOML(raw.RoleBinding), RcloneRuntime: RcloneRuntime{
 		Executable: raw.RcloneRuntime.Executable, ExecutableFileID: raw.RcloneRuntime.ExecutableFileID,
 		ExecutableDigest: raw.RcloneRuntime.ExecutableDigest, Version: raw.RcloneRuntime.Version,
 		Provenance: raw.RcloneRuntime.Provenance, Signature: raw.RcloneRuntime.Signature,
@@ -513,6 +583,36 @@ func (c *Config) ValidateForExecution() error {
 				return fmt.Errorf("job %q: %w", job.ID, err)
 			}
 		}
+	}
+	return nil
+}
+
+// ValidateForExecutionWithBindings performs the normal execution checks and
+// then re-reads both enrolled binding identities. A scheduled caller must use
+// this fresh readback path rather than trusting a cached profile or policy.
+func (c *Config) ValidateForExecutionWithBindings(policyResolver PolicyBindingResolver, roleResolver RoleBindingResolver) error {
+	if err := c.ValidateForExecution(); err != nil {
+		return err
+	}
+	if policyResolver == nil || roleResolver == nil {
+		return errors.New("config binding resolver is required for execution")
+	}
+	if err := c.RoleBinding.Validate(); err != nil {
+		return fmt.Errorf("role binding: %w", err)
+	}
+	role, err := roleResolver.ReadRoleBinding(c.RoleBinding.RoleRef)
+	if err != nil {
+		return fmt.Errorf("role binding readback: %w", err)
+	}
+	if role.Ref != c.RoleBinding.RoleRef || role.Digest != c.RoleBinding.RoleDigest {
+		return &BindingValidationError{Kind: "role", Ref: c.RoleBinding.RoleRef, Want: c.RoleBinding.RoleDigest, Got: role.Digest}
+	}
+	policy, err := policyResolver.ReadPolicyBinding(c.RoleBinding.PolicyRef)
+	if err != nil {
+		return fmt.Errorf("policy binding readback: %w", err)
+	}
+	if policy.Ref != c.RoleBinding.PolicyRef || policy.Digest != c.RoleBinding.PolicyDigest {
+		return &BindingValidationError{Kind: "policy", Ref: c.RoleBinding.PolicyRef, Want: c.RoleBinding.PolicyDigest, Got: policy.Digest}
 	}
 	return nil
 }

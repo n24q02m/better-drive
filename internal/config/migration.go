@@ -1,10 +1,88 @@
 package config
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
 )
+
+type MigrationBindings struct {
+	AccountID    string
+	RootID       string
+	RoleRef      string
+	RoleDigest   string
+	PolicyRef    string
+	PolicyDigest string
+}
+
+func (b MigrationBindings) Validate() error {
+	for name, value := range map[string]string{
+		"account_id": b.AccountID, "root_id": b.RootID, "role_ref": b.RoleRef, "policy_ref": b.PolicyRef,
+	} {
+		if strings.TrimSpace(value) == "" {
+			return fmt.Errorf("complete migration bindings require %s", name)
+		}
+	}
+	if !isSHA256Digest(b.RoleDigest) {
+		return errors.New("complete migration bindings require role_digest sha256:<64 hex chars>")
+	}
+	if !isSHA256Digest(b.PolicyDigest) {
+		return errors.New("complete migration bindings require policy_digest sha256:<64 hex chars>")
+	}
+	return nil
+}
+
+// ApplyMigrationBindings returns a new config with only caller-supplied
+// identities applied. Existing identities must agree; no ID or secret is
+// generated for a legacy target.
+func ApplyMigrationBindings(source *Config, bindings MigrationBindings) (*Config, error) {
+	if source == nil {
+		return nil, errors.New("migration config is nil")
+	}
+	if err := bindings.Validate(); err != nil {
+		return nil, err
+	}
+	if source.RoleBinding != (RoleBinding{}) && source.RoleBinding != (RoleBinding{RoleRef: bindings.RoleRef, RoleDigest: bindings.RoleDigest, PolicyRef: bindings.PolicyRef, PolicyDigest: bindings.PolicyDigest}) {
+		return nil, errors.New("migration role/policy binding drift")
+	}
+	clone := *source
+	clone.RoleBinding = RoleBinding{RoleRef: bindings.RoleRef, RoleDigest: bindings.RoleDigest, PolicyRef: bindings.PolicyRef, PolicyDigest: bindings.PolicyDigest}
+	clone.Jobs = append([]Job(nil), source.Jobs...)
+	for jobIndex := range clone.Jobs {
+		clone.Jobs[jobIndex].Destinations = append([]Destination(nil), source.Jobs[jobIndex].Destinations...)
+		if clone.Jobs[jobIndex].CategoryPolicyID != "" && clone.Jobs[jobIndex].CategoryPolicyID != bindings.PolicyRef {
+			return nil, fmt.Errorf("job %q: foreign category policy ref %q", clone.Jobs[jobIndex].ID, clone.Jobs[jobIndex].CategoryPolicyID)
+		}
+		if clone.Jobs[jobIndex].CategoryPolicyDigest != "" && clone.Jobs[jobIndex].CategoryPolicyDigest != bindings.PolicyDigest {
+			return nil, fmt.Errorf("job %q: category policy digest drift", clone.Jobs[jobIndex].ID)
+		}
+		if clone.Jobs[jobIndex].CategoryPolicyID == "" {
+			clone.Jobs[jobIndex].CategoryPolicyID = bindings.PolicyRef
+		}
+		if clone.Jobs[jobIndex].CategoryPolicyVersion == 0 {
+			clone.Jobs[jobIndex].CategoryPolicyVersion = 1
+		}
+		if clone.Jobs[jobIndex].CategoryPolicyDigest == "" {
+			clone.Jobs[jobIndex].CategoryPolicyDigest = bindings.PolicyDigest
+		}
+		for destinationIndex := range clone.Jobs[jobIndex].Destinations {
+			destination := &clone.Jobs[jobIndex].Destinations[destinationIndex]
+			if destination.AccountID != "" && destination.AccountID != bindings.AccountID {
+				return nil, fmt.Errorf("job %q destination %d: foreign account_id %q", clone.Jobs[jobIndex].ID, destinationIndex, destination.AccountID)
+			}
+			if destination.RootID != "" && destination.RootID != bindings.RootID {
+				return nil, fmt.Errorf("job %q destination %d: foreign root_id %q", clone.Jobs[jobIndex].ID, destinationIndex, destination.RootID)
+			}
+			destination.AccountID = bindings.AccountID
+			destination.RootID = bindings.RootID
+			if _, err := destination.RcloneTarget(); err != nil {
+				return nil, fmt.Errorf("job %q destination %d: %w", clone.Jobs[jobIndex].ID, destinationIndex, err)
+			}
+		}
+	}
+	return &clone, nil
+}
 
 type MigrationPreview struct {
 	SchemaVersion int                     `json:"schema_version"`

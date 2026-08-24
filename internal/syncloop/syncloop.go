@@ -144,10 +144,8 @@ func (l *Loop) OnChange(fn func(State)) {
 }
 
 // OnResult registers fn to be called once per completed sync cycle with that
-// cycle's outcome (nil on success, the Syncer's error on failure). Unlike
-// OnChange (state transitions), this fires exactly once per runOnce on the
-// normal path only - never from the panic-recover path - so a caller (the
-// daemon's per-cycle log line) gets the real cycle error, not a synthetic one.
+// cycle's outcome (nil on success, the Syncer's error on failure, or the
+// recovered error on panic).
 func (l *Loop) OnResult(fn func(error)) {
 	l.mu.Lock()
 	l.onResult = fn
@@ -243,8 +241,21 @@ func (l *Loop) runOnce() (err error) {
 	stderr := l.stderr
 	l.mu.Unlock()
 
+	var resultOnce sync.Once
+	fireResult := func(cycleErr error) {
+		resultOnce.Do(func() {
+			l.mu.Lock()
+			onResult := l.onResult
+			l.mu.Unlock()
+			if onResult != nil {
+				onResult(cycleErr)
+			}
+		})
+	}
+
 	// A panicking Syncer must not leave l.running stuck at true (which would
-	// wedge the no-overlap guard for the rest of the process's life).
+	// wedge the no-overlap guard for the rest of the process's life), and must
+	// invoke OnResult exactly once with the recovered failure.
 	defer func() {
 		if r := recover(); r != nil {
 			l.mu.Lock()
@@ -256,6 +267,7 @@ func (l *Loop) runOnce() (err error) {
 				fn(StateError)
 			}
 			err = fmt.Errorf("syncloop: recovered panic: %v", r)
+			fireResult(err)
 		}
 	}()
 
@@ -303,14 +315,11 @@ func (l *Loop) runOnce() (err error) {
 	}
 	st := l.state
 	fn := l.onChange
-	onResult := l.onResult
 	l.mu.Unlock()
 	if fn != nil {
 		fn(st)
 	}
-	if onResult != nil {
-		onResult(err)
-	}
+	fireResult(err)
 	return err
 }
 

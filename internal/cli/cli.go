@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
+	"io"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -18,6 +18,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/paths"
+	"github.com/n24q02m/better-drive/internal/runlog"
 	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/n24q02m/better-drive/internal/syncloop"
 	"github.com/n24q02m/better-drive/internal/tray"
@@ -96,27 +97,37 @@ func loadConfig() (*config.Config, error) {
 }
 
 func loadExecutionConfig() (*config.Config, error) {
+	resolver := config.FileBindingResolver{}
+	return loadExecutionConfigWithBindings(resolver, resolver)
+}
+
+func loadExecutionConfigWithBindings(policyResolver config.PolicyBindingResolver, roleResolver config.RoleBindingResolver) (*config.Config, error) {
 	cfg, err := loadConfig()
 	if err != nil {
 		return nil, err
 	}
-	if err := cfg.ValidateForExecution(); err != nil {
+	if err := validateExecutionConfigWithBindings(cfg, policyResolver, roleResolver); err != nil {
 		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
-			fmt.Sprintf("enroll the pinned rclone_runtime in %s before running transfers", paths.ConfigFile()))
+			fmt.Sprintf("enroll the pinned runtime and role/policy bindings in %s before running transfers", paths.ConfigFile()))
+	}
+	return cfg, nil
+}
+
+func validateExecutionConfigWithBindings(cfg *config.Config, policyResolver config.PolicyBindingResolver, roleResolver config.RoleBindingResolver) error {
+	if err := cfg.ValidateForExecutionWithBindings(policyResolver, roleResolver); err != nil {
+		return err
 	}
 	for _, job := range cfg.Jobs {
 		if len(job.Destinations) == 0 {
-			return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q has no destinations", job.ID)),
-				"add at least one [[job.destination]] block")
+			return fmt.Errorf("job %q has no destinations", job.ID)
 		}
 		for _, destination := range job.Destinations {
 			if _, err := destination.RcloneTarget(); err != nil {
-				return nil, exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("job %q: %w", job.ID, err)),
-					"set destination.credential_ref to an enrolled rclone:<remote> reference")
+				return fmt.Errorf("job %q: %w", job.ID, err)
 			}
 		}
 	}
-	return cfg, nil
+	return nil
 }
 
 func replicasForJob(job config.Job) ([]engine.ReplicaSpec, error) {
@@ -227,7 +238,7 @@ func attachJobEvidence(result *output.PairResult, interval time.Duration) {
 func buildStateFromResults(results []output.PairResult, now time.Time) state.State {
 	scheduler := state.SchedulerState{
 		Owner: "better-drive", OwnerJobID: aggregateSchedulerOwnerJobID, Enabled: true,
-		LastTrigger: now, ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok",
+		LastTrigger: now, ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok",
 		ObservedAt: now, FreshnessWindow: 15 * time.Minute, CatchUpGrace: 6*time.Hour + 15*time.Minute,
 	}
 	persisted := state.State{SchemaVersion: state.CurrentSchemaVersion, EngineVersion: version.Version, Scheduler: scheduler}
@@ -389,17 +400,34 @@ func runCmd() *cobra.Command {
 				}
 			}
 
-			// Persistent sync log: the tray only ever shows the LATEST state
-			// (an Error icon gives no history), so every cycle's outcome is
-			// also appended to a log file. Best-effort - a failure to open it
-			// must not block the daemon, just run with no logger.
-			var logger *log.Logger
-			logFile, logErr := os.OpenFile(paths.LogFile(), os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+			fileLog, logErr := runlog.OpenFile(paths.LogFile(), "", runlog.RotationOptions{})
 			if logErr != nil {
-				fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not open log file %q: %v (continuing without sync logging)\n", paths.LogFile(), logErr)
-			} else {
-				logger = log.New(logFile, "", log.LstdFlags)
-				logger.Printf("daemon started, %d jobs", len(cfg.Jobs))
+				e.Close()
+				return fmt.Errorf("open daemon audit log %q: %w", paths.LogFile(), logErr)
+			}
+			if _, emitErr := fileLog.Sink.Emit(runlog.StreamSystem, fmt.Sprintf("daemon started, %d jobs", len(cfg.Jobs))); emitErr != nil {
+				e.Close()
+				return finalizeDaemonLog(fileLog, fmt.Errorf("write daemon start event: %w", emitErr))
+			}
+
+			ctx, cancel := context.WithCancel(cmd.Context())
+			var auditMu sync.Mutex
+			var auditErr error
+			recordAuditError := func(err error) {
+				if err == nil {
+					return
+				}
+				auditMu.Lock()
+				if auditErr == nil {
+					auditErr = err
+					cancel()
+				}
+				auditMu.Unlock()
+			}
+			currentAuditError := func() error {
+				auditMu.Lock()
+				defer auditMu.Unlock()
+				return auditErr
 			}
 
 			var stateMu sync.Mutex
@@ -424,35 +452,37 @@ func runCmd() *cobra.Command {
 				}
 				stateMu.Unlock()
 				if err := state.Save(paths.StateFile(), buildStateFromResults(snapshot, time.Now().UTC())); err != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not persist state: %v\n", err)
+					recordAuditError(fmt.Errorf("persist daemon state: %w", err))
 				}
 			}
 
 			agg := tray.NewAggregator()
 			loops := make([]*syncloop.Loop, len(cfg.Jobs))
-			ctx, cancel := context.WithCancel(context.Background())
 			var wg sync.WaitGroup
 			for i, job := range cfg.Jobs {
 				job := job
 				replicas, replicaErr := replicasForJob(job)
 				if replicaErr != nil {
 					cancel()
-					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
+					e.Close()
+					return finalizeDaemonLog(fileLog, exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running"))
 				}
 				loop := syncloop.NewWithReplicas(e, job.Source, replicas, job.Mode, job.Direction,
 					func() ([]string, error) { return config.PairFilters(job.Source, job.Exclude) })
 				loops[i] = loop
+				loop.SetExecution(ctx, io.MultiWriter(cmd.ErrOrStderr(), fileLog.Sink.Stderr()))
 				agg.Register(i, loop)
 				loop.OnResult(func(err error) {
 					persistDaemonResult(job, loop, err)
-					if logger == nil {
-						return
-					}
+					stream := runlog.StreamStdout
+					message := fmt.Sprintf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
 					if err != nil {
-						logger.Printf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
-						return
+						stream = runlog.StreamStderr
+						message = fmt.Sprintf("job %s [mode=%s]: FAILED: %v", job.ID, job.Mode, err)
 					}
-					logger.Printf("job %s [mode=%s]: %s", job.ID, job.Mode, loop.LastReplicaSummary().Status)
+					if _, emitErr := fileLog.Sink.Emit(stream, message); emitErr != nil {
+						recordAuditError(fmt.Errorf("write daemon job event: %w", emitErr))
+					}
 				})
 				wg.Add(1)
 				go func() {
@@ -461,19 +491,38 @@ func runCmd() *cobra.Command {
 				}()
 			}
 
-			err = tray.Run(loops, cfg.Jobs, agg)
+			trayErr := tray.Run(loops, cfg.Jobs, agg)
 			cancel()
 			syncloop.ShutdownAll(loops)
 			wg.Wait()
 			e.Close()
-			if logFile != nil {
-				if closeErr := logFile.Close(); closeErr != nil {
-					fmt.Fprintf(cmd.ErrOrStderr(), "warning: could not close log file: %v\n", closeErr)
-				}
-			}
-			return err
+			return finalizeDaemonLog(fileLog, errors.Join(trayErr, currentAuditError()))
 		},
 	}
+}
+
+func finalizeDaemonLog(fileLog *runlog.FileLog, runErr error) error {
+	if fileLog == nil || fileLog.Sink == nil {
+		return errors.Join(runErr, errors.New("daemon audit log is unavailable"))
+	}
+	outcome := "success"
+	message := "daemon stopped"
+	if errors.Is(runErr, context.Canceled) {
+		outcome = "cancelled"
+		message = runErr.Error()
+	} else if runErr != nil {
+		outcome = "error"
+		message = runErr.Error()
+	}
+	var terminalErr error
+	if _, err := fileLog.Sink.Terminal(outcome, message); err != nil {
+		terminalErr = fmt.Errorf("write daemon terminal event: %w", err)
+	}
+	var closeErr error
+	if err := fileLog.Close(); err != nil {
+		closeErr = fmt.Errorf("close daemon audit log: %w", err)
+	}
+	return errors.Join(runErr, terminalErr, closeErr)
 }
 
 func statusCmd() *cobra.Command {
@@ -513,10 +562,22 @@ func statusCmd() *cobra.Command {
 				}
 				return nil
 			}
-			health := "unknown-overlap"
-			if persisted != nil {
-				health = state.EvaluateSchedulerHealth(persisted.Scheduler, time.Now().UTC())
+
+			now := time.Now().UTC()
+			schedState := state.SchedulerState{
+				FreshnessWindow: 15 * time.Minute,
+				CatchUpGrace:    6*time.Hour + 15*time.Minute,
+				OverlapState:    state.OverlapNone,
+				OverlapHealth:   "missing",
+				Health:          state.HealthMissing,
 			}
+			health := state.HealthMissing
+			if persisted != nil {
+				schedState = persisted.Scheduler
+				health = state.EvaluateSchedulerHealth(schedState, now)
+				schedState.Health = health
+			}
+
 			if format == output.FormatJSON {
 				pairs := make([]output.PairStatus, 0, len(cfg.Jobs))
 				for _, job := range cfg.Jobs {
@@ -546,7 +607,34 @@ func statusCmd() *cobra.Command {
 						pairs = append(pairs, item)
 					}
 				}
-				return output.RenderJSON(cmd.OutOrStdout(), pairs)
+
+				schedulerOut := output.SchedulerStatus{
+					Owner:           schedState.Owner,
+					OwnerJobID:      schedState.OwnerJobID,
+					Enabled:         schedState.Enabled,
+					ActiveInstance:  schedState.ActiveInstance,
+					OverlapState:    schedState.OverlapState,
+					OverlapHealth:   schedState.OverlapHealth,
+					ObservedAt:      schedState.ObservedAt,
+					FreshnessWindow: schedState.FreshnessWindow,
+					CatchUpGrace:    schedState.CatchUpGrace,
+					Health:          health,
+				}
+				if !schedState.LastTrigger.IsZero() {
+					schedulerOut.LastTrigger = &schedState.LastTrigger
+				}
+				if !schedState.NextTrigger.IsZero() {
+					schedulerOut.NextTrigger = &schedState.NextTrigger
+				}
+				if configWarning != "" {
+					schedulerOut.Warnings = []string{"config is not execution-ready: " + configWarning}
+				}
+
+				envelope := output.StatusEnvelope{
+					Scheduler: schedulerOut,
+					Pairs:     pairs,
+				}
+				return output.RenderJSON(cmd.OutOrStdout(), envelope)
 			}
 			if configWarning != "" {
 				fmt.Fprintf(cmd.ErrOrStderr(), "warning: config is not execution-ready: %s\n", configWarning)
@@ -611,12 +699,26 @@ func syncCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
 			}
 			defer e.Close()
-			results, syncErr := runSyncOnce(cmd, e, cfg, format, dryRun, resync)
+
+			sink := runlog.NewSink("", io.Discard)
+			var results []output.PairResult
+			var syncErr error
+
+			runErr := runlog.Run(ctx, sink, func() error {
+				var err error
+				results, err = runSyncOnce(cmd, e, cfg, format, dryRun, resync)
+				syncErr = err
+				return err
+			})
+
 			if stateErr := state.Save(paths.StateFile(), buildStateFromResults(results, time.Now().UTC())); stateErr != nil {
 				if syncErr != nil {
 					return fmt.Errorf("%v; persist state: %w", syncErr, stateErr)
 				}
 				return stateErr
+			}
+			if runErr != nil && syncErr == nil {
+				return runErr
 			}
 			return syncErr
 		},

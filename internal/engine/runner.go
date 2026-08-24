@@ -3,6 +3,7 @@ package engine
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"io"
 	"os/exec"
 )
@@ -17,7 +18,17 @@ type runner func(args ...string) (stdout string, stderr string, err error)
 // foreground lifecycle, streaming stdout/stderr to the provided writers.
 type streamRunner func(ctx context.Context, stdout, stderr io.Writer, args ...string) error
 
-type runtimePreflight func() (release func(), err error)
+type runtimePreflight func() (*runtimeGuard, error)
+
+func (g *runtimeGuard) verifyChild(cmd *exec.Cmd) error {
+	if g == nil {
+		return nil
+	}
+	if g.executable == nil {
+		return fmt.Errorf("runtime guard executable evidence is missing")
+	}
+	return verifyRuntimeChildImage(cmd, g.executable)
+}
 
 // execRunner returns a runner that inherits the caller environment. It remains
 // available only for the explicit foreground mount compatibility path; sync
@@ -32,15 +43,15 @@ func execRunnerWithEnvironment(bin string, env []string) runner {
 
 func execRunnerWithEnvironmentAndPreflight(bin string, env []string, preflight runtimePreflight) runner {
 	return func(args ...string) (string, string, error) {
-		release := func() {}
+		var guard *runtimeGuard
 		if preflight != nil {
 			var err error
-			release, err = preflight()
+			guard, err = preflight()
 			if err != nil {
 				return "", "", err
 			}
 		}
-		defer release()
+		defer guard.release()
 		/* #nosec G204 */
 		cmd := exec.Command(bin, args...)
 		if env != nil {
@@ -50,7 +61,7 @@ func execRunnerWithEnvironmentAndPreflight(bin string, env []string, preflight r
 		var stdout, stderr bytes.Buffer
 		cmd.Stdout = &stdout
 		cmd.Stderr = &stderr
-		err := runCommand(cmd)
+		err := runCommand(cmd, guard)
 		return stdout.String(), stderr.String(), err
 	}
 }
@@ -73,15 +84,15 @@ func execStreamRunnerWithEnvironmentAndPreflight(bin string, env []string, prefl
 		if stderr == nil {
 			stderr = io.Discard
 		}
-		release := func() {}
+		var guard *runtimeGuard
 		if preflight != nil {
 			var err error
-			release, err = preflight()
+			guard, err = preflight()
 			if err != nil {
 				return err
 			}
 		}
-		defer release()
+		defer guard.release()
 		/* #nosec G204 */
 		cmd := exec.CommandContext(ctx, bin, args...)
 		if env != nil {
@@ -90,7 +101,7 @@ func execStreamRunnerWithEnvironmentAndPreflight(bin string, env []string, prefl
 		hideConsole(cmd) // Windows: no console window flash per rclone invocation
 		cmd.Stdout = stdout
 		cmd.Stderr = stderr
-		err := runCommand(cmd)
+		err := runCommand(cmd, guard)
 		if err != nil {
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return ctxErr
