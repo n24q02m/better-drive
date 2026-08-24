@@ -1,4 +1,4 @@
-//go:build !windows && linux
+//go:build !windows
 
 package engine
 
@@ -71,7 +71,7 @@ func otherRuntimeFileIdentity(info os.FileInfo) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("file inode identity is unknown")
 	}
-	return fmt.Sprintf("linux:dev=%d;ino=%d", dev, ino), nil
+	return fmt.Sprintf("%s:dev=%d;ino=%d", runtime.GOOS, dev, ino), nil
 }
 
 func runtimeNumericField(value reflect.Value) (uint64, bool) {

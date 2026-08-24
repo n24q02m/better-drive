@@ -461,3 +461,24 @@ func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
 		t.Fatalf("root-drift destination exists: %v", err)
 	}
 }
+func TestTrustedSystemSymlinkPolicyIsNarrowAndDarwinOnly(t *testing.T) {
+	tests := []struct {
+		name string
+		path string
+		root string
+		goos string
+		want bool
+	}{
+		{name: "darwin var ancestor", path: "/var", root: "/var/folders/test", goos: "darwin", want: true},
+		{name: "darwin root itself", path: "/var", root: "/var", goos: "darwin", want: false},
+		{name: "darwin unrelated alias", path: "/usr", root: "/usr/local/test", goos: "darwin", want: false},
+		{name: "linux var ancestor", path: "/var", root: "/var/tmp/test", goos: "linux", want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := trustedSystemSymlink(test.path, test.root, test.goos); got != test.want {
+				t.Fatalf("trustedSystemSymlink(%q, %q, %q) = %v, want %v", test.path, test.root, test.goos, got, test.want)
+			}
+		})
+	}
+}

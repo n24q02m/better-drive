@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 
 	"github.com/n24q02m/better-drive/internal/artifactcrypto"
@@ -372,12 +373,25 @@ func commitNoReplace(source, destination string) error {
 	return nil
 }
 
+func trustedSystemSymlink(path, root, goos string) bool {
+	path = filepath.Clean(path)
+	root = filepath.Clean(root)
+	if goos != "darwin" || path == root {
+		return false
+	}
+	// macOS exposes the writable temporary hierarchy as /var/folders while
+	// /var itself is a system alias to /private/var. Allow that one stable
+	// ancestor alias, but keep caller-supplied roots and all other aliases
+	// subject to the no-symlink rule.
+	return path == string(filepath.Separator)+"var"
+}
+
 func ensureNoSymlinkComponents(path string) error {
 	clean := filepath.Clean(path)
 	for current := clean; ; current = filepath.Dir(current) {
 		info, err := os.Lstat(current)
 		if err == nil {
-			if info.Mode()&os.ModeSymlink != 0 {
+			if info.Mode()&os.ModeSymlink != 0 && !trustedSystemSymlink(current, clean, runtime.GOOS) {
 				return fmt.Errorf("restore root contains a symlink or junction: %s", current)
 			}
 		} else if !os.IsNotExist(err) {
