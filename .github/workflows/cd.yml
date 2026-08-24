@@ -59,10 +59,7 @@ jobs:
         with:
           distribution: goreleaser
           version: '~> v2'
-          args: release --config=.goreleaser.prepare.yaml --skip=publish --clean
-        env:
-          # Credential-free: no publisher secrets or tokens passed to prepare step
-          GORELEASER_CURRENT_TAG: ${{ github.ref_name }}
+          args: release --snapshot --config=.goreleaser.prepare.yaml --skip=publish --clean
 
       - name: Record candidate provenance manifest
         shell: bash
