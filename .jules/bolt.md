@@ -10,6 +10,6 @@
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
 
-## 2025-02-27 - Replace strings.Split with iterative strings.Cut for parsing lines
-**Learning:** When parsing large string outputs from processes or reading multi-line shim files in Go, `strings.Split(str, "\n")` allocates a new slice and duplicates every string on each line, creating significant garbage collection overhead.
-**Action:** Prefer using `strings.Cut` iteratively over `strings.Split`. Assign the string to a variable, loop while it's not empty, and use `line, rest, _ = strings.Cut(rest, "\n")` to process lines iteratively with zero allocation.
+## 2025-02-27 - Rejected micro-optimization for parsing Windows shim files
+**Learning:** A proposed micro-optimization to use `strings.Cut` instead of `strings.Split` for parsing multi-line Windows shim files was rejected as "non-material". While `strings.Cut` provides a zero-allocation way to parse lines iteratively, replacing `strings.Split` in a one-time parser that reads small shim files does not yield a measurable, real-world impact on the application's overall performance.
+**Action:** Before optimizing string parsing operations with `strings.Cut` over `strings.Split`, ensure the optimization targets a hot path or processes very large string outputs where the allocation overhead is a proven bottleneck. Do not blindly apply this micro-optimization to cold paths or one-off setup parsers.
