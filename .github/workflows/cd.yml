@@ -37,6 +37,8 @@ jobs:
     name: Semantic Release
     if: github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.release_type == 'beta' && 'beta-publish' || 'stable-publish' }}
     permissions:
       contents: write
       id-token: write
@@ -58,7 +60,7 @@ jobs:
           fetch-depth: 0
           token: ${{ steps.app-token.outputs.token }}
       - id: release
-        uses: n24q02m/better-semantic-release@9b8ee6275b7dae995bac090282ccb1cabc99ae0f # v1.2.3
+        uses: n24q02m/better-semantic-release@2335089f3744c77ca7ef389493a87e0cc117cc2a # v1.4.0-beta.2 candidate
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
           prerelease: ${{ github.event.inputs.release_type == 'beta' }}
