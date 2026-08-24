@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2024-10-25 - Avoid O(N²) garbage collector pressure by passing structured data
+**Learning:** Avoid serializing structured data to delimited strings only to immediately parse them back out with `strings.Split` in a loop, as it causes significant O(N²) garbage collection pressure.
+**Action:** Pass structured structs directly between internal boundaries.
