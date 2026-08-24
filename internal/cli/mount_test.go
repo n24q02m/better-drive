@@ -35,7 +35,10 @@ func (f *fakeMountEngine) Mount(ctx context.Context, p engine.MountParams) error
 	return f.mountErr
 }
 
-func (f *fakeMountEngine) Close() { f.closed = true }
+func (f *fakeMountEngine) Close() error {
+	f.closed = true
+	return nil
+}
 
 func mountFixture(t *testing.T, body string, service *fakeMountEngine) (*bytes.Buffer, *bytes.Buffer, *string, *int) {
 	t.Helper()

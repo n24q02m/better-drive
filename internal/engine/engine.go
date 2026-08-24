@@ -19,9 +19,8 @@ var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
 type Engine struct {
 	// bin and cfg are only used by the explicit foreground compatibility
-	// constructor below. Scheduled sync/account operations use NewVerified,
-	// which requires an enrolled absolute executable/config identity and an
-	// allowlisted child environment.
+	// constructor below. Scheduled sync/account operations require an enrolled
+	// absolute executable/config identity and an allowlisted child environment.
 	bin    string
 	cfg    string
 	run    runner
@@ -30,6 +29,10 @@ type Engine struct {
 	// subprocess is independent, but the lock protects temp filter-file
 	// lifetimes and keeps one sync operation's state isolated from another.
 	syncMu sync.Mutex
+
+	workingConfigDir string
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewForeground builds an Engine for the separate foreground mount path.
@@ -48,9 +51,19 @@ func NewForeground(rcloneConfigPath string) *Engine {
 	}
 }
 
-// Close is a no-op: each rclone invocation is an independent subprocess with
-// nothing to finalize (unlike the previous in-process librclone engine).
-func (e *Engine) Close() {}
+// Close removes any private working rclone config created for a transfer
+// engine. Foreground and direct verified engines have nothing to finalize.
+func (e *Engine) Close() error {
+	if e == nil {
+		return nil
+	}
+	e.closeOnce.Do(func() {
+		if e.workingConfigDir != "" {
+			e.closeErr = os.RemoveAll(e.workingConfigDir)
+		}
+	})
+	return e.closeErr
+}
 
 // args prepends --config <cfg> to base when the engine has a non-empty
 // config path, so every rclone invocation goes through it.

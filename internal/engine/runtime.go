@@ -87,14 +87,13 @@ func parseRuntimeACLBinding(value string) (executable, config string, err error)
 	return executable, config, nil
 }
 
-// NewVerified constructs the transfer engine only from an enrolled runtime.
+// NewVerified constructs a config-management engine from an enrolled runtime.
 // It never performs PATH lookup and never inherits the caller's environment.
+// Transfer commands must use NewTransferVerified so OAuth token refreshes write
+// only to a private working copy rather than the immutable enrolled evidence.
 func NewVerified(runtime config.RcloneRuntime) (*Engine, error) {
-	if err := runtime.Validate(); err != nil {
-		return nil, fmt.Errorf("rclone runtime: %w", err)
-	}
-	if !runtimeChildImageVerificationSupported(goruntime.GOOS) {
-		return nil, fmt.Errorf("rclone runtime: child image verification unsupported on %s", goruntime.GOOS)
+	if err := validateVerifiedRuntime(runtime); err != nil {
+		return nil, err
 	}
 	env := explicitEnvironment(runtime.Environment)
 	preflight := func() (*runtimeGuard, error) { return openRuntimeFiles(runtime) }
@@ -104,6 +103,78 @@ func NewVerified(runtime config.RcloneRuntime) (*Engine, error) {
 		run:    execRunnerWithEnvironmentAndPreflight(runtime.Executable, env, preflight),
 		stream: execStreamRunnerWithEnvironmentAndPreflight(runtime.Executable, env, preflight),
 	}, nil
+}
+
+// NewTransferVerified copies the exact enrolled rclone config into a private
+// working directory before any child is launched. Rclone may rotate OAuth
+// access tokens in that copy while the enrolled path, identity, ACL, and digest
+// remain immutable evidence for the next invocation.
+func NewTransferVerified(runtime config.RcloneRuntime) (*Engine, error) {
+	if err := validateVerifiedRuntime(runtime); err != nil {
+		return nil, err
+	}
+	workingConfig, workingDir, err := stageTransferConfig(runtime)
+	if err != nil {
+		return nil, err
+	}
+	env := explicitEnvironment(runtime.Environment)
+	preflight := func() (*runtimeGuard, error) { return openRuntimeExecutable(runtime) }
+	return &Engine{
+		bin:              runtime.Executable,
+		cfg:              workingConfig,
+		run:              execRunnerWithEnvironmentAndPreflight(runtime.Executable, env, preflight),
+		stream:           execStreamRunnerWithEnvironmentAndPreflight(runtime.Executable, env, preflight),
+		workingConfigDir: workingDir,
+	}, nil
+}
+
+func validateVerifiedRuntime(runtime config.RcloneRuntime) error {
+	if err := runtime.Validate(); err != nil {
+		return fmt.Errorf("rclone runtime: %w", err)
+	}
+	if !runtimeChildImageVerificationSupported(goruntime.GOOS) {
+		return fmt.Errorf("rclone runtime: child image verification unsupported on %s", goruntime.GOOS)
+	}
+	return nil
+}
+
+func stageTransferConfig(runtime config.RcloneRuntime) (string, string, error) {
+	guard, err := openRuntimeFiles(runtime)
+	if err != nil {
+		return "", "", err
+	}
+	defer guard.release()
+
+	workingDir, err := os.MkdirTemp("", "better-drive-rclone-*")
+	if err != nil {
+		return "", "", fmt.Errorf("create private rclone config directory: %w", err)
+	}
+	cleanup := func(stageErr error) (string, string, error) {
+		if removeErr := os.RemoveAll(workingDir); removeErr != nil {
+			return "", "", fmt.Errorf("%v; remove private rclone config directory: %w", stageErr, removeErr)
+		}
+		return "", "", stageErr
+	}
+	if err := os.Chmod(workingDir, 0o700); err != nil {
+		return cleanup(fmt.Errorf("protect private rclone config directory: %w", err))
+	}
+	workingConfig := filepath.Join(workingDir, "rclone.conf")
+	file, err := os.OpenFile(workingConfig, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return cleanup(fmt.Errorf("create private rclone config: %w", err))
+	}
+	if _, err := io.Copy(file, guard.config.file); err != nil {
+		_ = file.Close()
+		return cleanup(fmt.Errorf("copy enrolled rclone config: %w", err))
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		return cleanup(fmt.Errorf("sync private rclone config: %w", err))
+	}
+	if err := file.Close(); err != nil {
+		return cleanup(fmt.Errorf("close private rclone config: %w", err))
+	}
+	return workingConfig, workingDir, nil
 }
 
 func explicitEnvironment(values map[string]string) []string {
@@ -174,6 +245,18 @@ func openRuntimeFiles(runtime config.RcloneRuntime) (*runtimeGuard, error) {
 		return nil, err
 	}
 	return &runtimeGuard{executable: executable, config: configFile}, nil
+}
+
+func openRuntimeExecutable(runtime config.RcloneRuntime) (*runtimeGuard, error) {
+	executableACL, _, err := parseRuntimeACLBinding(runtime.ACL)
+	if err != nil {
+		return nil, err
+	}
+	executable, err := openRuntimeFile("executable", runtime.Executable, runtime.ExecutableFileID, runtime.ExecutableDigest, executableACL)
+	if err != nil {
+		return nil, err
+	}
+	return &runtimeGuard{executable: executable}, nil
 }
 
 func openRuntimeFile(label, path, expectedID, expectedDigest, expectedACL string) (*runtimeFile, error) {

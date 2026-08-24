@@ -1,6 +1,9 @@
 package engine
 
 import (
+	"crypto/sha256"
+	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -19,6 +22,31 @@ func validRuntimeForEngine(t *testing.T) config.RcloneRuntime {
 		AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		Environment: map[string]string{"RCLONE_LOCAL_NO_CHECK_UPDATED": "true"},
 	}
+}
+
+func enrolledRuntimeForEngine(t *testing.T) config.RcloneRuntime {
+	t.Helper()
+	runtime := validRuntimeForEngine(t)
+	executableBody := []byte("rclone executable fixture")
+	configBody := []byte("[gdrive]\ntype = drive\ntoken = mutable-oauth-token\n")
+	if err := os.WriteFile(runtime.Executable, executableBody, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(runtime.Config, configBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	enrollment, err := enrollRuntimeFiles(runtime.Executable, runtime.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	executableDigest := sha256.Sum256(executableBody)
+	configDigest := sha256.Sum256(configBody)
+	runtime.ExecutableFileID = enrollment.executableFileID
+	runtime.ExecutableDigest = fmt.Sprintf("sha256:%x", executableDigest)
+	runtime.ConfigFileID = enrollment.configFileID
+	runtime.ConfigDigest = fmt.Sprintf("sha256:%x", configDigest)
+	runtime.ACL = enrollment.acl
+	return runtime
 }
 
 func TestNewVerifiedRejectsRuntimeBeforeAnyRunnerCanSpawn(t *testing.T) {
@@ -52,6 +80,44 @@ func TestNewVerifiedPinsConfigBeforeEndpointCalls(t *testing.T) {
 	}
 	if got := e.args("listremotes"); len(got) < 2 || got[0] != "--config" || got[1] != runtime.Config {
 		t.Fatalf("args = %#v, want explicit --config before command", got)
+	}
+}
+
+func TestNewTransferVerifiedStagesMutableConfigWithoutChangingEnrolledSource(t *testing.T) {
+	if !runtimeChildImageVerificationSupported(runtime.GOOS) {
+		t.Skipf("runtime child verification unsupported on %s", runtime.GOOS)
+	}
+	enrolled := enrolledRuntimeForEngine(t)
+	sourceBefore, err := os.ReadFile(enrolled.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := NewTransferVerified(enrolled)
+	if err != nil {
+		t.Fatalf("NewTransferVerified: %v", err)
+	}
+	if e.cfg == enrolled.Config {
+		t.Fatal("transfer engine uses enrolled config directly; OAuth refresh would mutate or lock the evidence source")
+	}
+	workingDir := filepath.Dir(e.cfg)
+	if got, err := os.ReadFile(e.cfg); err != nil || string(got) != string(sourceBefore) {
+		t.Fatalf("working config = %q, %v; want exact enrolled source copy", got, err)
+	}
+	oldPath := e.cfg + ".old"
+	if err := os.Rename(e.cfg, oldPath); err != nil {
+		t.Fatalf("working config cannot be atomically replaced: %v", err)
+	}
+	if err := os.WriteFile(e.cfg, []byte("[gdrive]\ntoken = refreshed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := os.ReadFile(enrolled.Config); err != nil || string(got) != string(sourceBefore) {
+		t.Fatalf("enrolled config changed = %q, %v", got, err)
+	}
+	if err := e.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := os.Stat(workingDir); !os.IsNotExist(err) {
+		t.Fatalf("working config directory survived Close: %v", err)
 	}
 }
 

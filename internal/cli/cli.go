@@ -417,7 +417,7 @@ func runCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 			"combined status. Blocks until the tray is quit. Every remote referenced\n" +
 			"by a job must already be set up (`better-drive setup`).",
 		Example: "  better-drive run",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (commandErr error) {
 			cfg, err := loadExecutionConfig()
 			if err != nil {
 				return err
@@ -428,21 +428,22 @@ func runCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 					fmt.Sprintf("enroll retention runtime dependencies before running quarantine jobs in %s", paths.ConfigFile()))
 			}
 
-			e, err := engine.NewVerified(cfg.RcloneRuntime)
+			e, err := engine.NewTransferVerified(cfg.RcloneRuntime)
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
 			}
+			defer func() {
+				commandErr = errors.Join(commandErr, e.Close())
+			}()
 
 			for _, job := range cfg.Jobs {
 				replicas, replicaErr := replicasForJob(job)
 				if replicaErr != nil {
-					e.Close()
 					return exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running")
 				}
 				for _, replica := range replicas {
 					remoteName, _, _ := strings.Cut(replica.Target, ":")
 					if configured, _ := e.RemoteConfigured(remoteName); !configured {
-						e.Close()
 						return remoteNotConfiguredErr(remoteName)
 					}
 				}
@@ -450,11 +451,9 @@ func runCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 
 			fileLog, logErr := runlog.OpenFile(paths.LogFile(), "", runlog.RotationOptions{})
 			if logErr != nil {
-				e.Close()
 				return fmt.Errorf("open daemon audit log %q: %w", paths.LogFile(), logErr)
 			}
 			if _, emitErr := fileLog.Sink.Emit(runlog.StreamSystem, fmt.Sprintf("daemon started, %d jobs", len(cfg.Jobs))); emitErr != nil {
-				e.Close()
 				return finalizeDaemonLog(fileLog, fmt.Errorf("write daemon start event: %w", emitErr))
 			}
 			ctx, cancel := context.WithCancel(cmd.Context())
@@ -510,7 +509,6 @@ func runCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 				replicas, replicaErr := replicasForJob(job)
 				if replicaErr != nil {
 					cancel()
-					e.Close()
 					return finalizeDaemonLog(fileLog, exitcode.WithRemediation(exitcode.ConfigError(replicaErr), "fix the job destination identities before running"))
 				}
 				loop := syncloop.NewWithReplicas(e, job.Source, replicas, job.Mode, job.Direction,
@@ -541,7 +539,6 @@ func runCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 			cancel()
 			syncloop.ShutdownAll(loops)
 			wg.Wait()
-			e.Close()
 			return finalizeDaemonLog(fileLog, errors.Join(trayErr, currentAuditError()))
 		},
 	}
@@ -732,7 +729,7 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 			"  better-drive sync --dry-run\n" +
 			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
-		RunE: func(cmd *cobra.Command, _ []string) error {
+		RunE: func(cmd *cobra.Command, _ []string) (commandErr error) {
 			ctx, stop := signal.NotifyContext(cmd.Context(), os.Interrupt)
 			defer stop()
 			cmd.SetContext(ctx)
@@ -748,11 +745,13 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 					fmt.Sprintf("enroll retention runtime dependencies before running quarantine jobs in %s", paths.ConfigFile()))
 			}
 
-			e, err := engine.NewVerified(cfg.RcloneRuntime)
+			e, err := engine.NewTransferVerified(cfg.RcloneRuntime)
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
 			}
-			defer e.Close()
+			defer func() {
+				commandErr = errors.Join(commandErr, e.Close())
+			}()
 
 			sink := runlog.NewSink("", io.Discard)
 			var syncErr error
