@@ -1,6 +1,6 @@
 module github.com/n24q02m/better-drive
 
-go 1.26.6
+go 1.26.5
 
 require (
 	fyne.io/systray v1.12.2
