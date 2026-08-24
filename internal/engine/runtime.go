@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -89,6 +90,9 @@ func parseRuntimeACLBinding(value string) (executable, config string, err error)
 // NewVerified constructs the transfer engine only from an enrolled runtime.
 // It never performs PATH lookup and never inherits the caller's environment.
 func NewVerified(runtime config.RcloneRuntime) (*Engine, error) {
+	if !runtimeChildImageVerificationSupported(goruntime.GOOS) {
+		return nil, fmt.Errorf("rclone runtime: child image verification unsupported on %s", goruntime.GOOS)
+	}
 	if err := runtime.Validate(); err != nil {
 		return nil, fmt.Errorf("rclone runtime: %w", err)
 	}
@@ -273,4 +277,8 @@ func equalBytes(a, b []byte) bool {
 
 func cleanRuntimePath(path string) string {
 	return filepath.Clean(strings.TrimSuffix(path, " (deleted)"))
+}
+
+func runtimeChildImageVerificationSupported(goos string) bool {
+	return goos == "linux" || goos == "windows"
 }

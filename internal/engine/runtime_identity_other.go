@@ -1,4 +1,4 @@
-//go:build !windows
+//go:build !windows && linux
 
 package engine
 
@@ -8,7 +8,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"reflect"
-	"runtime"
 	"strings"
 
 	"golang.org/x/sys/unix"
@@ -71,7 +70,7 @@ func otherRuntimeFileIdentity(info os.FileInfo) (string, error) {
 	if !ok {
 		return "", fmt.Errorf("file inode identity is unknown")
 	}
-	return fmt.Sprintf("%s:dev=%d;ino=%d", runtime.GOOS, dev, ino), nil
+	return fmt.Sprintf("linux:dev=%d;ino=%d", dev, ino), nil
 }
 
 func runtimeNumericField(value reflect.Value) (uint64, bool) {
@@ -96,9 +95,6 @@ func sameRuntimePath(expected, actual string) bool {
 }
 
 func verifyRuntimeChildImage(cmd *exec.Cmd, expected *runtimeFile) error {
-	if runtime.GOOS != "linux" {
-		return fmt.Errorf("child image verification unsupported on %s", runtime.GOOS)
-	}
 	if cmd == nil || cmd.Process == nil {
 		return fmt.Errorf("child process is unavailable")
 	}

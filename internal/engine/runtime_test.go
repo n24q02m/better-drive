@@ -46,3 +46,17 @@ func TestNewVerifiedPinsConfigBeforeEndpointCalls(t *testing.T) {
 		t.Fatalf("args = %#v, want explicit --config before command", got)
 	}
 }
+
+func TestRuntimeChildImageVerificationPlatformPolicy(t *testing.T) {
+	tests := map[string]bool{
+		"linux":   true,
+		"windows": true,
+		"darwin":  false,
+		"freebsd": false,
+	}
+	for goos, want := range tests {
+		if got := runtimeChildImageVerificationSupported(goos); got != want {
+			t.Errorf("runtimeChildImageVerificationSupported(%q) = %v, want %v", goos, got, want)
+		}
+	}
+}
