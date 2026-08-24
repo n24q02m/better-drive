@@ -90,11 +90,11 @@ func parseRuntimeACLBinding(value string) (executable, config string, err error)
 // NewVerified constructs the transfer engine only from an enrolled runtime.
 // It never performs PATH lookup and never inherits the caller's environment.
 func NewVerified(runtime config.RcloneRuntime) (*Engine, error) {
-	if !runtimeChildImageVerificationSupported(goruntime.GOOS) {
-		return nil, fmt.Errorf("rclone runtime: child image verification unsupported on %s", goruntime.GOOS)
-	}
 	if err := runtime.Validate(); err != nil {
 		return nil, fmt.Errorf("rclone runtime: %w", err)
+	}
+	if !runtimeChildImageVerificationSupported(goruntime.GOOS) {
+		return nil, fmt.Errorf("rclone runtime: child image verification unsupported on %s", goruntime.GOOS)
 	}
 	env := explicitEnvironment(runtime.Environment)
 	preflight := func() (*runtimeGuard, error) { return openRuntimeFiles(runtime) }

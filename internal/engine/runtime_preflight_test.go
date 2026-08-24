@@ -5,11 +5,19 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
 	"github.com/n24q02m/better-drive/internal/config"
 )
+
+func requireRuntimeChildImageSupport(t *testing.T) {
+	t.Helper()
+	if !runtimeChildImageVerificationSupported(runtime.GOOS) {
+		t.Skipf("runtime child image verification unsupported on %s", runtime.GOOS)
+	}
+}
 
 func runtimeDigestForTest(t *testing.T, path string) string {
 	t.Helper()
@@ -22,6 +30,7 @@ func runtimeDigestForTest(t *testing.T, path string) string {
 }
 
 func enrolledRuntimeForFiles(t *testing.T, exe, cfg string) config.RcloneRuntime {
+	requireRuntimeChildImageSupport(t)
 	t.Helper()
 	enrollment, err := enrollRuntimeFiles(exe, cfg)
 	if err != nil {
@@ -95,6 +104,7 @@ func TestVerifyRuntimeFilesRejectsACLOrModeDrift(t *testing.T) {
 }
 
 func TestVerifyRuntimeFilesRejectsSymlink(t *testing.T) {
+	requireRuntimeChildImageSupport(t)
 	dir := t.TempDir()
 	exe := filepath.Join(dir, "rclone.exe")
 	cfg := filepath.Join(dir, "rclone.conf")

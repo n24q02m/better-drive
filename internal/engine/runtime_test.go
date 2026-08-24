@@ -2,6 +2,7 @@ package engine
 
 import (
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -37,8 +38,15 @@ func TestNewVerifiedRejectsAmbientRcloneEnvironment(t *testing.T) {
 }
 
 func TestNewVerifiedPinsConfigBeforeEndpointCalls(t *testing.T) {
+	goos := runtime.GOOS
 	runtime := validRuntimeForEngine(t)
 	e, err := NewVerified(runtime)
+	if !runtimeChildImageVerificationSupported(goos) {
+		if err == nil || !strings.Contains(err.Error(), "unsupported") {
+			t.Fatalf("NewVerified on unsupported platform error = %v", err)
+		}
+		return
+	}
 	if err != nil {
 		t.Fatalf("NewVerified: %v", err)
 	}
