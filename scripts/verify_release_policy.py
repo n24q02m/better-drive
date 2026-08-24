@@ -41,6 +41,9 @@ def check(root: Path) -> list[str]:
     for trigger in ("  branch_protection_rule:", "  schedule:"):
         if trigger not in ci.split("permissions:", 1)[0]:
             findings.append(f"CI must own the consolidated {trigger.strip(': ')} trigger")
+    scorecard_block = ci.split("  scorecard:", 1)[-1].split("\n  bot-governance:", 1)[0]
+    if "github.ref == 'refs/heads/main'" not in scorecard_block:
+        findings.append("Scorecard must run only on the default main ref")
 
     # 1. Trigger constraints
     on_block = workflow.split("permissions:", 1)[0]
