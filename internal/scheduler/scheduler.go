@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 )
 
@@ -32,6 +33,12 @@ type OwnerRecord struct {
 func (d Definition) Validate() error {
 	if strings.TrimSpace(d.JobID) == "" || strings.TrimSpace(d.Executable) == "" || strings.TrimSpace(d.Config) == "" {
 		return fmt.Errorf("scheduler definition requires job_id, executable, and config")
+	}
+	if !isAbsolutePath(d.Executable) {
+		return fmt.Errorf("scheduler definition requires absolute executable")
+	}
+	if !isAbsolutePath(d.Config) {
+		return fmt.Errorf("scheduler definition requires absolute config")
 	}
 	if d.IntervalSeconds <= 0 || d.ExecutionLimitSeconds <= 0 {
 		return fmt.Errorf("scheduler interval and execution limit must be > 0")
@@ -74,12 +81,59 @@ func ValidateOwner(current OwnerRecord, desired Definition, replace bool) error 
 	return nil
 }
 
+func isAbsolutePath(value string) bool {
+	if filepath.IsAbs(value) {
+		return true
+	}
+	return len(value) >= 3 &&
+		((value[0] >= 'a' && value[0] <= 'z') || (value[0] >= 'A' && value[0] <= 'Z')) &&
+		value[1] == ':' && (value[2] == '/' || value[2] == '\\')
+}
+
 func commandLine(d Definition) string {
-	parts := []string{quote(d.Executable), "sync", "--format", "json", "--config", quote(d.Config)}
-	if len(d.Arguments) > 0 {
-		parts = append([]string{quote(d.Executable)}, quoteArgs(d.Arguments)...)
+	parts := []string{quote(d.Executable)}
+	for _, arg := range schedulerArguments(d) {
+		parts = append(parts, quote(arg))
 	}
 	return strings.Join(parts, " ")
+}
+
+func schedulerArguments(d Definition) []string {
+	args := append([]string(nil), d.Arguments...)
+	if len(args) == 0 {
+		return []string{"sync", "--format", "json", "--config", d.Config}
+	}
+	if !containsArgument(args, "sync") {
+		args = append([]string{"sync"}, args...)
+	}
+	if !containsFlagValue(args, "--format") {
+		args = append(args, "--format", "json")
+	}
+	if !containsFlagValue(args, "--config") {
+		args = append(args, "--config", d.Config)
+	}
+	return args
+}
+
+func containsArgument(args []string, want string) bool {
+	for _, arg := range args {
+		if arg == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsFlagValue(args []string, flag string) bool {
+	for i, arg := range args {
+		if arg == flag && i+1 < len(args) && strings.TrimSpace(args[i+1]) != "" && !strings.HasPrefix(args[i+1], "-") {
+			return true
+		}
+		if strings.HasPrefix(arg, flag+"=") && strings.TrimSpace(strings.TrimPrefix(arg, flag+"=")) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func quote(value string) string {

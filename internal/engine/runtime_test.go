@@ -12,9 +12,9 @@ func validRuntimeForEngine(t *testing.T) config.RcloneRuntime {
 	t.Helper()
 	runtimeDir := t.TempDir()
 	return config.RcloneRuntime{
-		Executable: filepath.Join(runtimeDir, "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:exe",
+		Executable: filepath.Join(runtimeDir, "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:" + strings.Repeat("b", 64),
 		Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
-		Config: filepath.Join(runtimeDir, "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg",
+		Config: filepath.Join(runtimeDir, "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:" + strings.Repeat("c", 64),
 		AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		Environment: map[string]string{"RCLONE_LOCAL_NO_CHECK_UPDATED": "true"},
 	}

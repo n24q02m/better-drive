@@ -3,8 +3,7 @@ package scheduler
 import "fmt"
 
 func renderDarwin(d Definition) []byte {
-	args := append([]string{d.Executable}, d.Arguments...)
-	args = append(args, "--config", d.Config)
+	args := append([]string{d.Executable}, schedulerArguments(d)...)
 	items := ""
 	for _, arg := range args {
 		items += fmt.Sprintf("    <string>%s</string>\n", xmlEscape(arg))

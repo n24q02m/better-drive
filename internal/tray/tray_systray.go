@@ -4,7 +4,6 @@ package tray
 
 import (
 	"os/exec"
-	"path/filepath"
 	"runtime"
 
 	"fyne.io/systray"
@@ -36,16 +35,17 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
 	agg.OnChange(func(aggregate AggregateState) {
-		st := aggregate.State
-		systray.SetTooltip("better-drive - " + st.String())
-		mStatus.SetTitle("Status: " + st.String())
-		mStatus.SetTooltip("Current status: " + st.String())
-		if st == syncloop.StatePaused {
-			mPause.SetTitle("Resume")
-			mPause.SetTooltip("Resume scheduled syncs for all pairs")
+		systray.SetTooltip(trayIconTooltip(aggregate))
+		statusTitle, statusTooltip := trayStatusText(aggregate)
+		mStatus.SetTitle(statusTitle)
+		mStatus.SetTooltip(statusTooltip)
+		pauseEnabled, pauseTitle, pauseTooltip := pauseMenuState(aggregate)
+		mPause.SetTitle(pauseTitle)
+		mPause.SetTooltip(pauseTooltip)
+		if pauseEnabled {
+			mPause.Enable()
 		} else {
-			mPause.SetTitle("Pause")
-			mPause.SetTooltip("Pause scheduled syncs for all pairs")
+			mPause.Disable()
 		}
 		syncEnabled, syncTooltip := syncMenuState(aggregate)
 		if syncEnabled {
@@ -64,6 +64,9 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 					l.SyncNow()
 				}
 			case <-mPause.ClickedCh:
+				if agg.Aggregate().NeedsResync {
+					continue
+				}
 				if agg.State() == syncloop.StatePaused {
 					for _, l := range loops {
 						l.Resume()
@@ -86,9 +89,13 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 }
 
 func openFolder(path string) {
-	if runtime.GOOS == "windows" {
-		cleanPath := filepath.Clean(path)
-		/* #nosec G204 */
-		_ = exec.Command("explorer", cleanPath).Start()
+	if runtime.GOOS != "windows" {
+		return
 	}
+	cleanPath, err := validateOpenFolder(path)
+	if err != nil {
+		return
+	}
+	/* #nosec G204 */
+	_ = exec.Command("explorer", cleanPath).Start()
 }

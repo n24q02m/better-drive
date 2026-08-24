@@ -99,6 +99,15 @@ func TestValidateManifestRejectsBudgetAndExpiry(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRejectsByteCountOverflow(t *testing.T) {
+	m := validManifest()
+	m.Objects[0].Size = maxInt64
+	m.Objects[1].Size = 1
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("ValidateManifest overflow error = %v, want overflow rejection", err)
+	}
+}
+
 func TestCanonicalManifestSortsObjectsAndDigestsStableBytes(t *testing.T) {
 	m := validManifest()
 	first, err := CanonicalManifest(m)

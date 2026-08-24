@@ -2,10 +2,14 @@ package cli
 
 import (
 	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
+
+	"github.com/n24q02m/better-drive/internal/state"
 )
 
 func TestScheduleInstallRequiresDryRun(t *testing.T) {
@@ -56,5 +60,88 @@ delete_policy = "none"
 	}
 	if !strings.Contains(out.String(), "Persistent=true") || !strings.Contains(out.String(), "job-1") {
 		t.Fatalf("schedule output = %s, want Linux persistent timer definition", out.String())
+	}
+}
+
+func TestOwnerRecordFromStatePreservesOwnerJobID(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now().UTC()
+	persisted := state.State{
+		SchemaVersion: state.CurrentSchemaVersion,
+		EngineVersion: "1.6.0",
+		Scheduler: state.SchedulerState{
+			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,
+			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
+			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+		},
+	}
+	if err := state.Save(statePath, persisted); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	t.Setenv("BETTER_DRIVE_STATE", statePath)
+	got, err := ownerRecordFromState()
+	if err != nil {
+		t.Fatalf("ownerRecordFromState: %v", err)
+	}
+	if got.Owner != "better-drive" || got.JobID != "job-1" {
+		t.Fatalf("owner record = %#v, want owner and job id readback", got)
+	}
+}
+
+func TestOwnerRecordFromStateMapsAggregateSyncOwnerToManagedOwner(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now().UTC()
+	persisted := state.State{
+		SchemaVersion: state.CurrentSchemaVersion,
+		EngineVersion: "1.6.0",
+		Scheduler: state.SchedulerState{
+			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
+			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
+			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+		},
+	}
+	if err := state.Save(statePath, persisted); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	t.Setenv("BETTER_DRIVE_STATE", statePath)
+
+	got, err := ownerRecordFromState()
+	if err != nil {
+		t.Fatalf("ownerRecordFromState: %v", err)
+	}
+	if got.Owner != "better-drive" || got.JobID != "" {
+		t.Fatalf("owner record = %#v, want aggregate managed owner without per-job mismatch", got)
+	}
+}
+
+func TestScheduleStatusReevaluatesSchedulerFreshness(t *testing.T) {
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	now := time.Now().UTC()
+	persisted := state.State{
+		SchemaVersion: state.CurrentSchemaVersion,
+		EngineVersion: "1.6.0",
+		Scheduler: state.SchedulerState{
+			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,
+			ObservedAt: now.Add(-2 * time.Hour), FreshnessWindow: time.Minute, CatchUpGrace: time.Hour,
+			ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok", Health: state.HealthHealthy,
+		},
+	}
+	if err := state.Save(statePath, persisted); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	t.Setenv("BETTER_DRIVE_STATE", statePath)
+	var out bytes.Buffer
+	cmd := scheduleStatusCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("schedule status: %v", err)
+	}
+	var got state.SchedulerState
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("decode scheduler status: %v", err)
+	}
+	if got.Health != state.HealthStale {
+		t.Fatalf("scheduler health=%q, want %q", got.Health, state.HealthStale)
 	}
 }

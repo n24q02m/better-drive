@@ -26,6 +26,19 @@ func TestRenderWindowsDefinitionHasHeadlessSafetyAndCatchup(t *testing.T) {
 	}
 }
 
+func TestDefinitionRejectsRelativeExecutableAndConfig(t *testing.T) {
+	definition := testDefinition()
+	definition.Executable = "better-drive.exe"
+	if err := definition.Validate(); err == nil || !strings.Contains(err.Error(), "absolute executable") {
+		t.Fatalf("Validate executable error = %v, want absolute-path rejection", err)
+	}
+	definition = testDefinition()
+	definition.Config = "config.toml"
+	if err := definition.Validate(); err == nil || !strings.Contains(err.Error(), "absolute config") {
+		t.Fatalf("Validate config error = %v, want absolute-path rejection", err)
+	}
+}
+
 func TestRenderLinuxDefinitionPersistsTimer(t *testing.T) {
 	got, err := Render(PlatformLinux, testDefinition())
 	if err != nil {
@@ -49,6 +62,45 @@ func TestRenderDarwinDefinitionIsLaunchAgent(t *testing.T) {
 		if !strings.Contains(text, want) {
 			t.Errorf("Darwin definition missing %q: %s", want, text)
 		}
+	}
+}
+
+func TestRenderersKeepRequiredSyncArgumentsWhenOverridesArePartial(t *testing.T) {
+	definition := testDefinition()
+	linux, err := Render(PlatformLinux, definition)
+	if err != nil {
+		t.Fatalf("Render linux: %v", err)
+	}
+	linuxText := string(linux)
+	for _, want := range []string{"sync", "--format", "json", "--config", definition.Config} {
+		if !strings.Contains(linuxText, want) {
+			t.Errorf("linux renderer missing required argument %q: %s", want, linuxText)
+		}
+	}
+
+	definition.Arguments = nil
+	darwin, err := Render(PlatformDarwin, definition)
+	if err != nil {
+		t.Fatalf("Render darwin: %v", err)
+	}
+	darwinText := string(darwin)
+	for _, want := range []string{"sync", "--format", "json", "--config", definition.Config} {
+		if !strings.Contains(darwinText, want) {
+			t.Errorf("darwin renderer missing required argument %q: %s", want, darwinText)
+		}
+	}
+}
+
+func TestRendererRepairsIncompleteFlagArguments(t *testing.T) {
+	definition := testDefinition()
+	definition.Arguments = []string{"sync", "--format", "--config"}
+	got, err := Render(PlatformLinux, definition)
+	if err != nil {
+		t.Fatalf("Render linux: %v", err)
+	}
+	text := string(got)
+	if !strings.Contains(text, `"--format" "json"`) || !strings.Contains(text, `"--config" "`+definition.Config+`"`) {
+		t.Fatalf("linux renderer did not repair incomplete flags: %s", text)
 	}
 }
 

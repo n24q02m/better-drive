@@ -102,13 +102,35 @@ func restoreFetchCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
 			journal := restore.Journal{Path: filepath.Join(plan.Root, ".restore-apply.jsonl")}
+			transactionID, err := restore.NewTransactionID()
+			if err != nil {
+				return err
+			}
+			runRecords := make([]restore.JournalRecord, 0, len(plan.Entries)*2)
+			recoverFailure := func(cause error) error {
+				if recoveryErr := restore.RecoverCreateOnly(plan.Root, runRecords); recoveryErr != nil {
+					return fmt.Errorf("%v; recover staged files: %w", cause, recoveryErr)
+				}
+				return cause
+			}
 			for _, entry := range plan.Entries {
+				record := restore.JournalRecord{
+					TransactionID: transactionID,
+					Entry:         entry.RelativePath, Action: "create", Before: "absent", After: "staged",
+					SourceDigest: entry.SourceDigest,
+				}
+				if err := journal.Append(record); err != nil {
+					return recoverFailure(err)
+				}
+				runRecords = append(runRecords, record)
 				if err := restore.StageFile(plan, entry); err != nil {
-					return err
+					return recoverFailure(err)
 				}
-				if err := journal.Append(restore.JournalRecord{Entry: entry.RelativePath, Action: "create", Before: "absent", After: "created", SourceDigest: entry.SourceDigest}); err != nil {
-					return err
+				record.After = "created"
+				if err := journal.Append(record); err != nil {
+					return recoverFailure(err)
 				}
+				runRecords = append(runRecords, record)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "fetched %d entries into isolated root %s\n", len(plan.Entries), plan.Root)
 			return nil

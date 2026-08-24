@@ -118,6 +118,19 @@ func baselineExists(workdir string) bool {
 	return len(matches) > 0
 }
 
+// inspectSourceSafety records conservative source evidence for destructive
+// push-side transfers. The transferer computes the effective object count with
+// the same filters it will pass to rclone, so excluded-only inputs cannot make
+// an empty destructive source look non-empty.
+func inspectSourceSafety(ctx context.Context, syncer Syncer, path string, filters []string, stderr io.Writer) (wasNonEmpty *bool, objectCount *int64, err error) {
+	count, err := syncer.CountSourceObjects(ctx, path, filters, stderr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect source %q: %w", path, err)
+	}
+	history := true
+	return &history, &count, nil
+}
+
 func (l *Loop) State() State {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -249,11 +262,18 @@ func (l *Loop) runOnce() (err error) {
 	l.setState(StateSyncing)
 	var filters []string
 	filters, err = l.ignore()
+	var sourceWasNonEmpty *bool
+	var sourceObjectCount *int64
+	if err == nil && l.mode != "copy" && l.direction != "pull" {
+		sourceWasNonEmpty, sourceObjectCount, err = inspectSourceSafety(execContext, l.s, l.path1, filters, stderr)
+	}
 	var summary engine.ReplicaSummary
 	if err == nil {
 		summary, err = engine.ExecuteReplicas(l.s, engine.TransferSpec{
 			Local: l.path1, Mode: l.mode, Direction: l.direction, DryRun: dryRun,
-			Filters: filters, Context: execContext, Stderr: stderr, Replicas: replicas,
+			Filters: filters, Context: execContext, Stderr: stderr,
+			SourceWasNonEmpty: sourceWasNonEmpty, SourceObjectCount: sourceObjectCount,
+			Replicas: replicas,
 		})
 	}
 

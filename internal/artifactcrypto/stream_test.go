@@ -2,6 +2,7 @@ package artifactcrypto
 
 import (
 	"bytes"
+	"encoding/binary"
 	"strings"
 	"testing"
 )
@@ -51,5 +52,27 @@ func TestOpenRejectsTamperTruncationWrongKeyAndMetadataDrift(t *testing.T) {
 				t.Fatal("Open succeeded, want fail-closed rejection")
 			}
 		})
+	}
+}
+
+func TestOpenRejectsOversizedFrameBeforeReadingCiphertext(t *testing.T) {
+	key := []byte("0123456789abcdef0123456789abcdef")
+	metadata := Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "key:v1"}
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader("secret payload"), key, metadata); err != nil {
+		t.Fatal(err)
+	}
+	data := append([]byte(nil), sealed.Bytes()...)
+	headerLen := binary.BigEndian.Uint32(data[len(magic) : len(magic)+4])
+	frameOffset := len(magic) + 4 + int(headerLen)
+	plainLenOffset := frameOffset + 1 + 8
+	cipherLenOffset := plainLenOffset + 4
+	binary.BigEndian.PutUint32(data[plainLenOffset:plainLenOffset+4], chunkSize+1)
+	binary.BigEndian.PutUint32(data[cipherLenOffset:cipherLenOffset+4], chunkSize+1+16)
+
+	var out bytes.Buffer
+	err := Open(&out, bytes.NewReader(data), key, metadata)
+	if err == nil || !strings.Contains(err.Error(), "frame header") {
+		t.Fatalf("Open error = %v, want oversized-frame header rejection", err)
 	}
 }

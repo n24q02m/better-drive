@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 )
@@ -8,6 +9,7 @@ import (
 type MigrationPreview struct {
 	SchemaVersion int                     `json:"schema_version"`
 	RcloneRuntime MigrationRuntimePreview `json:"rclone_runtime"`
+	Blockers      []string                `json:"blockers,omitempty"`
 	Jobs          []MigrationJobPreview   `json:"jobs"`
 }
 
@@ -58,6 +60,7 @@ type MigrationDestinationPreview struct {
 func Preview(c *Config) MigrationPreview {
 	preview := MigrationPreview{
 		SchemaVersion: c.SchemaVersion,
+		Blockers:      migrationBlockers(c),
 		RcloneRuntime: MigrationRuntimePreview{
 			Executable:       redactUserPath(c.RcloneRuntime.Executable),
 			ExecutableFileID: c.RcloneRuntime.ExecutableFileID,
@@ -88,6 +91,29 @@ func Preview(c *Config) MigrationPreview {
 		preview.Jobs = append(preview.Jobs, item)
 	}
 	return preview
+}
+
+func migrationBlockers(c *Config) []string {
+	var blockers []string
+	if err := c.RcloneRuntime.Validate(); err != nil {
+		blockers = append(blockers, "rclone_runtime: "+err.Error())
+	}
+	if len(c.CategoryPolicies) == 0 {
+		blockers = append(blockers, "category policy registry is required")
+	} else if err := c.validateCategoryPolicies(); err != nil {
+		blockers = append(blockers, "category policy binding: "+err.Error())
+	}
+	for _, job := range c.Jobs {
+		if job.CategoryPolicyID == "" || job.CategoryPolicyVersion <= 0 || job.CategoryPolicyDigest == "" {
+			blockers = append(blockers, fmt.Sprintf("job %q: category policy id/version/digest are required", job.ID))
+		}
+		for index, destination := range job.Destinations {
+			if destination.AccountID == "" || destination.RootID == "" {
+				blockers = append(blockers, fmt.Sprintf("job %q destination %d: account_id and root_id are required", job.ID, index))
+			}
+		}
+	}
+	return blockers
 }
 
 func redactUserPath(path string) string {

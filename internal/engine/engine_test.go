@@ -1442,3 +1442,69 @@ func TestSyncOpsSerialize(t *testing.T) {
 		t.Fatalf("concurrent sync ops overlapped: maxActive=%d, want 1 (engine mutex must serialize)", maxActive)
 	}
 }
+
+func TestCountSourceObjectsUsesRcloneSizeWithTransferFilters(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "excluded.txt"), []byte("not transferable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var gotArgs []string
+	var gotRules string
+	e := newFakeRunnerEngine("C:/cfg/rclone.conf", func(args ...string) (string, string, error) {
+		gotArgs = append([]string(nil), args...)
+		for i, arg := range args {
+			if arg == "--filter-from" && i+1 < len(args) {
+				data, err := os.ReadFile(args[i+1])
+				if err != nil {
+					t.Fatalf("read filter file during runner call: %v", err)
+				}
+				gotRules = string(data)
+			}
+		}
+		return `{"count":0,"bytes":0}`, "", nil
+	})
+
+	count, err := e.CountSourceObjects(nil, source, []string{"- excluded.txt"}, nil)
+	if err != nil {
+		t.Fatalf("CountSourceObjects: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("count = %d, want effective filtered count 0", count)
+	}
+	if !reflect.DeepEqual(gotArgs[:4], []string{"--config", "C:/cfg/rclone.conf", "size", source}) {
+		t.Fatalf("argv prefix = %#v", gotArgs)
+	}
+	if !strings.Contains(gotRules, "- excluded.txt") {
+		t.Fatalf("filter rules = %q, want exclusion", gotRules)
+	}
+}
+
+func TestExecWithContextDiscardsTransferStdout(t *testing.T) {
+	e := newFakeStreamingRunnerEngine("", nil, func(_ context.Context, stdout, _ io.Writer, _ ...string) error {
+		if stdout != io.Discard {
+			t.Fatalf("transfer stdout writer = %T, want io.Discard", stdout)
+		}
+		return nil
+	})
+
+	if _, err := e.execWithContext(context.Background(), io.Discard, "sync", "local", "remote:"); err != nil {
+		t.Fatalf("execWithContext: %v", err)
+	}
+}
+
+func TestCountSourceObjectsCapturesBoundedSizeJSONWithContext(t *testing.T) {
+	source := t.TempDir()
+	e := newFakeStreamingRunnerEngine("", nil, func(_ context.Context, stdout, _ io.Writer, _ ...string) error {
+		_, err := io.WriteString(stdout, `{"count":7,"bytes":21}`)
+		return err
+	})
+
+	count, err := e.CountSourceObjects(context.Background(), source, nil, io.Discard)
+	if err != nil {
+		t.Fatalf("CountSourceObjects: %v", err)
+	}
+	if count != 7 {
+		t.Fatalf("count = %d, want 7", count)
+	}
+}

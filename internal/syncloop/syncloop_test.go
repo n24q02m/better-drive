@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -15,12 +16,47 @@ import (
 )
 
 type fakeSyncer struct {
-	mu        sync.Mutex
-	calls     []engine.BisyncParams
-	copyCalls []engine.CopyParams
-	syncCalls []engine.CopyParams
-	err       error
-	inFlight  func()
+	mu             sync.Mutex
+	calls          []engine.BisyncParams
+	copyCalls      []engine.CopyParams
+	syncCalls      []engine.CopyParams
+	err            error
+	countErr       error
+	effectiveCount *int64
+	inFlight       func()
+}
+
+func (f *fakeSyncer) CountSourceObjects(_ context.Context, path string, _ []string, _ io.Writer) (int64, error) {
+	if f.countErr != nil {
+		return 0, f.countErr
+	}
+	if f.effectiveCount != nil {
+		return *f.effectiveCount, nil
+	}
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	if !info.IsDir() {
+		if info.Mode().IsRegular() {
+			return 1, nil
+		}
+		return 0, nil
+	}
+	var count int64
+	err = filepath.WalkDir(path, func(_ string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() && entry.Type().IsRegular() {
+			count++
+		}
+		return nil
+	})
+	return count, err
 }
 
 func (f *fakeSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
@@ -55,6 +91,9 @@ func (f *fakeSyncer) Sync(p engine.CopyParams) error {
 
 type panicSyncer struct{}
 
+func (panicSyncer) CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error) {
+	return 1, nil
+}
 func (panicSyncer) Bisync(engine.BisyncParams) (engine.BisyncResult, error) {
 	panic("simulated syncer panic")
 }
@@ -492,6 +531,80 @@ func TestModeSyncCallsSyncNotBisync(t *testing.T) {
 	}
 }
 
+func TestRunOnceProvidesSourceSafetyEvidenceToDestructiveTransfer(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "payload.txt"), []byte("payload"), 0o600); err != nil {
+		t.Fatalf("write source: %v", err)
+	}
+	f := &fakeSyncer{}
+	l := New(f, source, "gdrive:backup", filepath.Join(t.TempDir(), "work"), "sync", func() ([]string, error) {
+		return nil, nil
+	})
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.syncCalls) != 1 {
+		t.Fatalf("sync calls=%d, want 1", len(f.syncCalls))
+	}
+	p := f.syncCalls[0]
+	if p.SourceWasNonEmpty == nil || !*p.SourceWasNonEmpty {
+		t.Fatalf("SourceWasNonEmpty=%v, want true", p.SourceWasNonEmpty)
+	}
+	if p.SourceObjectCount == nil || *p.SourceObjectCount != 1 {
+		t.Fatalf("SourceObjectCount=%v, want 1", p.SourceObjectCount)
+	}
+}
+
+func TestRunOnceProvidesConservativeEvidenceForEmptyExistingSource(t *testing.T) {
+	f := &fakeSyncer{}
+	l := New(f, t.TempDir(), "gdrive:backup", filepath.Join(t.TempDir(), "work"), "sync", func() ([]string, error) {
+		return nil, nil
+	})
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.syncCalls) != 1 {
+		t.Fatalf("sync calls=%d, want 1", len(f.syncCalls))
+	}
+	p := f.syncCalls[0]
+	if p.SourceWasNonEmpty == nil || !*p.SourceWasNonEmpty || p.SourceObjectCount == nil || *p.SourceObjectCount != 0 {
+		t.Fatalf("empty-source evidence = %#v, want history=true and object count=0", p)
+	}
+}
+
+func TestInspectSourceSafetyFailsClosedForMissingSource(t *testing.T) {
+	wasNonEmpty, objectCount, err := inspectSourceSafety(context.Background(), &fakeSyncer{}, filepath.Join(t.TempDir(), "missing"), nil, nil)
+	if err != nil {
+		t.Fatalf("inspectSourceSafety: %v", err)
+	}
+	if wasNonEmpty == nil || !*wasNonEmpty || objectCount == nil || *objectCount != 0 {
+		t.Fatalf("missing-source evidence = (%v, %v), want history=true and object count=0", wasNonEmpty, objectCount)
+	}
+}
+
+func TestRunOnceUsesFilteredObjectCountForDestructiveSafety(t *testing.T) {
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "excluded.txt"), []byte("not transferable"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	count := int64(0)
+	f := &fakeSyncer{effectiveCount: &count}
+	l := New(f, source, "gdrive:backup", filepath.Join(t.TempDir(), "work"), "sync", func() ([]string, error) {
+		return []string{"- excluded.txt"}, nil
+	})
+
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.syncCalls) != 1 {
+		t.Fatalf("sync calls = %d, want 1", len(f.syncCalls))
+	}
+	got := f.syncCalls[0].SourceObjectCount
+	if got == nil || *got != 0 {
+		t.Fatalf("effective source object count = %v, want 0", got)
+	}
+}
+
 // TestModeBisyncUnaffectedByModeSupport is a regression guard: mode="bisync"
 // (the default/existing behaviour) must still call Bisync with the resync
 // flag driven by hasBaseline, exactly as before mode support existed.
@@ -750,6 +863,10 @@ func TestModeDefaultsToBisyncWhenEmpty(t *testing.T) {
 type directionReplicaSyncer struct {
 	copies      []engine.CopyParams
 	errByRemote map[string]error
+}
+
+func (f *directionReplicaSyncer) CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error) {
+	return 0, nil
 }
 
 func (f *directionReplicaSyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {

@@ -37,6 +37,18 @@ func TestValidateDestinationCollisionsRejectsExactAndAncestorOverlap(t *testing.
 	}
 }
 
+func TestDestinationIdentityRejectsEmbeddedNUL(t *testing.T) {
+	cases := []DestinationIdentity{
+		{Provider: "drive", AccountID: "acct\x00foreign", RootID: "root", Namespace: "backups/home"},
+		{Provider: "drive", AccountID: "acct", RootID: "root", Namespace: "backups\x00foreign/home"},
+	}
+	for _, identity := range cases {
+		if err := ValidateDestinationCollisions([]DestinationIdentity{identity}); err == nil || !strings.Contains(err.Error(), "NUL") {
+			t.Fatalf("identity %#v error = %v, want embedded-NUL rejection", identity, err)
+		}
+	}
+}
+
 func TestValidateQuarantineIdentityRejectsTransferOverlap(t *testing.T) {
 	transfer := DestinationIdentity{Provider: "drive", AccountID: "acct", RootID: "root", Namespace: "Backups"}
 	quarantine := DestinationIdentity{Provider: "drive", AccountID: "acct", RootID: "root", Namespace: "Backups/quarantine"}

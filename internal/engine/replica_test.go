@@ -1,7 +1,9 @@
 package engine
 
 import (
+	"context"
 	"errors"
+	"io"
 	"strings"
 	"testing"
 )
@@ -16,17 +18,27 @@ type replicaCall struct {
 type replicaFakeTransferer struct {
 	calls       []replicaCall
 	errByTarget map[string]error
+	lastBisync  BisyncParams
+	lastCopy    CopyParams
+	lastSync    CopyParams
+}
+
+func (f *replicaFakeTransferer) CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error) {
+	return 0, nil
 }
 
 func (f *replicaFakeTransferer) Bisync(p BisyncParams) (BisyncResult, error) {
+	f.lastBisync = p
 	f.calls = append(f.calls, replicaCall{kind: "bisync", local: p.Path1, remote: p.Path2, workdir: p.Workdir})
 	return BisyncResult{}, f.errByTarget[p.Path2]
 }
 func (f *replicaFakeTransferer) Copy(p CopyParams) error {
+	f.lastCopy = p
 	f.calls = append(f.calls, replicaCall{kind: "copy", local: p.Local, remote: p.Remote, workdir: p.Workdir})
 	return f.errByTarget[p.Remote]
 }
 func (f *replicaFakeTransferer) Sync(p CopyParams) error {
+	f.lastSync = p
 	f.calls = append(f.calls, replicaCall{kind: "sync", local: p.Local, remote: p.Remote, workdir: p.Workdir})
 	return f.errByTarget[p.Remote]
 }
@@ -76,9 +88,42 @@ func TestExecuteReplicasDispatchesPullAndBidirectionalBeforeAnySpawn(t *testing.
 	}
 
 	f = &replicaFakeTransferer{errByTarget: map[string]error{}}
-	_, err = ExecuteReplicas(f, TransferSpec{Local: "C:/source", Mode: "bisync", Direction: "bidirectional", Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, Workdir: "C:/work/r1"}}})
+	wasNonEmpty := true
+	objectCount := int64(1)
+	_, err = ExecuteReplicas(f, TransferSpec{Local: "C:/source", Mode: "bisync", Direction: "bidirectional", SourceWasNonEmpty: &wasNonEmpty, SourceObjectCount: &objectCount, Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, Workdir: "C:/work/r1"}}})
 	if err != nil || len(f.calls) != 1 || f.calls[0].kind != "bisync" {
 		t.Fatalf("bidirectional result calls=%#v err=%v, want one bisync call", f.calls, err)
+	}
+}
+
+func TestExecuteReplicasForwardsSafetyEvidence(t *testing.T) {
+	wasNonEmpty := true
+	objectCount := int64(3)
+	budget := &DeleteBudget{MaxObjects: 10, MaxBytes: 1000}
+	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
+	_, err := ExecuteReplicas(f, TransferSpec{
+		Local: "C:/source", Mode: "sync", Direction: "push",
+		SourceWasNonEmpty: &wasNonEmpty, SourceObjectCount: &objectCount, DeleteBudget: budget,
+		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, Workdir: "C:/work/r1"}},
+	})
+	if err != nil {
+		t.Fatalf("ExecuteReplicas: %v", err)
+	}
+	if f.lastSync.SourceWasNonEmpty == nil || *f.lastSync.SourceWasNonEmpty != wasNonEmpty ||
+		f.lastSync.SourceObjectCount == nil || *f.lastSync.SourceObjectCount != objectCount ||
+		f.lastSync.DeleteBudget != budget {
+		t.Fatalf("sync safety evidence = %#v, want forwarded pointers", f.lastSync)
+	}
+}
+
+func TestExecuteReplicasRejectsDestructiveTransferWithoutSourceSafetyEvidence(t *testing.T) {
+	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
+	_, err := ExecuteReplicas(f, TransferSpec{
+		Local: "C:/source", Mode: "sync", Direction: "push",
+		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, Workdir: "C:/work/r1"}},
+	})
+	if err == nil || !strings.Contains(err.Error(), "safety evidence") || len(f.calls) != 0 {
+		t.Fatalf("result err=%v calls=%#v, want missing-evidence rejection before transfer", err, f.calls)
 	}
 }
 

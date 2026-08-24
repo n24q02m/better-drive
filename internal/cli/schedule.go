@@ -15,6 +15,8 @@ import (
 	"github.com/spf13/cobra"
 )
 
+const aggregateSchedulerOwnerJobID = "scheduled-sync"
+
 type schedulePreview struct {
 	JobID      string `json:"job_id"`
 	Platform   string `json:"platform"`
@@ -111,6 +113,9 @@ func scheduleStatusCmd() *cobra.Command {
 			} else if err != nil {
 				return err
 			}
+			if err == nil {
+				persisted.Scheduler.Health = state.EvaluateSchedulerHealth(persisted.Scheduler, time.Now().UTC())
+			}
 			if format == output.FormatJSON {
 				return output.RenderJSON(cmd.OutOrStdout(), persisted.Scheduler)
 			}
@@ -162,5 +167,9 @@ func ownerRecordFromState() (scheduler.OwnerRecord, error) {
 	if err != nil {
 		return scheduler.OwnerRecord{}, err
 	}
-	return scheduler.OwnerRecord{Owner: persisted.Scheduler.Owner}, nil
+	jobID := persisted.Scheduler.OwnerJobID
+	if persisted.Scheduler.Owner == "better-drive" && jobID == aggregateSchedulerOwnerJobID {
+		jobID = ""
+	}
+	return scheduler.OwnerRecord{Owner: persisted.Scheduler.Owner, JobID: jobID}, nil
 }

@@ -39,7 +39,8 @@ interval = "30s"
 		t.Fatalf("migration preview leaked a username: %s", out.String())
 	}
 	var got struct {
-		SchemaVersion int `json:"schema_version"`
+		SchemaVersion int      `json:"schema_version"`
+		Blockers      []string `json:"blockers"`
 		Jobs          []struct {
 			ID        string `json:"id"`
 			Direction string `json:"direction"`
@@ -52,6 +53,9 @@ interval = "30s"
 	}
 	if got.SchemaVersion != 2 || len(got.Jobs) != 1 || got.Jobs[0].Direction != "push" || got.Jobs[0].Mode != "copy" || !got.Jobs[0].Required {
 		t.Fatalf("preview = %#v, want normalized v2 copy/push/required job", got)
+	}
+	if len(got.Blockers) == 0 || !strings.Contains(strings.Join(got.Blockers, "\n"), "category policy") {
+		t.Fatalf("blockers = %#v, want category-policy blocker", got.Blockers)
 	}
 	after, err := os.ReadFile(path)
 	if err != nil {

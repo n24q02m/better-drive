@@ -2,6 +2,7 @@ package restore
 
 import (
 	"bufio"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -186,11 +187,20 @@ type Journal struct {
 }
 
 type JournalRecord struct {
-	Entry        string `json:"entry"`
-	Action       string `json:"action"`
-	Before       string `json:"before"`
-	After        string `json:"after"`
-	SourceDigest string `json:"source_digest"`
+	TransactionID string `json:"transaction_id"`
+	Entry         string `json:"entry"`
+	Action        string `json:"action"`
+	Before        string `json:"before"`
+	After         string `json:"after"`
+	SourceDigest  string `json:"source_digest"`
+}
+
+func NewTransactionID() (string, error) {
+	var id [16]byte
+	if _, err := rand.Read(id[:]); err != nil {
+		return "", fmt.Errorf("generate restore transaction id: %w", err)
+	}
+	return hex.EncodeToString(id[:]), nil
 }
 
 func (j Journal) Append(record JournalRecord) error {
@@ -236,8 +246,90 @@ func (j Journal) Read() ([]JournalRecord, error) {
 
 func (j Journal) ValidateRecovery(records []JournalRecord) error {
 	for i, record := range records {
-		if record.Before == "" || record.After == "" || record.SourceDigest == "" {
+		if record.TransactionID == "" || record.Before == "" || record.After == "" || record.SourceDigest == "" {
 			return fmt.Errorf("journal record %d lacks recovery fields", i)
+		}
+	}
+	return nil
+}
+
+func safeExistingParent(root, relative string) (string, bool, error) {
+	parts := strings.Split(relative, "/")
+	parent := root
+	for _, part := range parts[:len(parts)-1] {
+		parent = filepath.Join(parent, part)
+		info, err := os.Lstat(parent)
+		if os.IsNotExist(err) {
+			return parent, false, nil
+		}
+		if err != nil {
+			return "", false, err
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+			return "", false, fmt.Errorf("restore ancestor is not a safe directory")
+		}
+	}
+	return parent, true, nil
+}
+
+// RecoverCreateOnly removes only files that a journal proves were newly
+// created and whose current content still matches the recorded digest.
+// Replace actions are intentionally unsupported: rollback of an existing
+// destination requires an owner-gated restore protocol, not best-effort
+// cleanup.
+func RecoverCreateOnly(root string, records []JournalRecord) error {
+	if err := ensureSafeRoot(root); err != nil {
+		return err
+	}
+	if err := (Journal{}).ValidateRecovery(records); err != nil {
+		return err
+	}
+	for i := len(records) - 1; i >= 0; i-- {
+		record := records[i]
+		if record.Action != "create" || record.Before != "absent" || (record.After != "created" && record.After != "staged") {
+			return fmt.Errorf("journal record %d is not a create-only recovery marker", i)
+		}
+		clean, err := cleanRelativePath(record.Entry)
+		if err != nil {
+			return fmt.Errorf("journal record %d: %w", i, err)
+		}
+		parent, exists, err := safeExistingParent(root, clean)
+		if err != nil {
+			return fmt.Errorf("journal record %d: %w", i, err)
+		}
+		if !exists {
+			continue
+		}
+		destination := filepath.Join(parent, filepath.Base(filepath.FromSlash(clean)))
+		info, err := os.Lstat(destination)
+		if os.IsNotExist(err) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect recovery destination %q: %w", clean, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+			return fmt.Errorf("recovery destination %q is not a regular file", clean)
+		}
+		file, err := os.Open(destination)
+		if err != nil {
+			return fmt.Errorf("open recovery destination %q: %w", clean, err)
+		}
+		hash := sha256.New()
+		_, copyErr := io.Copy(hash, file)
+		closeErr := file.Close()
+		if copyErr != nil {
+			return fmt.Errorf("hash recovery destination %q: %w", clean, copyErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close recovery destination %q: %w", clean, closeErr)
+		}
+		got := "sha256:" + hex.EncodeToString(hash.Sum(nil))
+		if got != record.SourceDigest {
+			return fmt.Errorf("recovery destination %q digest mismatch", clean)
+		}
+		if err := os.Remove(destination); err != nil {
+			return fmt.Errorf("remove recovered destination %q: %w", clean, err)
 		}
 	}
 	return nil

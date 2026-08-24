@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -17,13 +18,18 @@ const (
 
 // PairStatus is one destination of a normalized job, as reported by `status`.
 type PairStatus struct {
-	JobID     string `json:"job_id,omitempty"`
-	Local     string `json:"local"`
-	Remote    string `json:"remote"`
-	Mode      string `json:"mode"`
-	Interval  string `json:"interval"`
-	JobStatus string `json:"job_status,omitempty"`
-	Health    string `json:"health,omitempty"`
+	JobID       string     `json:"job_id,omitempty"`
+	Local       string     `json:"local"`
+	Remote      string     `json:"remote"`
+	Mode        string     `json:"mode"`
+	Interval    string     `json:"interval"`
+	JobStatus   string     `json:"job_status,omitempty"`
+	Health      string     `json:"health,omitempty"`
+	LastSuccess *time.Time `json:"last_success,omitempty"`
+	NextDue     *time.Time `json:"next_due,omitempty"`
+	ObjectCount int64      `json:"object_count"`
+	ByteCount   int64      `json:"byte_count"`
+	Warnings    []string   `json:"warnings,omitempty"`
 }
 
 // ReplicaResult is one destination outcome within a job's sync cycle.
@@ -35,16 +41,18 @@ type ReplicaResult struct {
 	Error    string `json:"error,omitempty"`
 }
 
-// PairResult is the outcome of syncing one normalized job, retaining the
-// historical wire name for compatibility.
 type PairResult struct {
-	JobID    string          `json:"job_id,omitempty"`
-	Local    string          `json:"local"`
-	Remote   string          `json:"remote"`
-	Mode     string          `json:"mode"`
-	Status   string          `json:"status"` // ok | degraded | failed | skipped
-	Error    string          `json:"error,omitempty"`
-	Replicas []ReplicaResult `json:"replicas,omitempty"`
+	JobID       string          `json:"job_id,omitempty"`
+	Local       string          `json:"local"`
+	Remote      string          `json:"remote"`
+	Mode        string          `json:"mode"`
+	Status      string          `json:"status"` // ok | degraded | failed | skipped
+	Error       string          `json:"error,omitempty"`
+	Replicas    []ReplicaResult `json:"replicas,omitempty"`
+	ObjectCount int64           `json:"object_count,omitempty"`
+	ByteCount   int64           `json:"byte_count,omitempty"`
+	NextDue     time.Time       `json:"next_due,omitempty"`
+	Warnings    []string        `json:"warnings,omitempty"`
 	// DryRun reports whether this cycle only previewed changes (--dry-run)
 	// rather than applying them.
 	DryRun bool `json:"dry_run,omitempty"`

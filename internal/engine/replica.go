@@ -9,6 +9,7 @@ import (
 
 // Transferer is the engine surface needed by replica orchestration.
 type Transferer interface {
+	CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error)
 	Bisync(BisyncParams) (BisyncResult, error)
 	Copy(CopyParams) error
 	Sync(CopyParams) error
@@ -38,7 +39,12 @@ type TransferSpec struct {
 	Filters   []string
 	Context   context.Context
 	Stderr    io.Writer
-	Replicas  []ReplicaSpec
+	// Optional source safety evidence is forwarded to every destructive
+	// transfer so replica orchestration cannot bypass engine guards.
+	SourceWasNonEmpty *bool
+	SourceObjectCount *int64
+	DeleteBudget      *DeleteBudget
+	Replicas          []ReplicaSpec
 }
 
 type ReplicaOutcome struct {
@@ -122,6 +128,14 @@ func ExecuteReplicas(transferer Transferer, spec TransferSpec) (ReplicaSummary, 
 	if err := ValidateTransfer(spec.Mode, spec.Direction); err != nil {
 		return ReplicaSummary{}, err
 	}
+	if spec.Mode == "sync" || spec.Mode == "bisync" {
+		if spec.Direction == "pull" {
+			return ReplicaSummary{}, fmt.Errorf("destructive transfer requires push-side source evidence; pull direction is not enrolled")
+		}
+		if spec.SourceWasNonEmpty == nil || spec.SourceObjectCount == nil {
+			return ReplicaSummary{}, fmt.Errorf("destructive transfer source safety evidence is required")
+		}
+	}
 	if strings.TrimSpace(spec.Local) == "" {
 		return ReplicaSummary{}, fmt.Errorf("transfer local source is required")
 	}
@@ -158,19 +172,19 @@ func ExecuteReplicas(transferer Transferer, spec TransferSpec) (ReplicaSummary, 
 			if spec.Direction == "pull" {
 				local, remote = remote, local
 			}
-			err = transferer.Copy(CopyParams{Local: local, Remote: remote, Workdir: replica.Workdir, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
+			err = transferer.Copy(CopyParams{Local: local, Remote: remote, Workdir: replica.Workdir, SourceWasNonEmpty: spec.SourceWasNonEmpty, SourceObjectCount: spec.SourceObjectCount, DeleteBudget: spec.DeleteBudget, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
 		case "sync":
 			local, remote := spec.Local, replica.Target
 			if spec.Direction == "pull" {
 				local, remote = remote, local
 			}
-			err = transferer.Sync(CopyParams{Local: local, Remote: remote, Workdir: replica.Workdir, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
+			err = transferer.Sync(CopyParams{Local: local, Remote: remote, Workdir: replica.Workdir, SourceWasNonEmpty: spec.SourceWasNonEmpty, SourceObjectCount: spec.SourceObjectCount, DeleteBudget: spec.DeleteBudget, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
 		case "bisync":
 			err = func() error {
 				if strings.TrimSpace(replica.Workdir) == "" {
 					return fmt.Errorf("replica workdir is required for bisync")
 				}
-				_, callErr := transferer.Bisync(BisyncParams{Path1: spec.Local, Path2: replica.Target, Workdir: replica.Workdir, Resync: spec.Resync || replica.Resync, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
+				_, callErr := transferer.Bisync(BisyncParams{Path1: spec.Local, Path2: replica.Target, Workdir: replica.Workdir, Resync: spec.Resync || replica.Resync, SourceWasNonEmpty: spec.SourceWasNonEmpty, SourceObjectCount: spec.SourceObjectCount, DeleteBudget: spec.DeleteBudget, DryRun: spec.DryRun, Filters: spec.Filters, Context: spec.Context, Stderr: spec.Stderr})
 				return callErr
 			}()
 		}

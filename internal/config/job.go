@@ -3,8 +3,11 @@ package config
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
@@ -85,6 +88,14 @@ func (r RcloneRuntime) Validate() error {
 			return fmt.Errorf("rclone_runtime.%s is required", name)
 		}
 	}
+	for name, digest := range map[string]string{
+		"executable_digest": r.ExecutableDigest,
+		"config_digest":     r.ConfigDigest,
+	} {
+		if !isSHA256Digest(digest) {
+			return fmt.Errorf("rclone_runtime.%s must use sha256:<64 hex chars>", name)
+		}
+	}
 	if len(r.AllowedRemotes) == 0 {
 		return fmt.Errorf("rclone_runtime.allowed_remotes is required")
 	}
@@ -101,6 +112,174 @@ func (r RcloneRuntime) Validate() error {
 		return fmt.Errorf("rclone_runtime.hooks is forbidden")
 	}
 	return nil
+}
+
+type CategorySizeGuard struct {
+	MaxBytes int64 `toml:"max_bytes" json:"max_bytes"`
+}
+
+type CategoryPolicy struct {
+	ID                 string            `toml:"id" json:"id"`
+	Version            int               `toml:"version" json:"version"`
+	Digest             string            `toml:"digest" json:"digest"`
+	AllowlistedRoot    string            `toml:"allowlisted_root" json:"allowlisted_root"`
+	MandatoryDenylist  []string          `toml:"mandatory_denylist" json:"mandatory_denylist"`
+	SizeGuard          CategorySizeGuard `toml:"size_guard" json:"size_guard"`
+	RestoreExpectation string            `toml:"restore_expectation" json:"restore_expectation"`
+}
+
+func (p CategoryPolicy) Validate() error {
+	if strings.TrimSpace(p.ID) == "" {
+		return fmt.Errorf("id is required")
+	}
+	if p.Version <= 0 {
+		return fmt.Errorf("version must be > 0")
+	}
+	if !isSHA256Digest(p.Digest) {
+		return fmt.Errorf("digest must use sha256:<64 hex chars>")
+	}
+	if strings.TrimSpace(p.AllowlistedRoot) == "" {
+		return fmt.Errorf("allowlisted_root is required")
+	}
+	if len(p.MandatoryDenylist) == 0 {
+		return fmt.Errorf("mandatory_denylist is required")
+	}
+	for _, entry := range p.MandatoryDenylist {
+		if strings.TrimSpace(entry) == "" {
+			return fmt.Errorf("mandatory_denylist contains an empty entry")
+		}
+	}
+	if p.SizeGuard.MaxBytes <= 0 {
+		return fmt.Errorf("size_guard.max_bytes must be > 0")
+	}
+	if strings.TrimSpace(p.RestoreExpectation) == "" {
+		return fmt.Errorf("restore_expectation is required")
+	}
+	return nil
+}
+
+func (c *Config) validateCategoryPolicies() error {
+	if len(c.CategoryPolicies) == 0 {
+		return fmt.Errorf("category policy registry is required")
+	}
+	byBinding := make(map[string]CategoryPolicy, len(c.CategoryPolicies))
+	for _, policy := range c.CategoryPolicies {
+		if err := policy.Validate(); err != nil {
+			return fmt.Errorf("category policy %q: %w", policy.ID, err)
+		}
+		binding := fmt.Sprintf("%s/%d", policy.ID, policy.Version)
+		if _, exists := byBinding[binding]; exists {
+			return fmt.Errorf("duplicate category policy %s", binding)
+		}
+		byBinding[binding] = policy
+	}
+	for _, job := range c.Jobs {
+		binding := fmt.Sprintf("%s/%d", job.CategoryPolicyID, job.CategoryPolicyVersion)
+		policy, exists := byBinding[binding]
+		if !exists {
+			return fmt.Errorf("job %q references missing category policy %s", job.ID, binding)
+		}
+		if policy.Digest != job.CategoryPolicyDigest {
+			return fmt.Errorf("job %q category policy digest mismatch", job.ID)
+		}
+		if !policyPathWithin(policy.AllowlistedRoot, job.Source) {
+			return fmt.Errorf("job %q source is outside category policy allowlisted_root", job.ID)
+		}
+		for _, denylistEntry := range policy.MandatoryDenylist {
+			if !containsString(job.Exclude, denylistEntry) {
+				return fmt.Errorf("job %q is missing mandatory denylist entry %q", job.ID, denylistEntry)
+			}
+		}
+	}
+	return nil
+}
+
+func policyPathWithin(root, source string) bool {
+	normalize := func(value string) string {
+		value = filepath.ToSlash(filepath.Clean(strings.ReplaceAll(value, "\\", "/")))
+		value = strings.TrimRight(value, "/")
+		if runtime.GOOS == "windows" {
+			value = strings.ToLower(value)
+		}
+		return value
+	}
+	root = normalize(root)
+	source = normalize(source)
+	if root == "" || source == "" {
+		return false
+	}
+	return source == root || strings.HasPrefix(source, root+"/")
+}
+func (c *Config) validateCategorySourceSizes() error {
+	policies := make(map[string]CategoryPolicy, len(c.CategoryPolicies))
+	for _, policy := range c.CategoryPolicies {
+		policies[fmt.Sprintf("%s/%d", policy.ID, policy.Version)] = policy
+	}
+	for _, job := range c.Jobs {
+		policy := policies[fmt.Sprintf("%s/%d", job.CategoryPolicyID, job.CategoryPolicyVersion)]
+		if _, err := sourceSizeWithinGuard(job.Source, job.Exclude, policy.SizeGuard.MaxBytes); err != nil {
+			return fmt.Errorf("job %q: %w", job.ID, err)
+		}
+	}
+	return nil
+}
+
+func sourceSizeWithinGuard(root string, excludes []string, maxBytes int64) (int64, error) {
+	info, err := os.Lstat(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	var total int64
+	add := func(size int64) error {
+		if size > maxBytes-total {
+			return fmt.Errorf("category source exceeds size guard (%d bytes)", maxBytes)
+		}
+		total += size
+		return nil
+	}
+	if !info.IsDir() {
+		if err := add(info.Size()); err != nil {
+			return 0, err
+		}
+		return total, nil
+	}
+	err = filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		relative, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if relative != "." && policyPathExcluded(relative, excludes) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if info.Mode().IsRegular() {
+			return add(info.Size())
+		}
+		return nil
+	})
+	if err != nil {
+		return 0, err
+	}
+	return total, nil
+}
+
+func policyPathExcluded(relative string, excludes []string) bool {
+	relative = filepath.ToSlash(filepath.Clean(relative))
+	for _, entry := range excludes {
+		entry = strings.TrimRight(filepath.ToSlash(filepath.Clean(entry)), "/")
+		if entry != "" && (relative == entry || strings.HasPrefix(relative, entry+"/")) {
+			return true
+		}
+	}
+	return false
 }
 
 func (r RcloneRuntime) ValidateDestination(destination Destination) error {
@@ -136,9 +315,10 @@ func isSHA256Digest(value string) bool {
 }
 
 type Config struct {
-	SchemaVersion int           `toml:"schema_version" json:"schema_version"`
-	RcloneRuntime RcloneRuntime `toml:"rclone_runtime" json:"rclone_runtime"`
-	Jobs          []Job         `toml:"job" json:"job"`
+	SchemaVersion    int              `toml:"schema_version" json:"schema_version"`
+	RcloneRuntime    RcloneRuntime    `toml:"rclone_runtime" json:"rclone_runtime"`
+	CategoryPolicies []CategoryPolicy `toml:"category_policy" json:"category_policy"`
+	Jobs             []Job            `toml:"job" json:"job"`
 }
 
 type LoadOptions struct {
@@ -201,11 +381,12 @@ type tomlPair struct {
 }
 
 type rawConfig struct {
-	SchemaVersion int         `toml:"schema_version"`
-	RcloneConfig  string      `toml:"rclone_config"`
-	RcloneRuntime tomlRuntime `toml:"rclone_runtime"`
-	Jobs          []tomlJob   `toml:"job"`
-	Pairs         []tomlPair  `toml:"pair"`
+	SchemaVersion    int              `toml:"schema_version"`
+	RcloneConfig     string           `toml:"rclone_config"`
+	RcloneRuntime    tomlRuntime      `toml:"rclone_runtime"`
+	CategoryPolicies []CategoryPolicy `toml:"category_policy"`
+	Jobs             []tomlJob        `toml:"job"`
+	Pairs            []tomlPair       `toml:"pair"`
 }
 
 func LoadWithOptions(path string, options LoadOptions) (*Config, error) {
@@ -234,7 +415,7 @@ func decodeV2(raw rawConfig) (*Config, error) {
 		ConfigFileID: raw.RcloneRuntime.ConfigFileID, ConfigDigest: raw.RcloneRuntime.ConfigDigest,
 		AllowedRemotes: raw.RcloneRuntime.AllowedRemotes, AllowedBackends: raw.RcloneRuntime.AllowedBackends,
 		Environment: raw.RcloneRuntime.Environment, Hooks: raw.RcloneRuntime.Hooks,
-	}}
+	}, CategoryPolicies: append([]CategoryPolicy(nil), raw.CategoryPolicies...)}
 	for i, rawJob := range raw.Jobs {
 		if rawJob.Required == nil {
 			return nil, fmt.Errorf("job %d: required must be explicit", i)
@@ -317,7 +498,13 @@ func (c *Config) ValidateForExecution() error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
+	if err := c.validateCategoryPolicies(); err != nil {
+		return err
+	}
 	if err := c.RcloneRuntime.Validate(); err != nil {
+		return err
+	}
+	if err := c.validateCategorySourceSizes(); err != nil {
 		return err
 	}
 	for _, job := range c.Jobs {
@@ -365,6 +552,9 @@ func (j Job) validate(seen map[string]struct{}) error {
 	}
 	if (j.Mode == "copy" || j.Mode == "sync") && j.Direction == "bidirectional" {
 		return fmt.Errorf("mode %s cannot use bidirectional direction", j.Mode)
+	}
+	if j.Mode == "sync" && j.Direction != "push" {
+		return fmt.Errorf("destructive sync jobs require push direction")
 	}
 	if j.Mode == "sync" && (strings.TrimSpace(j.ModeGateRef) == "" || strings.TrimSpace(j.ModeGateDigest) == "") {
 		return fmt.Errorf("sync mode requires mode_gate_ref and mode_gate_digest")

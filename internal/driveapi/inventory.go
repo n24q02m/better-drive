@@ -52,7 +52,11 @@ func (client *Client) CollectAllRoots(ctx context.Context, accountID string, req
 		right := strings.Join([]string{roots[j].Provider, roots[j].AccountID, roots[j].RootID, roots[j].Namespace}, "\x00")
 		return left < right
 	})
-	return cleanup.RootSet{SchemaVersion: cleanup.CurrentInventorySchemaVersion, Roots: roots}, nil
+	rootSet, err := cleanup.FreezeRootSet(cleanup.RootSet{SchemaVersion: cleanup.CurrentRootSetSchemaVersion, Roots: roots})
+	if err != nil {
+		return cleanup.RootSet{}, fmt.Errorf("freeze all-roots set: %w", err)
+	}
+	return rootSet, nil
 }
 
 func (client *Client) CollectRoot(ctx context.Context, request RootRequest, maxPages int) (cleanup.Root, error) {

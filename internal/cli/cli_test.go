@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -245,6 +246,98 @@ func TestStatusCmd_JSONFormat(t *testing.T) {
 	}
 }
 
+func TestStatusCmdShowsLegacyConfigWithValidationWarning(t *testing.T) {
+	cfgPath := filepath.Join(t.TempDir(), "config.toml")
+	body := `
+[[pair]]
+local = "C:/legacy"
+remote = "gdrive:Legacy"
+interval = "1h"
+`
+	if err := os.WriteFile(cfgPath, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", cfgPath)
+	t.Setenv("BETTER_DRIVE_STATE", filepath.Join(t.TempDir(), "missing-state.json"))
+
+	var out, errOut bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&errOut)
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --format json: %v; stderr=%s", err, errOut.String())
+	}
+	var got []output.PairStatus
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if len(got) != 1 || got[0].JobID == "" || len(got[0].Warnings) == 0 {
+		t.Fatalf("legacy status=%#v, want one pair with validation warning", got)
+	}
+}
+
+func TestStatusCmdWarnsWhenConfigIsNotExecutionReady(t *testing.T) {
+	statusFixtureConfig(t)
+	t.Setenv("BETTER_DRIVE_STATE", filepath.Join(t.TempDir(), "missing-state.json"))
+
+	var out bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --format json: %v", err)
+	}
+	var got []output.PairStatus
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if len(got) != 1 || len(got[0].Warnings) == 0 || !strings.Contains(got[0].Warnings[0], "category policy registry") {
+		t.Fatalf("status = %#v, want execution-readiness warning", got)
+	}
+}
+
+func TestStatusCmdReevaluatesPersistedSchedulerFreshness(t *testing.T) {
+	statusFixtureConfig(t)
+	now := time.Now().UTC()
+	persisted := state.State{
+		SchemaVersion: state.CurrentSchemaVersion,
+		EngineVersion: "1.6.0",
+		Jobs:          []state.JobState{{JobID: "job-pair0", Status: "ok", LastSuccess: now.Add(-2 * time.Hour), NextDue: now.Add(30 * time.Minute), ObjectCount: 3, ByteCount: 42}},
+		Scheduler: state.SchedulerState{
+			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
+			ObservedAt: now.Add(-2 * time.Hour), FreshnessWindow: time.Minute,
+			CatchUpGrace: time.Hour, ActiveInstance: "one-shot", OverlapState: "none",
+			OverlapHealth: "ok", Health: state.HealthHealthy,
+		},
+	}
+	statePath := filepath.Join(t.TempDir(), "state.json")
+	if err := state.Save(statePath, persisted); err != nil {
+		t.Fatalf("save state: %v", err)
+	}
+	t.Setenv("BETTER_DRIVE_STATE", statePath)
+
+	var out bytes.Buffer
+	cmd := statusCmd()
+	cmd.SetOut(&out)
+	cmd.SetArgs([]string{"--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("status --format json: %v", err)
+	}
+	var got []output.PairStatus
+	if err := json.Unmarshal(out.Bytes(), &got); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if len(got) != 1 || got[0].Health != state.HealthStale {
+		t.Fatalf("status=%#v, want one stale pair", got)
+	}
+
+	if got[0].ObjectCount != 3 || got[0].ByteCount != 42 || got[0].NextDue == nil {
+		t.Fatalf("status evidence=%#v, want persisted counts and next_due", got[0])
+	}
+}
+
 // TestStatusCmd_BadConfigTOML_ErrorHasRemediation verifies an unparseable
 // config.toml fails with a ConfigError (code 2) carrying a remediation hint
 // that names the resolved config path, so a --format json caller gets an
@@ -441,6 +534,10 @@ type fakeCLISyncer struct {
 	bisyncParams []engine.BisyncParams
 	copyParams   []engine.CopyParams
 	onCall       func()
+}
+
+func (f *fakeCLISyncer) CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error) {
+	return 1, nil
 }
 
 func (f *fakeCLISyncer) Bisync(p engine.BisyncParams) (engine.BisyncResult, error) {
@@ -960,12 +1057,16 @@ func TestRunSyncOnceJSONIncludesReplicaRequiredStatus(t *testing.T) {
 
 func TestBuildStateFromResultsPersistsJobAndReplicaOutcomes(t *testing.T) {
 	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
-	got := buildStateFromResults([]output.PairResult{{JobID: "job-1", Status: "degraded", Replicas: []output.ReplicaResult{{ID: "r1", Target: "gdrive:backup", Required: true, Status: "ok"}}}}, now)
+	got := buildStateFromResults([]output.PairResult{{JobID: "job-1", Status: "degraded", ObjectCount: 3, ByteCount: 42, NextDue: now.Add(time.Hour), Replicas: []output.ReplicaResult{{ID: "r1", Target: "gdrive:backup", Required: true, Status: "ok"}}}}, now)
 	if got.SchemaVersion != state.CurrentSchemaVersion || len(got.Jobs) != 1 {
 		t.Fatalf("state = %#v, want versioned job state", got)
 	}
 	if got.Jobs[0].JobID != "job-1" || got.Jobs[0].Status != "degraded" || len(got.Jobs[0].ReplicaOutcomes) != 1 {
 		t.Fatalf("job state = %#v, want degraded replica evidence", got.Jobs[0])
+	}
+
+	if got.Jobs[0].ObjectCount != 3 || got.Jobs[0].ByteCount != 42 || got.Jobs[0].NextDue.IsZero() {
+		t.Fatalf("job counters = %#v, want persisted source stats and next_due", got.Jobs[0])
 	}
 	if got.Scheduler.Health != state.HealthHealthy || got.Scheduler.OwnerJobID != "scheduled-sync" {
 		t.Fatalf("scheduler state = %#v, want healthy scheduled-sync owner", got.Scheduler)

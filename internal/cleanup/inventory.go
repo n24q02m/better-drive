@@ -8,7 +8,13 @@ import (
 	"strings"
 )
 
-const CurrentInventorySchemaVersion = 1
+const (
+	CurrentInventorySchemaVersion = 1
+	CurrentRootSetSchemaVersion   = 2
+	legacyRootSetSchemaVersion    = 1
+)
+
+const maxInt64 = int64(1<<63 - 1)
 
 const (
 	PageComplete        = "COMPLETE"
@@ -35,6 +41,8 @@ type Root struct {
 
 type RootSet struct {
 	SchemaVersion int    `json:"schema_version"`
+	ExpectedHash  string `json:"expected_hash"`
+	LegacyHash    string `json:"legacy_hash,omitempty"`
 	Roots         []Root `json:"roots"`
 }
 
@@ -64,9 +72,42 @@ func DecodeRootSet(data []byte) (RootSet, error) {
 	if err := json.Unmarshal(data, &rootSet); err != nil {
 		return RootSet{}, fmt.Errorf("decode all-roots set: %w", err)
 	}
-	if rootSet.SchemaVersion != CurrentInventorySchemaVersion {
+	switch rootSet.SchemaVersion {
+	case legacyRootSetSchemaVersion:
+		legacyHash, err := legacyRootSetDigest(rootSet)
+		if err != nil {
+			return RootSet{}, fmt.Errorf("hash legacy all-roots set: %w", err)
+		}
+		rootSet.SchemaVersion = CurrentRootSetSchemaVersion
+		rootSet.LegacyHash = legacyHash
+		migrated, err := FreezeRootSet(rootSet)
+		if err != nil {
+			return RootSet{}, fmt.Errorf("migrate all-roots schema_version %d: %w", legacyRootSetSchemaVersion, err)
+		}
+		return migrated, nil
+	case CurrentRootSetSchemaVersion:
+	default:
 		return RootSet{}, fmt.Errorf("unsupported all-roots schema_version %d", rootSet.SchemaVersion)
 	}
+	if strings.TrimSpace(rootSet.ExpectedHash) == "" {
+		return RootSet{}, errors.New("all-roots set expected hash is required")
+	}
+	actual, err := rootSetDigest(rootSet)
+	if err != nil {
+		return RootSet{}, err
+	}
+	if rootSet.ExpectedHash != actual {
+		return RootSet{}, fmt.Errorf("all-roots set expected hash mismatch: got %q, want %q", rootSet.ExpectedHash, actual)
+	}
+	return rootSet, nil
+}
+
+func FreezeRootSet(rootSet RootSet) (RootSet, error) {
+	hash, err := rootSetDigest(rootSet)
+	if err != nil {
+		return RootSet{}, err
+	}
+	rootSet.ExpectedHash = hash
 	return rootSet, nil
 }
 
@@ -81,8 +122,29 @@ func DecodeAggregate(data []byte) (InventoryAggregate, error) {
 	return aggregate, nil
 }
 
+func rootSetIdentityHash(rootSet RootSet) (string, error) {
+	currentHash, err := rootSetDigest(rootSet)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(rootSet.ExpectedHash) != "" && rootSet.ExpectedHash != currentHash {
+		return "", fmt.Errorf("all-roots set expected hash mismatch: got %q, want %q", rootSet.ExpectedHash, currentHash)
+	}
+	if rootSet.LegacyHash == "" {
+		return currentHash, nil
+	}
+	legacyHash, err := legacyRootSetDigest(rootSet)
+	if err != nil {
+		return "", err
+	}
+	if rootSet.LegacyHash != legacyHash {
+		return "", fmt.Errorf("all-roots set legacy hash mismatch: got %q, want %q", rootSet.LegacyHash, legacyHash)
+	}
+	return legacyHash, nil
+}
+
 func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, error) {
-	if rootSet.SchemaVersion != CurrentInventorySchemaVersion {
+	if rootSet.SchemaVersion != CurrentRootSetSchemaVersion {
 		return InventoryAggregate{}, fmt.Errorf("unsupported all-roots schema_version %d", rootSet.SchemaVersion)
 	}
 	if strings.TrimSpace(accountID) == "" {
@@ -91,7 +153,7 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 	if len(rootSet.Roots) == 0 {
 		return InventoryAggregate{}, errors.New("all-roots set must not be empty")
 	}
-	rootSetHash, err := rootSetDigest(rootSet)
+	rootSetHash, err := rootSetIdentityHash(rootSet)
 	if err != nil {
 		return InventoryAggregate{}, err
 	}
@@ -152,6 +214,9 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 				}
 				seenObjects[objectID] = struct{}{}
 				objects = append(objects, object)
+				if byteCount > maxInt64-object.Size {
+					return InventoryAggregate{}, fmt.Errorf("inventory byte count overflow")
+				}
 				byteCount += object.Size
 			}
 		}
@@ -186,7 +251,7 @@ func BuildAggregate(rootSet RootSet, accountID string) (InventoryAggregate, erro
 
 func BuildState(rootSet RootSet, aggregate InventoryAggregate, err error) InventoryState {
 	state := InventoryState{SchemaVersion: CurrentInventorySchemaVersion, Status: InventoryIncomplete}
-	if rootSetHash, hashErr := rootSetDigest(rootSet); hashErr == nil {
+	if rootSetHash, hashErr := rootSetIdentityHash(rootSet); hashErr == nil {
 		state.RootSetHash = rootSetHash
 	}
 	if err == nil && aggregate.Status == InventoryComplete {
@@ -221,8 +286,26 @@ func rootKey(root Root) string {
 	return strings.Join([]string{root.Provider, root.AccountID, root.RootID, root.Namespace}, "\x00")
 }
 
+func legacyRootSetDigest(rootSet RootSet) (string, error) {
+	roots := append([]Root(nil), rootSet.Roots...)
+	sort.Slice(roots, func(i, j int) bool { return rootKey(roots[i]) < rootKey(roots[j]) })
+	for i := range roots {
+		roots[i].Pages = append([]Page(nil), roots[i].Pages...)
+		sort.Slice(roots[i].Pages, func(a, b int) bool { return roots[i].Pages[a].Number < roots[i].Pages[b].Number })
+	}
+	canonical, err := json.Marshal(struct {
+		SchemaVersion int    `json:"schema_version"`
+		Roots         []Root `json:"roots"`
+	}{SchemaVersion: legacyRootSetSchemaVersion, Roots: roots})
+	if err != nil {
+		return "", fmt.Errorf("canonicalize legacy root set: %w", err)
+	}
+	return Digest(canonical), nil
+}
+
 func rootSetDigest(rootSet RootSet) (string, error) {
 	copySet := rootSet
+	copySet.ExpectedHash = ""
 	copySet.Roots = append([]Root(nil), rootSet.Roots...)
 	sort.Slice(copySet.Roots, func(i, j int) bool { return rootKey(copySet.Roots[i]) < rootKey(copySet.Roots[j]) })
 	for i := range copySet.Roots {

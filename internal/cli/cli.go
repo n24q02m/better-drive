@@ -7,6 +7,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -23,6 +24,8 @@ import (
 	"github.com/n24q02m/better-drive/internal/version"
 	"github.com/spf13/cobra"
 )
+
+const maxInt64 = int64(1<<63 - 1)
 
 // Execute runs the CLI against the real process args and reports the
 // resolved --format alongside the error, so main can render a failure (see
@@ -164,16 +167,76 @@ func errorString(err error) string {
 	return err.Error()
 }
 
+func localSourceStats(path string) (objects, bytes int64, err error) {
+	info, err := os.Stat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, 0, nil
+	}
+	if err != nil {
+		return 0, 0, err
+	}
+	if info.Mode().IsRegular() {
+		if info.Size() < 0 {
+			return 0, 0, fmt.Errorf("source size is negative")
+		}
+		return 1, info.Size(), nil
+	}
+	if !info.IsDir() {
+		return 0, 0, nil
+	}
+	err = filepath.WalkDir(path, func(_ string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if entry.IsDir() || !entry.Type().IsRegular() {
+			return nil
+		}
+		fileInfo, infoErr := entry.Info()
+		if infoErr != nil {
+			return infoErr
+		}
+		size := fileInfo.Size()
+		if size < 0 || bytes > maxInt64-size {
+			return fmt.Errorf("source byte count overflow")
+		}
+		if objects == maxInt64 {
+			return fmt.Errorf("source object count overflow")
+		}
+		objects++
+		bytes += size
+		return nil
+	})
+	return objects, bytes, err
+}
+
+func attachLocalStats(result *output.PairResult) {
+	objects, bytes, err := localSourceStats(result.Local)
+	if err != nil {
+		result.Warnings = append(result.Warnings, fmt.Sprintf("source inventory unavailable: %v", err))
+		return
+	}
+	result.ObjectCount = objects
+	result.ByteCount = bytes
+}
+
+func attachJobEvidence(result *output.PairResult, interval time.Duration) {
+	result.NextDue = time.Now().UTC().Add(interval)
+	attachLocalStats(result)
+}
+
 func buildStateFromResults(results []output.PairResult, now time.Time) state.State {
 	scheduler := state.SchedulerState{
-		Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
-		ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok",
+		Owner: "better-drive", OwnerJobID: aggregateSchedulerOwnerJobID, Enabled: true,
+		LastTrigger: now, ActiveInstance: "one-shot", OverlapState: "none", OverlapHealth: "ok",
 		ObservedAt: now, FreshnessWindow: 15 * time.Minute, CatchUpGrace: 6*time.Hour + 15*time.Minute,
 	}
-	scheduler.Health = state.EvaluateSchedulerHealth(scheduler, now)
 	persisted := state.State{SchemaVersion: state.CurrentSchemaVersion, EngineVersion: version.Version, Scheduler: scheduler}
 	for _, result := range results {
-		item := state.JobState{JobID: result.JobID, Status: result.Status, ObjectCount: 0, ByteCount: 0}
+		item := state.JobState{
+			JobID: result.JobID, Status: result.Status, LastSuccess: time.Time{},
+			NextDue: result.NextDue, ObjectCount: result.ObjectCount, ByteCount: result.ByteCount,
+			Warnings: append([]string(nil), result.Warnings...),
+		}
 		if item.JobID == "" {
 			item.JobID = result.Local + "->" + result.Remote
 		}
@@ -184,7 +247,11 @@ func buildStateFromResults(results []output.PairResult, now time.Time) state.Sta
 			item.ReplicaOutcomes = append(item.ReplicaOutcomes, state.ReplicaState{ID: replica.ID, Target: replica.Target, Required: replica.Required, Status: replica.Status, Error: replica.Error})
 		}
 		persisted.Jobs = append(persisted.Jobs, item)
+		if !result.NextDue.IsZero() && (persisted.Scheduler.NextTrigger.IsZero() || result.NextDue.Before(persisted.Scheduler.NextTrigger)) {
+			persisted.Scheduler.NextTrigger = result.NextDue
+		}
 	}
+	persisted.Scheduler.Health = state.EvaluateSchedulerHealth(persisted.Scheduler, now)
 	return persisted
 }
 
@@ -348,6 +415,7 @@ func runCmd() *cobra.Command {
 					targets = append(targets, outcome.Target)
 				}
 				result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: strings.Join(targets, ","), Mode: job.Mode, Status: status, Error: errorString(cycleErr), Replicas: replicaResults(summary)}
+				attachJobEvidence(&result, job.Interval)
 				stateMu.Lock()
 				stateResults[job.ID] = result
 				snapshot := make([]output.PairResult, 0, len(stateResults))
@@ -422,28 +490,32 @@ func statusCmd() *cobra.Command {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
-			cfg, err := loadConfig()
+			cfg, err := config.Load(paths.ConfigFile())
 			if err != nil {
-				return err
+				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("create or fix %s (TOML syntax) - see README for the [[job]] schema", paths.ConfigFile()))
+			}
+			configWarning := ""
+			if validationErr := cfg.ValidateForExecution(); validationErr != nil {
+				configWarning = validationErr.Error()
 			}
 			persisted, stateErr := state.Load(paths.StateFile())
 			if stateErr != nil && !errors.Is(stateErr, os.ErrNotExist) {
 				return exitcode.WithRemediation(exitcode.ConfigError(stateErr), fmt.Sprintf("repair persisted state at %s", paths.StateFile()))
 			}
-			jobStatus := func(jobID string) string {
+			jobState := func(jobID string) *state.JobState {
 				if persisted == nil {
-					return "unknown"
+					return nil
 				}
-				for _, item := range persisted.Jobs {
-					if item.JobID == jobID {
-						return item.Status
+				for i := range persisted.Jobs {
+					if persisted.Jobs[i].JobID == jobID {
+						return &persisted.Jobs[i]
 					}
 				}
-				return "unknown"
+				return nil
 			}
 			health := "unknown-overlap"
 			if persisted != nil {
-				health = persisted.Scheduler.Health
+				health = state.EvaluateSchedulerHealth(persisted.Scheduler, time.Now().UTC())
 			}
 			if format == output.FormatJSON {
 				pairs := make([]output.PairStatus, 0, len(cfg.Jobs))
@@ -453,10 +525,31 @@ func statusCmd() *cobra.Command {
 						if targetErr != nil {
 							return exitcode.WithRemediation(exitcode.ConfigError(targetErr), "set a valid destination.credential_ref")
 						}
-						pairs = append(pairs, output.PairStatus{JobID: job.ID, Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String(), JobStatus: jobStatus(job.ID), Health: health})
+						item := output.PairStatus{JobID: job.ID, Local: job.Source, Remote: target, Mode: job.Mode, Interval: job.Interval.String(), Health: health}
+						if configWarning != "" {
+							item.Warnings = []string{"config is not execution-ready: " + configWarning}
+						}
+						if evidence := jobState(job.ID); evidence != nil {
+							item.JobStatus = evidence.Status
+							if !evidence.LastSuccess.IsZero() {
+								item.LastSuccess = &evidence.LastSuccess
+							}
+							if !evidence.NextDue.IsZero() {
+								item.NextDue = &evidence.NextDue
+							}
+							item.ObjectCount = evidence.ObjectCount
+							item.ByteCount = evidence.ByteCount
+							item.Warnings = append(item.Warnings, evidence.Warnings...)
+						} else {
+							item.JobStatus = "unknown"
+						}
+						pairs = append(pairs, item)
 					}
 				}
 				return output.RenderJSON(cmd.OutOrStdout(), pairs)
+			}
+			if configWarning != "" {
+				fmt.Fprintf(cmd.ErrOrStderr(), "warning: config is not execution-ready: %s\n", configWarning)
 			}
 			for _, job := range cfg.Jobs {
 				for _, destination := range job.Destinations {
@@ -571,7 +664,9 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 				failed = true
 			}
 			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: %s (local not found)\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
-			results = append(results, output.PairResult{Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status})
+			result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status}
+			attachJobEvidence(&result, job.Interval)
+			results = append(results, result)
 			continue
 		}
 		loop := syncloop.NewWithReplicas(s, job.Source, replicas, job.Mode, job.Direction,
@@ -587,7 +682,9 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 			failed = true
 			needsResync = needsResync || errors.Is(err, engine.ErrNeedsResync)
 			fmt.Fprintf(cmd.ErrOrStderr(), "job %s %s <-> %s [mode=%s]: FAILED: %v\n", job.ID, job.Source, remoteSummary, job.Mode, err)
-			results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: "failed", Error: err.Error(), Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
+			result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: "failed", Error: err.Error(), Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun}
+			attachJobEvidence(&result, job.Interval)
+			results = append(results, result)
 			continue
 		}
 		status := loop.LastReplicaSummary().Status
@@ -597,7 +694,9 @@ func runSyncOnce(cmd *cobra.Command, s syncloop.Syncer, cfg *config.Config, form
 		if format == output.FormatTable {
 			fmt.Fprintf(cmd.OutOrStdout(), "job %s %s <-> %s [mode=%s]: %s\n", job.ID, job.Source, remoteSummary, job.Mode, strings.ToUpper(status))
 		}
-		results = append(results, output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status, Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun})
+		result := output.PairResult{JobID: job.ID, Local: job.Source, Remote: remoteSummary, Mode: job.Mode, Status: status, Replicas: replicaResults(loop.LastReplicaSummary()), DryRun: dryRun}
+		attachJobEvidence(&result, job.Interval)
+		results = append(results, result)
 	}
 	if format == output.FormatJSON {
 		if err := output.RenderJSON(cmd.OutOrStdout(), results); err != nil {

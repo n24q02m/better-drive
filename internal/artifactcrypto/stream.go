@@ -151,7 +151,11 @@ func Open(dst io.Writer, src io.Reader, key []byte, expected Metadata) error {
 		if err != nil {
 			return err
 		}
-		if counter != expectedCounter || plainLen > uint32(h.ChunkSize) || cipherLen != plainLen+uint32(gcm.Overhead()) {
+		if kind != 1 && kind != 2 {
+			return fmt.Errorf("artifact frame header invalid: unknown kind %d", kind)
+		}
+		if counter != expectedCounter || plainLen > uint32(h.ChunkSize) || uint64(cipherLen) != uint64(plainLen)+uint64(gcm.Overhead()) {
+			return fmt.Errorf("artifact frame header invalid")
 		}
 		ciphertext := make([]byte, cipherLen)
 		if _, err := io.ReadFull(src, ciphertext); err != nil {
