@@ -9,21 +9,38 @@ from pathlib import Path
 
 
 def check(root: Path) -> list[str]:
-    workflow_path = root / ".github" / "workflows" / "cd.yml"
+    workflow_dir = root / ".github" / "workflows"
+    workflow_path = workflow_dir / "cd.yml"
+    ci_path = workflow_dir / "ci.yml"
     goreleaser_path = root / ".goreleaser.yaml"
     prepare_path = root / ".goreleaser.prepare.yaml"
-
     if not workflow_path.is_file():
         return [".github/workflows/cd.yml not found"]
     if not goreleaser_path.is_file():
         return [".goreleaser.yaml not found"]
     if not prepare_path.is_file():
         return [".goreleaser.prepare.yaml not found"]
+    if not ci_path.is_file():
+        return [".github/workflows/ci.yml not found"]
 
     workflow = workflow_path.read_text(encoding="utf-8")
+    ci = ci_path.read_text(encoding="utf-8")
     goreleaser = goreleaser_path.read_text(encoding="utf-8")
     prepare = prepare_path.read_text(encoding="utf-8")
     findings: list[str] = []
+
+    workflow_names = sorted(path.name for path in workflow_dir.glob("*.yml"))
+    if workflow_names != ["cd.yml", "ci.yml"]:
+        findings.append(
+            "workflow directory must contain exactly ci.yml and cd.yml; "
+            f"got {workflow_names}"
+        )
+    for job in ("bot-governance", "scorecard"):
+        if f"  {job}:" not in ci:
+            findings.append(f"CI must own the consolidated {job} job")
+    for trigger in ("  branch_protection_rule:", "  schedule:"):
+        if trigger not in ci.split("permissions:", 1)[0]:
+            findings.append(f"CI must own the consolidated {trigger.strip(': ')} trigger")
 
     # 1. Trigger constraints
     on_block = workflow.split("permissions:", 1)[0]

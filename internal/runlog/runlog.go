@@ -326,9 +326,13 @@ func (f *RotatingFile) openLocked() error {
 	}
 	f.file = file
 	f.size = info.Size()
-	f.opened = info.ModTime().UTC()
-	if f.opened.IsZero() {
+	if f.size == 0 {
 		f.opened = f.now()
+	} else {
+		f.opened = info.ModTime().UTC()
+		if f.opened.IsZero() {
+			f.opened = f.now()
+		}
 	}
 	return nil
 }

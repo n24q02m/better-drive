@@ -1,8 +1,8 @@
 name: CD
 
-# CD is dispatch-only and fail-closed. Tag pushes are read-only observers;
-# publication remains disabled until exact signed BSR G1/G2 loader tuple and
-# protected environments are available.
+# CD is dispatch-only and fail-closed. It prepares exact candidate artifacts;
+# live publication remains disabled until the terminal BDrive stable gate and
+# its protected environment are explicitly approved.
 #
 # Prepared candidate artifacts and provenance are built credential-free via
 # .goreleaser.prepare.yaml and archived as run artifacts.
@@ -34,7 +34,7 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
 
@@ -92,4 +92,4 @@ jobs:
         shell: bash
         run: |
           echo "==> Candidate release preparation successful."
-          echo "==> Live publication remains disabled pending exact signed BSR G1/G2 loader availability."
+          echo "==> Live publication remains disabled pending the terminal BDrive stable gate."
