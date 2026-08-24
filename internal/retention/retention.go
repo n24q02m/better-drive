@@ -173,12 +173,14 @@ func validateObjectScope(policy Policy, inventory Inventory, owner OwnershipMark
 	return nil
 }
 
-func validateRequiredRestoreReplica(inventory Inventory, setID string, replica ReplicaEvidence) error {
+func validateRequiredRestoreReplica(inventory Inventory, expectedProvider Provider, setID string, replica ReplicaEvidence) error {
 	switch {
 	case strings.TrimSpace(replica.ID) == "":
 		return fmt.Errorf("restore set %q required replica ID is required", setID)
 	case strings.TrimSpace(replica.Provider) == "":
 		return fmt.Errorf("restore set %q required replica %q provider is required", setID, replica.ID)
+	case replica.Provider != string(expectedProvider):
+		return fmt.Errorf("restore set %q required replica %q provider does not match retention policy", setID, replica.ID)
 	case strings.TrimSpace(replica.AccountID) == "":
 		return fmt.Errorf("restore set %q required replica %q account is required", setID, replica.ID)
 	case strings.TrimSpace(replica.RootID) == "":
@@ -196,9 +198,12 @@ func validateRequiredRestoreReplica(inventory Inventory, setID string, replica R
 	}
 }
 
-func NewestCompleteRestoreSets(inventory Inventory, minimum int) ([]RestoreSet, error) {
+func NewestCompleteRestoreSets(inventory Inventory, minimum int, expectedProvider Provider) ([]RestoreSet, error) {
 	if minimum < 0 {
 		return nil, errors.New("minimum restore sets must not be negative")
+	}
+	if expectedProvider != ProviderDrive && expectedProvider != ProviderR2 {
+		return nil, fmt.Errorf("restore-set expected provider %q is invalid", expectedProvider)
 	}
 	sets := append([]RestoreSet(nil), inventory.RestoreSets...)
 	sort.SliceStable(sets, func(i, j int) bool {
@@ -218,7 +223,7 @@ func NewestCompleteRestoreSets(inventory Inventory, minimum int) ([]RestoreSet, 
 				continue
 			}
 			requiredReplicas++
-			if err := validateRequiredRestoreReplica(inventory, set.ID, replica); err != nil {
+			if err := validateRequiredRestoreReplica(inventory, expectedProvider, set.ID, replica); err != nil {
 				return nil, err
 			}
 		}
@@ -330,7 +335,7 @@ func PlanRetention(policy Policy, inventory Inventory, owner OwnershipMarker, no
 			return Plan{}, fmt.Errorf("object %q lacks exact inventory evidence", object.ObjectID)
 		}
 	}
-	if _, err := NewestCompleteRestoreSets(inventory, policy.MinCompleteRestoreSets); err != nil {
+	if _, err := NewestCompleteRestoreSets(inventory, policy.MinCompleteRestoreSets, policy.Provider); err != nil {
 		return Plan{}, err
 	}
 	if len(inventory.Objects) > policy.MaxObjects {

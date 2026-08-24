@@ -30,6 +30,14 @@ func retentionInventory(now time.Time) Inventory {
 	return Inventory{AccountID: "acct-1", RootID: "root-1", Namespace: "backup", CapturedAt: now.Add(-time.Minute), Objects: []Object{retentionObject("one", now.Add(-time.Hour)), retentionObject("two", now.Add(-time.Hour))}, RestoreSets: []RestoreSet{{ID: "old", CreatedAt: now.Add(-2 * time.Hour), Complete: true, Replicas: []ReplicaEvidence{validRestoreReplica("r-old")}}, {ID: "new", CreatedAt: now.Add(-time.Hour), Complete: true, Replicas: []ReplicaEvidence{validRestoreReplica("r-new")}}}}
 }
 
+func setRestoreProvider(inventory *Inventory, provider Provider) {
+	for setIndex := range inventory.RestoreSets {
+		for replicaIndex := range inventory.RestoreSets[setIndex].Replicas {
+			inventory.RestoreSets[setIndex].Replicas[replicaIndex].Provider = string(provider)
+		}
+	}
+}
+
 func ownerMarker() OwnershipMarker {
 	return OwnershipMarker{OwnerID: "job-1", AccountID: "acct-1", RootID: "root-1", Namespace: "backup", Marker: "marker-1"}
 }
@@ -164,11 +172,11 @@ func TestNewestCompleteRestoreSetsRejectIncompleteRequiredReplica(t *testing.T) 
 	now := time.Unix(100, 0).UTC()
 	inventory := retentionInventory(now)
 	inventory.RestoreSets[1].Replicas[0].Complete = false
-	if _, err := NewestCompleteRestoreSets(inventory, 1); err == nil || !strings.Contains(err.Error(), "required replica") {
+	if _, err := NewestCompleteRestoreSets(inventory, 1, ProviderR2); err == nil || !strings.Contains(err.Error(), "required replica") {
 		t.Fatalf("incomplete restore set error = %v", err)
 	}
 	inventory.RestoreSets[1].Replicas[0].Complete = true
-	sets, err := NewestCompleteRestoreSets(inventory, 1)
+	sets, err := NewestCompleteRestoreSets(inventory, 1, ProviderR2)
 	if err != nil {
 		t.Fatalf("NewestCompleteRestoreSets() error = %v", err)
 	}
@@ -184,7 +192,7 @@ func TestNewestCompleteRestoreSetsRejectsEmptyCompleteRecords(t *testing.T) {
 		{ID: "empty-old", CreatedAt: now.Add(-2 * time.Hour), Complete: true},
 		{ID: "empty-new", CreatedAt: now.Add(-time.Hour), Complete: true},
 	}
-	if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+	if _, err := NewestCompleteRestoreSets(inventory, 2, ProviderR2); err == nil || !strings.Contains(err.Error(), "required replica") {
 		t.Fatalf("empty complete restore sets error = %v, want required replica rejection", err)
 	}
 }
@@ -196,7 +204,7 @@ func TestNewestCompleteRestoreSetsRejectsOptionalOnlyRecords(t *testing.T) {
 		{ID: "optional-old", CreatedAt: now.Add(-2 * time.Hour), Complete: true, Replicas: []ReplicaEvidence{optionalRestoreReplica("optional-old")}},
 		{ID: "optional-new", CreatedAt: now.Add(-time.Hour), Complete: true, Replicas: []ReplicaEvidence{optionalRestoreReplica("optional-new")}},
 	}
-	if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+	if _, err := NewestCompleteRestoreSets(inventory, 2, ProviderR2); err == nil || !strings.Contains(err.Error(), "required replica") {
 		t.Fatalf("optional-only restore sets error = %v, want required replica rejection", err)
 	}
 }
@@ -209,6 +217,7 @@ func TestNewestCompleteRestoreSetsRejectsMissingRequiredEvidence(t *testing.T) {
 	}{
 		{name: "id", mutate: func(replica *ReplicaEvidence) { replica.ID = "" }},
 		{name: "provider", mutate: func(replica *ReplicaEvidence) { replica.Provider = "" }},
+		{name: "provider drift", mutate: func(replica *ReplicaEvidence) { replica.Provider = string(ProviderDrive) }},
 		{name: "account", mutate: func(replica *ReplicaEvidence) { replica.AccountID = "" }},
 		{name: "root", mutate: func(replica *ReplicaEvidence) { replica.RootID = "" }},
 		{name: "namespace", mutate: func(replica *ReplicaEvidence) { replica.Namespace = "" }},
@@ -217,7 +226,7 @@ func TestNewestCompleteRestoreSetsRejectsMissingRequiredEvidence(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			inventory := retentionInventory(now)
 			test.mutate(&inventory.RestoreSets[1].Replicas[0])
-			if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "required replica") {
+			if _, err := NewestCompleteRestoreSets(inventory, 2, ProviderR2); err == nil || !strings.Contains(err.Error(), "required replica") {
 				t.Fatalf("missing %s error = %v, want required replica rejection", test.name, err)
 			}
 		})
@@ -237,7 +246,7 @@ func TestNewestCompleteRestoreSetsRejectsRequiredReplicaScopeDrift(t *testing.T)
 		t.Run(test.name, func(t *testing.T) {
 			inventory := retentionInventory(now)
 			test.mutate(&inventory.RestoreSets[1].Replicas[0])
-			if _, err := NewestCompleteRestoreSets(inventory, 2); err == nil || !strings.Contains(err.Error(), "scope") {
+			if _, err := NewestCompleteRestoreSets(inventory, 2, ProviderR2); err == nil || !strings.Contains(err.Error(), "scope") {
 				t.Fatalf("scope drift %s error = %v, want scope rejection", test.name, err)
 			}
 		})
@@ -248,7 +257,7 @@ func TestNewestCompleteRestoreSetsAcceptsAuthenticatedRequiredEvidence(t *testin
 	now := time.Unix(100, 0).UTC()
 	inventory := retentionInventory(now)
 	inventory.RestoreSets[0].CreatedAt = inventory.RestoreSets[1].CreatedAt
-	sets, err := NewestCompleteRestoreSets(inventory, 2)
+	sets, err := NewestCompleteRestoreSets(inventory, 2, ProviderR2)
 	if err != nil {
 		t.Fatalf("NewestCompleteRestoreSets() error = %v", err)
 	}
@@ -283,6 +292,7 @@ func TestDriveDeletePolicyDefaultsToNoOp(t *testing.T) {
 	for index := range inventory.Objects {
 		inventory.Objects[index].Provider = string(ProviderDrive)
 	}
+	setRestoreProvider(&inventory, ProviderDrive)
 	policy := Policy{ID: "drive-default", Provider: ProviderDrive, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, ActivatedAt: time.Unix(99, 0).UTC()}
 	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
 	if err != nil {
@@ -299,6 +309,7 @@ func TestDriveQuarantinePlanningFailsClosedWithoutInjectedCapability(t *testing.
 	for index := range inventory.Objects {
 		inventory.Objects[index].Provider = string(ProviderDrive)
 	}
+	setRestoreProvider(&inventory, ProviderDrive)
 	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
 	if _, err := PlanRetention(policy, inventory, ownerMarker(), now); err == nil || !strings.Contains(strings.ToLower(err.Error()), "capability") {
 		t.Fatalf("Drive quarantine plan error = %v, want fail-closed capability rejection", err)
