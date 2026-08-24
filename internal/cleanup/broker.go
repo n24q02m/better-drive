@@ -12,13 +12,21 @@ import (
 )
 
 const (
-	BrokerStateClaimed     = "claimed"
-	BrokerStateCompleted   = "completed"
-	BrokerStateReconciled  = "reconciled"
-	SettlementSettled      = "settled"
-	SettlementFailed       = "failed"
-	SettlementOptionalFail = "optional_failed"
+	BrokerStateClaimed             = "claimed"
+	BrokerStateCompleted           = "completed"
+	BrokerStateNeedsReconciliation = "needs_reconciliation"
+	BrokerStateReconciled          = "reconciled"
+	SettlementSettled              = "settled"
+	SettlementFailed               = "failed"
+	SettlementOptionalFail         = "optional_failed"
 )
+
+// State transitions are one-way: Claim -> claimed; Complete with a known
+// settlement -> completed; Complete with an unknown settlement ->
+// needs_reconciliation; Reconcile with exact request, scope/fence, cancellation
+// or horizon, and two stable readbacks -> reconciled. Complete is rejected from
+// every state other than claimed, and Reconcile is accepted only from
+// needs_reconciliation.
 
 var ErrUnknownSettlement = errors.New("unknown settlement; broker fence retained")
 
@@ -56,11 +64,18 @@ type ClaimReadback struct {
 	Signature  string      `json:"signature"`
 }
 
+type StableReadback struct {
+	Digest     string    `json:"digest"`
+	Settlement string    `json:"settlement"`
+	ObservedAt time.Time `json:"observed_at"`
+}
+
 type CompleteRequest struct {
 	ClaimID    string `json:"claim_id"`
 	Owner      string `json:"owner"`
 	Generation uint64 `json:"generation"`
 	Fence      uint64 `json:"fence"`
+	RequestID  string `json:"request_id"`
 	TargetRef  string `json:"target_ref"`
 	TargetOID  string `json:"target_oid"`
 	Settlement string `json:"settlement"`
@@ -71,6 +86,7 @@ type CompleteReadback struct {
 	Owner      string      `json:"owner"`
 	Generation uint64      `json:"generation"`
 	Fence      uint64      `json:"fence"`
+	RequestID  string      `json:"request_id"`
 	State      string      `json:"state"`
 	Settlement string      `json:"settlement"`
 	Scope      BrokerScope `json:"scope"`
@@ -78,24 +94,34 @@ type CompleteReadback struct {
 }
 
 type ReconcileRequest struct {
-	ClaimID    string `json:"claim_id"`
-	Owner      string `json:"owner"`
-	Generation uint64 `json:"generation"`
-	Fence      uint64 `json:"fence"`
-	TargetRef  string `json:"target_ref"`
-	TargetOID  string `json:"target_oid"`
-	Settlement string `json:"settlement"`
+	ClaimID                string           `json:"claim_id"`
+	Owner                  string           `json:"owner"`
+	Generation             uint64           `json:"generation"`
+	Fence                  uint64           `json:"fence"`
+	RequestID              string           `json:"request_id"`
+	TargetRef              string           `json:"target_ref"`
+	TargetOID              string           `json:"target_oid"`
+	Settlement             string           `json:"settlement"`
+	CancellationReceipt    string           `json:"cancellation_receipt"`
+	ProviderHorizonElapsed bool             `json:"provider_horizon_elapsed"`
+	StableReadbacks        []StableReadback `json:"stable_readbacks"`
+	ConsistencyWindow      time.Duration    `json:"consistency_window"`
 }
 
 type ReconcileReadback struct {
-	ClaimID    string      `json:"claim_id"`
-	Owner      string      `json:"owner"`
-	Generation uint64      `json:"generation"`
-	Fence      uint64      `json:"fence"`
-	State      string      `json:"state"`
-	Settlement string      `json:"settlement"`
-	Scope      BrokerScope `json:"scope"`
-	Signature  string      `json:"signature"`
+	ClaimID                string           `json:"claim_id"`
+	Owner                  string           `json:"owner"`
+	Generation             uint64           `json:"generation"`
+	Fence                  uint64           `json:"fence"`
+	RequestID              string           `json:"request_id"`
+	State                  string           `json:"state"`
+	Settlement             string           `json:"settlement"`
+	Scope                  BrokerScope      `json:"scope"`
+	CancellationReceipt    string           `json:"cancellation_receipt"`
+	ProviderHorizonElapsed bool             `json:"provider_horizon_elapsed"`
+	StableReadbacks        []StableReadback `json:"stable_readbacks"`
+	ConsistencyWindow      time.Duration    `json:"consistency_window"`
+	Signature              string           `json:"signature"`
 }
 
 // These interfaces separate draft, activation, runtime, and reconciliation
@@ -117,9 +143,12 @@ type ReconcileAuthority interface {
 }
 
 type brokerClaim struct {
-	Request ClaimRequest
-	Fence   uint64
-	State   string
+	Request    ClaimRequest
+	Fence      uint64
+	State      string
+	RequestID  string
+	Settlement string
+	Signature  string
 }
 
 // Broker is a local authority state machine. It validates exact references and
@@ -139,26 +168,33 @@ func (b *Broker) Claim(request ClaimRequest) (ClaimReadback, error) {
 	if err := b.validateClaimRequest(request); err != nil {
 		return ClaimReadback{}, err
 	}
-	if b.claims == nil {
-		b.claims = make(map[string]brokerClaim)
-	}
 	if _, exists := b.claims[request.ClaimID]; exists {
 		return ClaimReadback{}, fmt.Errorf("claim %q replay rejected", request.ClaimID)
 	}
-	b.nextFence++
-	claim := brokerClaim{Request: request, Fence: b.nextFence, State: BrokerStateClaimed}
-	b.claims[request.ClaimID] = claim
-	readback := ClaimReadback{ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation, Fence: claim.Fence, State: claim.State, Scope: request.Scope}
+	if b.nextFence == ^uint64(0) {
+		return ClaimReadback{}, errors.New("broker fence exhausted")
+	}
+	fence := b.nextFence + 1
+	claim := brokerClaim{Request: request, Fence: fence, State: BrokerStateClaimed}
+	readback := ClaimReadback{ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation, Fence: fence, State: claim.State, Scope: request.Scope}
 	if err := b.sign(&readback); err != nil {
-		delete(b.claims, request.ClaimID)
 		return ClaimReadback{}, err
 	}
+	claim.Signature = readback.Signature
+	if b.claims == nil {
+		b.claims = make(map[string]brokerClaim)
+	}
+	b.nextFence = fence
+	b.claims[request.ClaimID] = claim
 	return readback, nil
 }
 
 func (b *Broker) Complete(request CompleteRequest) (CompleteReadback, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := validateRequestID(request.RequestID); err != nil {
+		return CompleteReadback{}, err
+	}
 	claim, err := b.validateSettlementRequest(request.ClaimID, request.Owner, request.Generation, request.Fence, request.TargetRef, request.TargetOID)
 	if err != nil {
 		return CompleteReadback{}, err
@@ -166,37 +202,80 @@ func (b *Broker) Complete(request CompleteRequest) (CompleteReadback, error) {
 	if claim.State != BrokerStateClaimed {
 		return CompleteReadback{}, fmt.Errorf("claim %q replay rejected from state %q", request.ClaimID, claim.State)
 	}
-	if err := validateSettlement(request.Settlement); err != nil {
-		return CompleteReadback{}, err
+	settlementErr := validateSettlement(request.Settlement)
+	if settlementErr != nil && !errors.Is(settlementErr, ErrUnknownSettlement) {
+		return CompleteReadback{}, settlementErr
 	}
-	claim.State = BrokerStateCompleted
-	readback := CompleteReadback{ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation, Fence: claim.Fence, State: claim.State, Settlement: request.Settlement, Scope: claim.Request.Scope}
+
+	candidate := claim
+	candidate.RequestID = request.RequestID
+	candidate.Settlement = request.Settlement
+	if errors.Is(settlementErr, ErrUnknownSettlement) {
+		candidate.State = BrokerStateNeedsReconciliation
+		readback := CompleteReadback{
+			ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation,
+			Fence: claim.Fence, RequestID: request.RequestID, State: candidate.State,
+			Settlement: request.Settlement, Scope: claim.Request.Scope,
+		}
+		if err := b.sign(&readback); err != nil {
+			return CompleteReadback{}, err
+		}
+		candidate.Signature = readback.Signature
+		b.claims[request.ClaimID] = candidate
+		return CompleteReadback{}, ErrUnknownSettlement
+	}
+
+	candidate.State = BrokerStateCompleted
+	readback := CompleteReadback{
+		ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation,
+		Fence: claim.Fence, RequestID: request.RequestID, State: candidate.State,
+		Settlement: request.Settlement, Scope: claim.Request.Scope,
+	}
 	if err := b.sign(&readback); err != nil {
 		return CompleteReadback{}, err
 	}
-	b.claims[request.ClaimID] = claim
+	candidate.Signature = readback.Signature
+	b.claims[request.ClaimID] = candidate
 	return readback, nil
 }
 
 func (b *Broker) Reconcile(request ReconcileRequest) (ReconcileReadback, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if err := validateRequestID(request.RequestID); err != nil {
+		return ReconcileReadback{}, err
+	}
 	claim, err := b.validateSettlementRequest(request.ClaimID, request.Owner, request.Generation, request.Fence, request.TargetRef, request.TargetOID)
 	if err != nil {
 		return ReconcileReadback{}, err
 	}
-	if claim.State != BrokerStateClaimed {
+	if claim.State != BrokerStateNeedsReconciliation {
 		return ReconcileReadback{}, fmt.Errorf("claim %q replay rejected from state %q", request.ClaimID, claim.State)
 	}
-	if err := validateSettlement(request.Settlement); err != nil {
+	if claim.RequestID != request.RequestID {
+		return ReconcileReadback{}, errors.New("broker request ID fence mismatch")
+	}
+	if err := validateReconcileRequest(request); err != nil {
 		return ReconcileReadback{}, err
 	}
-	claim.State = BrokerStateReconciled
-	readback := ReconcileReadback{ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation, Fence: claim.Fence, State: claim.State, Settlement: request.Settlement, Scope: claim.Request.Scope}
+
+	candidate := claim
+	candidate.Settlement = request.Settlement
+	readback := ReconcileReadback{
+		ClaimID: request.ClaimID, Owner: request.Owner, Generation: request.Generation,
+		Fence: claim.Fence, RequestID: request.RequestID, State: BrokerStateReconciled,
+		Settlement: request.Settlement, Scope: claim.Request.Scope,
+		CancellationReceipt:    request.CancellationReceipt,
+		ProviderHorizonElapsed: request.ProviderHorizonElapsed,
+		StableReadbacks:        cloneStableReadbacks(request.StableReadbacks),
+		ConsistencyWindow:      request.ConsistencyWindow,
+	}
 	if err := b.sign(&readback); err != nil {
 		return ReconcileReadback{}, err
 	}
-	b.claims[request.ClaimID] = claim
+	candidate.State = BrokerStateReconciled
+	candidate.Signature = readback.Signature
+	b.claims[request.ClaimID] = candidate
 	return readback, nil
 }
 
@@ -285,6 +364,62 @@ func validateSettlement(value string) error {
 	default:
 		return ErrUnknownSettlement
 	}
+}
+func validateRequestID(value string) error {
+	if strings.TrimSpace(value) == "" || strings.ContainsRune(value, '\x00') || strings.ContainsAny(value, "\r\n") {
+		return errors.New("broker request ID is required and must be safe")
+	}
+	return nil
+}
+
+func validateReconcileRequest(request ReconcileRequest) error {
+	if err := validateRequestID(request.RequestID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(request.CancellationReceipt) == "" && !request.ProviderHorizonElapsed {
+		return errors.New("reconcile requires cancellation receipt or provider horizon evidence")
+	}
+	if strings.ContainsRune(request.CancellationReceipt, '\x00') || strings.ContainsAny(request.CancellationReceipt, "\r\n") {
+		return errors.New("reconcile cancellation receipt contains control characters")
+	}
+	if request.ConsistencyWindow <= 0 {
+		return errors.New("reconcile consistency window must be positive")
+	}
+	if len(request.StableReadbacks) != 2 {
+		return errors.New("reconcile requires exactly two stable readbacks")
+	}
+	if err := validateSettlement(request.Settlement); err != nil {
+		return err
+	}
+	for index, readback := range request.StableReadbacks {
+		if strings.TrimSpace(readback.Digest) == "" || strings.ContainsRune(readback.Digest, '\x00') || strings.ContainsAny(readback.Digest, "\r\n") {
+			return fmt.Errorf("reconcile stable readback %d digest is required and must be safe", index+1)
+		}
+		if readback.ObservedAt.IsZero() {
+			return fmt.Errorf("reconcile stable readback %d timestamp is required", index+1)
+		}
+		if err := validateSettlement(readback.Settlement); err != nil {
+			return fmt.Errorf("reconcile stable readback %d settlement: %w", index+1, err)
+		}
+		if readback.Settlement != request.Settlement {
+			return fmt.Errorf("reconcile stable readback %d settlement mismatch", index+1)
+		}
+	}
+	first, second := request.StableReadbacks[0], request.StableReadbacks[1]
+	if first.Digest != second.Digest || first.Settlement != second.Settlement {
+		return errors.New("reconcile stable readbacks do not agree")
+	}
+	if !second.ObservedAt.After(first.ObservedAt) || second.ObservedAt.Sub(first.ObservedAt) < request.ConsistencyWindow {
+		return errors.New("reconcile stable readbacks are not separated by the consistency window")
+	}
+	return nil
+}
+
+func cloneStableReadbacks(readbacks []StableReadback) []StableReadback {
+	if readbacks == nil {
+		return nil
+	}
+	return append([]StableReadback(nil), readbacks...)
 }
 
 func (b *Broker) now() time.Time {

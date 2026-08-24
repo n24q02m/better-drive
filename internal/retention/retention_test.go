@@ -24,7 +24,129 @@ func ownerMarker() OwnershipMarker {
 }
 
 func validR2Policy() Policy {
-	return Policy{ID: "policy-1", Provider: ProviderR2, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 1, MaxObjects: 10, MaxBytes: 100, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(100, 0).UTC()}
+	return Policy{ID: "policy-1", Provider: ProviderR2, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(100, 0).UTC()}
+}
+
+func TestPlannerRequiresAtLeastTwoCompleteRestoreSets(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name      string
+		minimum   int
+		wantError bool
+	}{
+		{name: "zero", minimum: 0, wantError: true},
+		{name: "one", minimum: 1, wantError: true},
+		{name: "exact floor", minimum: 2},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			policy := validR2Policy()
+			policy.MinCompleteRestoreSets = test.minimum
+			plan, err := PlanRetention(policy, retentionInventory(now), ownerMarker(), now)
+			if test.wantError {
+				if err == nil || !strings.Contains(err.Error(), "min_complete_restore_sets") {
+					t.Fatalf("PlanRetention() error = %v, want restore floor rejection", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("PlanRetention() error = %v", err)
+			}
+			if len(plan.Actions) != 2 {
+				t.Fatalf("actions = %d, want one action per inventory object", len(plan.Actions))
+			}
+		})
+	}
+}
+
+func TestPlannerBindsPolicyThresholdIntoDigest(t *testing.T) {
+	policy := validR2Policy()
+	changed := policy
+	changed.MinimumObjectAge += time.Second
+	if PolicyDigest(policy) == PolicyDigest(changed) {
+		t.Fatal("policy digest did not change when minimum object age changed")
+	}
+}
+
+func TestPlannerRejectsOwnershipScopeAndProviderDrift(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name   string
+		mutate func(*Inventory, *OwnershipMarker)
+	}{
+		{name: "inventory account", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.AccountID = "foreign-account" }},
+		{name: "inventory account required", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.AccountID = "" }},
+		{name: "inventory root", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.RootID = "foreign-root" }},
+		{name: "inventory root required", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.RootID = "" }},
+		{name: "inventory namespace", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Namespace = "foreign-namespace" }},
+		{name: "inventory namespace required", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Namespace = "" }},
+		{name: "object provider", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Objects[0].Provider = string(ProviderDrive) }},
+		{name: "object provider required", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Objects[0].Provider = "" }},
+		{name: "object account", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Objects[0].AccountID = "foreign-account" }},
+		{name: "object root", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Objects[0].RootID = "foreign-root" }},
+		{name: "object namespace", mutate: func(inventory *Inventory, _ *OwnershipMarker) { inventory.Objects[0].Namespace = "foreign-namespace" }},
+		{name: "owner account", mutate: func(_ *Inventory, owner *OwnershipMarker) { owner.AccountID = "foreign-account" }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := retentionInventory(now)
+			owner := ownerMarker()
+			test.mutate(&inventory, &owner)
+			if _, err := PlanRetention(validR2Policy(), inventory, owner, now); err == nil || !strings.Contains(err.Error(), "ownership") {
+				t.Fatalf("PlanRetention() error = %v, want ownership rejection", err)
+			}
+		})
+	}
+}
+
+func TestPlannerRequiresObjectTimestampAndMinimumAge(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	for _, test := range []struct {
+		name      string
+		modified  time.Time
+		wantError string
+	}{
+		{name: "missing timestamp", wantError: "timestamp"},
+		{name: "future timestamp", modified: now.Add(time.Second), wantError: "future"},
+		{name: "too young", modified: now.Add(-time.Hour + time.Second), wantError: "minimum object age"},
+		{name: "boundary age", modified: now.Add(-time.Hour)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			inventory := retentionInventory(now)
+			inventory.Objects[0].ModifiedAt = test.modified
+			_, err := PlanRetention(validR2Policy(), inventory, ownerMarker(), now)
+			if test.wantError == "" {
+				if err != nil {
+					t.Fatalf("PlanRetention() error = %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), test.wantError) {
+				t.Fatalf("PlanRetention() error = %v, want %q", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestQuarantineRequiresExplicitMinimumObjectAge(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	policy := validR2Policy()
+	policy.MinimumObjectAge = 0
+	if _, err := PlanRetention(policy, retentionInventory(now), ownerMarker(), now); err == nil || !strings.Contains(err.Error(), "minimum object age") {
+		t.Fatalf("PlanRetention() error = %v, want explicit minimum object age rejection", err)
+	}
+}
+
+func TestDeletePolicyNoneProducesNoActions(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	policy := validR2Policy()
+	policy.DeletePolicy = DeletePolicyNone
+	policy.MinimumObjectAge = 0
+	plan, err := PlanRetention(policy, retentionInventory(now), ownerMarker(), now)
+	if err != nil {
+		t.Fatalf("PlanRetention() error = %v", err)
+	}
+	if len(plan.Actions) != 0 {
+		t.Fatalf("DeletePolicyNone actions = %d, want zero", len(plan.Actions))
+	}
 }
 
 func TestNewestCompleteRestoreSetsRejectIncompleteRequiredReplica(t *testing.T) {
@@ -70,7 +192,7 @@ func TestDriveDeletePolicyDefaultsToNoOp(t *testing.T) {
 	for index := range inventory.Objects {
 		inventory.Objects[index].Provider = string(ProviderDrive)
 	}
-	policy := Policy{ID: "drive-default", Provider: ProviderDrive, MaxObjects: 10, MaxBytes: 100, ActivatedAt: time.Unix(99, 0).UTC()}
+	policy := Policy{ID: "drive-default", Provider: ProviderDrive, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, ActivatedAt: time.Unix(99, 0).UTC()}
 	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
 	if err != nil {
 		t.Fatalf("PlanRetention() error = %v", err)
@@ -86,7 +208,7 @@ func TestDriveQuarantinePlanningFailsClosedWithoutInjectedCapability(t *testing.
 	for index := range inventory.Objects {
 		inventory.Objects[index].Provider = string(ProviderDrive)
 	}
-	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 1, MaxObjects: 10, MaxBytes: 100, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
+	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
 	if _, err := PlanRetention(policy, inventory, ownerMarker(), now); err == nil || !strings.Contains(strings.ToLower(err.Error()), "capability") {
 		t.Fatalf("Drive quarantine plan error = %v, want fail-closed capability rejection", err)
 	}

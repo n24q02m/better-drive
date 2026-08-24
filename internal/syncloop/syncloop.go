@@ -76,7 +76,7 @@ func New(s Syncer, path1, path2, workdir, mode string, ignore IgnoreFunc) *Loop 
 	if mode == "" || mode == "bisync" {
 		direction = "bidirectional"
 	}
-	return NewWithReplicas(s, path1, []engine.ReplicaSpec{{ID: "default", Target: path2, Workdir: workdir, Required: true, MinCompleteRestoreSets: 2}}, mode, direction, ignore)
+	return NewWithReplicas(s, path1, []engine.ReplicaSpec{{ID: "default", Target: path2, Workdir: workdir, Required: true}}, mode, direction, ignore)
 }
 
 // NewWithReplicas creates a Loop whose one cycle attempts every destination.

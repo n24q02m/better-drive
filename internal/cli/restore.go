@@ -4,22 +4,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/restore"
 	"github.com/spf13/cobra"
-	"os"
-	"path/filepath"
 )
 
 func restoreCmd() *cobra.Command {
+	return restoreCmdWithResolver(nil)
+}
+
+func restoreCmdWithResolver(resolver artifactcrypto.Resolver) *cobra.Command {
 	c := &cobra.Command{
 		Use:     "restore",
 		Short:   "Plan and stage safe isolated restores",
 		Long:    "Plan is read-only. Fetch and apply write only below an explicit isolated root with create-only no-overwrite semantics. Live source replacement is disabled.",
 		Example: "  better-drive restore plan --root C:/staging --manifest restore.json --format json",
 	}
-	c.AddCommand(restorePlanCmd(), restoreFetchCmd(), restoreApplyCmd(), restoreRecoverCmd())
+	c.AddCommand(restorePlanCmd(), restoreFetchCmd(resolver), restoreApplyCmd(resolver), restoreRecoverCmd())
 	return c
 }
 
@@ -37,6 +43,16 @@ func readRestorePlan(root, manifest string) (restore.Plan, error) {
 		return restore.Plan{}, fmt.Errorf("manifest must be a JSON array of restore entries: %w", err)
 	}
 	return restore.BuildPlan(root, entries)
+}
+
+func requireRestoreResolver(resolver artifactcrypto.Resolver) error {
+	if resolver == nil {
+		return exitcode.WithRemediation(
+			exitcode.ConfigError(errors.New("restore execution requires an artifact resolver")),
+			"configure an artifact key resolver before executing restore",
+		)
+	}
+	return nil
 }
 
 func renderRestorePlan(cmd *cobra.Command, format string, plan restore.Plan) error {
@@ -73,7 +89,7 @@ func restorePlanCmd() *cobra.Command {
 	return c
 }
 
-func restoreFetchCmd() *cobra.Command {
+func restoreFetchCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 	var root string
 	var manifest string
 	var format string
@@ -101,6 +117,9 @@ func restoreFetchCmd() *cobra.Command {
 			if len(plan.Conflicts) != 0 {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
+			if err := requireRestoreResolver(resolver); err != nil {
+				return err
+			}
 			journal := restore.Journal{Path: filepath.Join(plan.Root, ".restore-apply.jsonl")}
 			transactionID, err := restore.NewTransactionID()
 			if err != nil {
@@ -118,15 +137,19 @@ func restoreFetchCmd() *cobra.Command {
 			}
 			for _, entry := range plan.Entries {
 				record := restore.JournalRecord{
-					TransactionID: transactionID,
-					Entry:         entry.RelativePath, Action: "create", Before: "absent", After: "staged",
-					SourceDigest: entry.SourceDigest, CiphertextDigest: entry.CiphertextDigest,
+					TransactionID:    transactionID,
+					Entry:            entry.RelativePath,
+					Action:           "create",
+					Before:           "absent",
+					After:            "staged",
+					PlaintextDigest:  entry.PlaintextDigest,
+					CiphertextDigest: entry.CiphertextDigest,
 				}
 				if err := journal.Append(record); err != nil {
 					return recoverFailure(err)
 				}
 				runRecords = append(runRecords, record)
-				if err := restore.StageFile(plan, entry); err != nil {
+				if err := restore.StageFile(plan, entry, resolver); err != nil {
 					return recoverFailure(err)
 				}
 				record.After = "created"
@@ -147,7 +170,7 @@ func restoreFetchCmd() *cobra.Command {
 	return c
 }
 
-func restoreApplyCmd() *cobra.Command {
+func restoreApplyCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 	var root string
 	var manifest string
 	var transactionID string
@@ -184,11 +207,14 @@ func restoreApplyCmd() *cobra.Command {
 			if len(plan.Conflicts) != 0 {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
+			if err := requireRestoreResolver(resolver); err != nil {
+				return err
+			}
 			tx, err := restore.BeginTransaction(plan.Root, transactionID)
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "choose a new transaction ID and preserve prior transaction evidence")
 			}
-			if err := applyRestorePlan(plan, tx); err != nil {
+			if err := applyRestorePlan(plan, tx, resolver); err != nil {
 				return err
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "applied %d entries into isolated root %s (transaction %s)\n", len(plan.Entries), plan.Root, transactionID)
@@ -206,7 +232,7 @@ func restoreApplyCmd() *cobra.Command {
 	return c
 }
 
-func applyRestorePlan(plan restore.Plan, tx *restore.Transaction) error {
+func applyRestorePlan(plan restore.Plan, tx *restore.Transaction, resolver artifactcrypto.Resolver) error {
 	runRecords := make([]restore.JournalRecord, 0, len(plan.Entries)*2)
 	recoverFailure := func(cause error) error {
 		if len(runRecords) == 0 {
@@ -219,16 +245,21 @@ func applyRestorePlan(plan restore.Plan, tx *restore.Transaction) error {
 	}
 	for _, entry := range plan.Entries {
 		record := restore.JournalRecord{
-			TransactionID: tx.ID,
-			Entry:         entry.RelativePath, Action: "create", Before: "absent", After: "staged",
-			SourceDigest: entry.SourceDigest, CiphertextDigest: entry.CiphertextDigest,
-			Root: plan.Root, RootIdentity: tx.RootIdentity.Token,
+			TransactionID:    tx.ID,
+			Entry:            entry.RelativePath,
+			Action:           "create",
+			Before:           "absent",
+			After:            "staged",
+			PlaintextDigest:  entry.PlaintextDigest,
+			CiphertextDigest: entry.CiphertextDigest,
+			Root:             plan.Root,
+			RootIdentity:     tx.RootIdentity.Token,
 		}
 		if err := tx.Append(record); err != nil {
 			return recoverFailure(err)
 		}
 		runRecords = append(runRecords, record)
-		if err := restore.StageFile(plan, entry); err != nil {
+		if err := restore.StageFile(plan, entry, resolver); err != nil {
 			return recoverFailure(err)
 		}
 		record.After = "created"

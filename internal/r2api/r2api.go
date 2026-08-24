@@ -279,6 +279,9 @@ func (client *Client) Delete(ctx context.Context, request DeleteRequest, capabil
 	if err := capability.validate(request, client.now()); err != nil {
 		return MutationReceipt{}, err
 	}
+	if err := client.reserveRequest(request.RequestID); err != nil {
+		return MutationReceipt{}, err
+	}
 	receipt, err := client.provider.Delete(ctx, request)
 	if err != nil {
 		return MutationReceipt{}, unknownSettlementError("R2 source delete", err)
@@ -300,6 +303,9 @@ func (client *Client) Purge(ctx context.Context, request PurgeRequest, capabilit
 		return MutationReceipt{}, err
 	}
 	if err := capability.validate(request, client.now()); err != nil {
+		return MutationReceipt{}, err
+	}
+	if err := client.reserveRequest(request.RequestID); err != nil {
 		return MutationReceipt{}, err
 	}
 	receipt, err := client.provider.Purge(ctx, request)
@@ -416,6 +422,15 @@ func (client *Client) now() time.Time {
 		return client.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+func (client *Client) reserveRequest(requestID string) error {
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if _, exists := client.used[requestID]; exists {
+		return errors.New("R2 mutation request replay rejected")
+	}
+	client.used[requestID] = struct{}{}
+	return nil
 }
 
 func validateListRequest(request ListRequest) error {

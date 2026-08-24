@@ -191,7 +191,7 @@ func TestExecuteReplicasPreservesDriveR2AndCryptTargets(t *testing.T) {
 	targets := []string{"gdrive:backup", "r2:backup", "crypt:backup"}
 	replicas := make([]ReplicaSpec, 0, len(targets))
 	for i, target := range targets {
-		replicas = append(replicas, ReplicaSpec{ID: target, Target: target, Workdir: "wd", Required: true, MinCompleteRestoreSets: 2})
+		replicas = append(replicas, ReplicaSpec{ID: target, Target: target, Workdir: "wd", Required: true, MinCompleteRestoreSets: 0})
 		_ = i
 	}
 	if _, err := ExecuteReplicas(f, TransferSpec{Local: "C:/source", Mode: "copy", Direction: "push", Replicas: replicas}); err != nil {
@@ -224,13 +224,61 @@ func TestRestoreFloorCountsOnlyCompleteRequiredVerifiedAcknowledgements(t *testi
 	}
 }
 
-func TestExecuteReplicasAllowsInitialUploadWithInsufficientHistoricalRestoreAcks(t *testing.T) {
+func TestExecuteReplicasAllowsUnenrolledReplicaWithoutRestoreFloor(t *testing.T) {
 	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
 	summary, err := ExecuteReplicas(f, TransferSpec{
 		Local: "C:/source", Mode: "copy", Direction: "push",
-		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 2, RestoreAcks: []RestoreSetAck{{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true}}}},
+		Replicas: []ReplicaSpec{{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 0}},
 	})
 	if err != nil || summary.Status != "ok" || len(f.calls) != 1 {
-		t.Fatalf("result summary=%#v err=%v calls=%#v, want upload despite historical floor not met", summary, err, f.calls)
+		t.Fatalf("result summary=%#v err=%v calls=%#v, want unenrolled replica to transfer", summary, err, f.calls)
+	}
+}
+
+func TestExecuteReplicasRejectsReplicaWithoutRestoreFloorBeforeTransfer(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		acks []RestoreSetAck
+	}{
+		{name: "missing acks"},
+		{name: "insufficient acks", acks: []RestoreSetAck{
+			{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true},
+		}},
+		{name: "duplicate restore set ids", acks: []RestoreSetAck{
+			{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true},
+			{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := &replicaFakeTransferer{errByTarget: map[string]error{}}
+			_, err := ExecuteReplicas(f, TransferSpec{
+				Local: "C:/source", Mode: "copy", Direction: "push",
+				Replicas: []ReplicaSpec{
+					{ID: "r0", Target: "gdrive:previous", Required: true},
+					{ID: "r1", Target: "gdrive:backup", Required: true, MinCompleteRestoreSets: 2, RestoreAcks: tc.acks},
+				},
+			})
+			if err == nil || len(f.calls) != 0 || !strings.Contains(err.Error(), "restore floor") {
+				t.Fatalf("result err=%v calls=%#v, want restore-floor rejection before transfer", err, f.calls)
+			}
+		})
+	}
+}
+
+func TestExecuteReplicasAllowsReplicaWithDistinctRestoreAcks(t *testing.T) {
+	f := &replicaFakeTransferer{errByTarget: map[string]error{}}
+	summary, err := ExecuteReplicas(f, TransferSpec{
+		Local: "C:/source", Mode: "copy", Direction: "push",
+		Replicas: []ReplicaSpec{{
+			ID: "r1", Target: "gdrive:backup", Required: true,
+			MinCompleteRestoreSets: 2,
+			RestoreAcks: []RestoreSetAck{
+				{RestoreSetID: "set-1", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true},
+				{RestoreSetID: "set-2", ReplicaID: "r1", Required: true, Complete: true, VerifiedReadback: true},
+			},
+		}},
+	})
+	if err != nil || summary.Status != "ok" || len(f.calls) != 1 {
+		t.Fatalf("result summary=%#v err=%v calls=%#v, want one transfer after restore floor validation", summary, err, f.calls)
 	}
 }

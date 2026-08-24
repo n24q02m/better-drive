@@ -150,6 +150,11 @@ func ExecuteReplicas(transferer Transferer, spec TransferSpec) (ReplicaSummary, 
 		if replica.MinCompleteRestoreSets != 0 && replica.MinCompleteRestoreSets < 2 {
 			return ReplicaSummary{}, fmt.Errorf("replica %q min_complete_restore_sets must be >= 2", replica.ID)
 		}
+		if replica.MinCompleteRestoreSets >= 2 {
+			if err := ValidateRestoreFloor(replica.MinCompleteRestoreSets, replica.RestoreAcks); err != nil {
+				return ReplicaSummary{}, fmt.Errorf("replica %q restore floor: %w", replica.ID, err)
+			}
+		}
 	}
 	summary := ReplicaSummary{Status: "ok", Outcomes: make([]ReplicaOutcome, 0, len(spec.Replicas))}
 	for _, replica := range spec.Replicas {

@@ -10,12 +10,54 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/restore"
+	"github.com/spf13/cobra"
 )
+
+type cliArtifactResolver map[artifactcrypto.KeyReference][]byte
+
+func (r cliArtifactResolver) Resolve(reference artifactcrypto.KeyReference) ([]byte, error) {
+	key, ok := r[reference]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return append([]byte(nil), key...), nil
+}
+
+func cliMetadata() artifactcrypto.Metadata {
+	return artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+}
+
+func cliSealedEntry(t *testing.T, relative string, payload []byte, metadata artifactcrypto.Metadata, resolver artifactcrypto.Resolver) restore.Entry {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "artifact.bin")
+	file, err := os.OpenFile(source, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, sealErr := artifactcrypto.Seal(file, bytes.NewReader(payload), resolver, metadata)
+	closeErr := file.Close()
+	if sealErr != nil {
+		t.Fatal(sealErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	return restore.Entry{
+		RelativePath: relative, SourcePath: source, ArtifactMetadata: metadata,
+		PlaintextDigest: result.PlaintextDigest, CiphertextDigest: result.CiphertextDigest,
+		PlaintextSize: int64(len(payload)),
+	}
+}
+
+func restoreTestCmd(resolver artifactcrypto.Resolver) *cobra.Command {
+	return restoreCmdWithResolver(resolver)
+}
 
 func TestRestorePlanJSONValidatesCanonicalManifest(t *testing.T) {
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
-	if err := os.WriteFile(manifest, []byte(`[{"relative_path":"category/state.txt","source_path":"C:/source/state.txt","source_digest":"sha256:abc","size":3}]`), 0o600); err != nil {
+	if err := os.WriteFile(manifest, []byte(`[{"relative_path":"category/state.txt"}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newRootCmd()
@@ -42,14 +84,11 @@ func TestRestoreFetchRequiresExplicitMode(t *testing.T) {
 }
 
 func TestRestoreFetchJournalsRecoveryIntentBeforeCreate(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "source.txt")
-	payload := []byte("restore-data")
-	if err := os.WriteFile(source, payload, 0o600); err != nil {
-		t.Fatal(err)
-	}
-	sum := sha256.Sum256(payload)
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "category/state.txt", []byte("restore-data"), metadata, resolver)
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
-	data, err := json.Marshal([]restore.Entry{{RelativePath: "category/state.txt", SourcePath: source, SourceDigest: "sha256:" + hex.EncodeToString(sum[:]), Size: 12}})
+	data, err := json.Marshal([]restore.Entry{entry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,11 +96,11 @@ func TestRestoreFetchJournalsRecoveryIntentBeforeCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := newRootCmd()
+	cmd := restoreTestCmd(resolver)
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	cmd.SetArgs([]string{"restore", "fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
+	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("restore fetch: %v; stderr=%s", err, errOut.String())
 	}
@@ -70,7 +109,8 @@ func TestRestoreFetchJournalsRecoveryIntentBeforeCreate(t *testing.T) {
 		t.Fatalf("read journal: %v", err)
 	}
 	if len(records) != 2 || records[0].After != "staged" || records[1].After != "created" ||
-		records[0].TransactionID == "" || records[0].TransactionID != records[1].TransactionID {
+		records[0].TransactionID == "" || records[0].TransactionID != records[1].TransactionID ||
+		records[0].PlaintextDigest != entry.PlaintextDigest || records[0].CiphertextDigest != entry.CiphertextDigest {
 		t.Fatalf("journal records=%#v, want one transaction with staged then created markers", records)
 	}
 }
@@ -88,26 +128,19 @@ func TestRestoreFetchFailureDoesNotRollbackPriorSuccessfulTransaction(t *testing
 		if err := journal.Append(restore.JournalRecord{
 			TransactionID: "prior-transaction",
 			Entry:         "prior.txt", Action: "create", Before: "absent", After: after,
-			SourceDigest: "sha256:" + hex.EncodeToString(priorDigest[:]),
+			PlaintextDigest: "sha256:" + hex.EncodeToString(priorDigest[:]),
 		}); err != nil {
 			t.Fatalf("append prior journal: %v", err)
 		}
 	}
 
-	newSource := filepath.Join(t.TempDir(), "new.txt")
-	if err := os.WriteFile(newSource, []byte("new"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	badSource := filepath.Join(t.TempDir(), "bad.txt")
-	if err := os.WriteFile(badSource, []byte("bad"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	newDigest := sha256.Sum256([]byte("new"))
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	newEntry := cliSealedEntry(t, "new.txt", []byte("new"), metadata, resolver)
+	badEntry := cliSealedEntry(t, "bad.txt", []byte("bad"), metadata, resolver)
+	badEntry.PlaintextDigest = "sha256:" + strings.Repeat("0", 64)
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
-	data, err := json.Marshal([]restore.Entry{
-		{RelativePath: "new.txt", SourcePath: newSource, SourceDigest: "sha256:" + hex.EncodeToString(newDigest[:]), Size: 3},
-		{RelativePath: "bad.txt", SourcePath: badSource, SourceDigest: "sha256:" + strings.Repeat("0", 64), Size: 3},
-	})
+	data, err := json.Marshal([]restore.Entry{newEntry, badEntry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,10 +148,10 @@ func TestRestoreFetchFailureDoesNotRollbackPriorSuccessfulTransaction(t *testing
 		t.Fatal(err)
 	}
 
-	cmd := newRootCmd()
+	cmd := restoreTestCmd(resolver)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"restore", "fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
+	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
 	if err := cmd.Execute(); err == nil {
 		t.Fatal("restore fetch unexpectedly succeeded with bad digest")
 	}
@@ -140,19 +173,34 @@ func TestRestoreApplyRemainsOwnerGated(t *testing.T) {
 	}
 }
 
-func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
-	source := filepath.Join(t.TempDir(), "source.txt")
-	payload := []byte("restore-data")
-	if err := os.WriteFile(source, payload, 0o600); err != nil {
+func TestRestoreFetchExecuteRequiresArtifactResolver(t *testing.T) {
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{entry})
+	if err != nil {
 		t.Fatal(err)
 	}
-	sum := sha256.Sum256(payload)
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cmd := newRootCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"restore", "fetch", "--root", t.TempDir(), "--manifest", manifest, "--execute"})
+	if err := cmd.Execute(); err == nil || !strings.Contains(err.Error(), "artifact resolver") {
+		t.Fatalf("restore fetch without resolver error = %v", err)
+	}
+}
+
+func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
+	payload := []byte("restore-data")
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "category/state.txt", payload, metadata, resolver)
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
-	data, err := json.Marshal([]restore.Entry{{
-		RelativePath: "category/state.txt", SourcePath: source,
-		SourceDigest: "sha256:" + hex.EncodeToString(sum[:]), Size: int64(len(payload)),
-		CiphertextDigest: "sha256:ciphertext",
-	}})
+	data, err := json.Marshal([]restore.Entry{entry})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -160,10 +208,10 @@ func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := newRootCmd()
+	cmd := restoreTestCmd(resolver)
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
-	cmd.SetArgs([]string{"restore", "apply", "--root", rootPath, "--manifest", manifest, "--transaction", "tx-cli"})
+	cmd.SetArgs([]string{"apply", "--root", rootPath, "--manifest", manifest, "--transaction", "tx-cli"})
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("restore apply: %v", err)
 	}

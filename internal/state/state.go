@@ -110,6 +110,19 @@ func (s State) Validate() error {
 	if _, ok := validHealth[s.Scheduler.Health]; !ok {
 		return fmt.Errorf("scheduler health %q is unknown", s.Scheduler.Health)
 	}
+	if s.Scheduler.Health == HealthHealthy {
+		ownerJobID := s.Scheduler.OwnerJobID
+		matched := false
+		for _, job := range s.Jobs {
+			if job.JobID == ownerJobID {
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return fmt.Errorf("scheduler healthy owner_job_id %q does not match any job state", ownerJobID)
+		}
+	}
 	if s.Scheduler.OverlapState != "" {
 		if _, ok := validOverlap[s.Scheduler.OverlapState]; !ok {
 			return fmt.Errorf("scheduler overlap_state %q is invalid", s.Scheduler.OverlapState)

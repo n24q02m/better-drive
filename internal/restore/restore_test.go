@@ -1,17 +1,55 @@
 package restore
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 )
 
 func digestBytes(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
+}
+
+type testArtifactResolver map[artifactcrypto.KeyReference][]byte
+
+func (r testArtifactResolver) Resolve(reference artifactcrypto.KeyReference) ([]byte, error) {
+	key, ok := r[reference]
+	if !ok {
+		return nil, os.ErrNotExist
+	}
+	return append([]byte(nil), key...), nil
+}
+
+func sealedEntry(t *testing.T, relative string, payload []byte, metadata artifactcrypto.Metadata, resolver artifactcrypto.Resolver) Entry {
+	t.Helper()
+	source := filepath.Join(t.TempDir(), "artifact.bin")
+	file, err := os.OpenFile(source, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, sealErr := artifactcrypto.Seal(file, bytes.NewReader(payload), resolver, metadata)
+	closeErr := file.Close()
+	if sealErr != nil {
+		t.Fatal(sealErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	return Entry{
+		RelativePath:     relative,
+		SourcePath:       source,
+		ArtifactMetadata: metadata,
+		PlaintextDigest:  result.PlaintextDigest,
+		CiphertextDigest: result.CiphertextDigest,
+		PlaintextSize:    int64(len(payload)),
+	}
 }
 
 func TestBuildPlanRejectsTraversalAbsoluteAndDuplicatePaths(t *testing.T) {
@@ -26,21 +64,55 @@ func TestBuildPlanRejectsTraversalAbsoluteAndDuplicatePaths(t *testing.T) {
 	}
 }
 
-func TestStageFileWritesIsolatedNoOverwriteAndVerifiesDigest(t *testing.T) {
-	root := t.TempDir()
-	source := filepath.Join(t.TempDir(), "source.txt")
-	if err := os.WriteFile(source, []byte("restore-data"), 0o600); err != nil {
+func TestCaptureRootIdentityRejectsDirectSymlinkRoot(t *testing.T) {
+	target := t.TempDir()
+	parent := t.TempDir()
+	supplied := filepath.Join(parent, "root-link")
+	if err := os.Symlink(target, supplied); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	if _, err := CaptureRootIdentity(supplied); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("CaptureRootIdentity accepted direct symlink root: %v", err)
+	}
+}
+
+func TestCaptureRootIdentityRejectsIntermediateSymlinkRoot(t *testing.T) {
+	realParent := t.TempDir()
+	realRoot := filepath.Join(realParent, "restore")
+	if err := os.Mkdir(realRoot, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	entry := Entry{RelativePath: "category/state.txt", SourcePath: source, SourceDigest: digestBytes("restore-data"), Size: int64(len("restore-data"))}
+	linkParent := filepath.Join(t.TempDir(), "parent-link")
+	if err := os.Symlink(realParent, linkParent); err != nil {
+		t.Skipf("symlink fixture unavailable: %v", err)
+	}
+	supplied := filepath.Join(linkParent, "restore")
+	if _, err := CaptureRootIdentity(supplied); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("CaptureRootIdentity accepted intermediate symlink root: %v", err)
+	}
+}
+
+func TestBuildPlanValidatesExecutableEnvelopeFields(t *testing.T) {
+	root := t.TempDir()
+	entry := Entry{RelativePath: "state.txt", SourcePath: filepath.Join(t.TempDir(), "artifact.bin")}
+	if _, err := BuildPlan(root, []Entry{entry}); err == nil || !strings.Contains(err.Error(), "plaintext_digest") {
+		t.Fatalf("BuildPlan accepted incomplete executable entry: %v", err)
+	}
+}
+
+func TestStageFileWritesAuthenticatedEnvelopeCreateOnly(t *testing.T) {
+	root := t.TempDir()
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := sealedEntry(t, "category/state.txt", []byte("restore-data"), metadata, resolver)
 	plan, err := BuildPlan(root, []Entry{entry})
 	if err != nil {
 		t.Fatalf("BuildPlan: %v", err)
 	}
-	if err := StageFile(plan, entry); err != nil {
+	if err := StageFile(plan, entry, resolver); err != nil {
 		t.Fatalf("StageFile: %v", err)
 	}
-	if err := StageFile(plan, entry); err == nil || !strings.Contains(err.Error(), "exists") {
+	if err := StageFile(plan, entry, resolver); err == nil || !strings.Contains(err.Error(), "exists") {
 		t.Fatal("StageFile overwrote an existing destination")
 	}
 	got, err := os.ReadFile(filepath.Join(root, "category", "state.txt"))
@@ -49,10 +121,104 @@ func TestStageFileWritesIsolatedNoOverwriteAndVerifiesDigest(t *testing.T) {
 	}
 }
 
+func TestStageFileRejectsEnvelopeAndManifestFailuresWithoutCommit(t *testing.T) {
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	key := []byte("0123456789abcdef0123456789abcdef")
+	resolver := testArtifactResolver{metadata.Reference(): key}
+	cases := []struct {
+		name   string
+		mutate func(t *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver)
+	}{
+		{
+			name: "wrong key",
+			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				return data, testArtifactResolver{metadata.Reference(): []byte("abcdef0123456789abcdef0123456789")}
+			},
+		},
+		{
+			name: "resolver failure",
+			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				return data, testArtifactResolver{}
+			},
+		},
+		{
+			name: "wrong key reference",
+			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				entry.ArtifactMetadata.KeyRef = "other-key"
+				return data, resolver
+			},
+		},
+		{
+			name: "tampered envelope",
+			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				data[len(data)-1] ^= 0x01
+				return data, resolver
+			},
+		},
+		{
+			name: "truncated envelope",
+			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				return data[:len(data)-1], resolver
+			},
+		},
+		{
+			name: "ciphertext digest mismatch",
+			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				entry.CiphertextDigest = "sha256:" + strings.Repeat("0", sha256.Size*2)
+				return data, resolver
+			},
+		},
+		{
+			name: "plaintext digest mismatch",
+			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				entry.PlaintextDigest = "sha256:" + strings.Repeat("0", sha256.Size*2)
+				return data, resolver
+			},
+		},
+		{
+			name: "plaintext size mismatch",
+			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
+				entry.PlaintextSize++
+				return data, resolver
+			},
+		},
+		{
+			name: "plaintext source",
+			mutate: func(_ *testing.T, entry *Entry, _ []byte) ([]byte, artifactcrypto.Resolver) {
+				return []byte("restore-data"), resolver
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			entry := sealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
+			data, err := os.ReadFile(entry.SourcePath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, caseResolver := tc.mutate(t, &entry, data)
+			if err := os.WriteFile(entry.SourcePath, data, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			plan, err := BuildPlan(root, []Entry{entry})
+			if err != nil {
+				t.Fatalf("BuildPlan: %v", err)
+			}
+			if err := StageFile(plan, entry, caseResolver); err == nil {
+				t.Fatal("StageFile accepted an invalid envelope or manifest")
+			}
+			if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {
+				t.Fatalf("failed restore created destination: %v", err)
+			}
+		})
+	}
+}
+
 func TestApplyJournalRoundTripAndRecoveryMarkers(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "apply.jsonl")
 	journal := Journal{Path: path}
-	record := JournalRecord{TransactionID: "tx-1", Entry: "category/state.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("restore-data")}
+	record := JournalRecord{TransactionID: "tx-1", Entry: "category/state.txt", Action: "create", Before: "absent", After: "created", PlaintextDigest: digestBytes("restore-data")}
 	if err := journal.Append(record); err != nil {
 		t.Fatalf("Append: %v", err)
 	}
@@ -77,7 +243,7 @@ func TestRecoverCreateOnlyRemovesOnlyMatchingCreatedFiles(t *testing.T) {
 	if err := os.WriteFile(path, []byte("restore-data"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	records := []JournalRecord{{TransactionID: "tx-1", Entry: "category/state.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("restore-data")}}
+	records := []JournalRecord{{TransactionID: "tx-1", Entry: "category/state.txt", Action: "create", Before: "absent", After: "created", PlaintextDigest: digestBytes("restore-data")}}
 	if err := RecoverCreateOnly(root, records); err != nil {
 		t.Fatalf("RecoverCreateOnly: %v", err)
 	}
@@ -109,7 +275,7 @@ func TestRecoverCreateOnlyRejectsSymlinkAncestor(t *testing.T) {
 	records := []JournalRecord{{
 		TransactionID: "tx-1",
 		Entry:         "category/state.txt", Action: "create", Before: "absent", After: "created",
-		SourceDigest: digestBytes("restore-data"),
+		PlaintextDigest: digestBytes("restore-data"),
 	}}
 
 	if err := RecoverCreateOnly(root, records); err == nil || !strings.Contains(err.Error(), "safe directory") {
@@ -128,8 +294,8 @@ func TestTransactionRoundTripAndScopedRead(t *testing.T) {
 	}
 	record := JournalRecord{
 		TransactionID: tx.ID, Entry: "state.txt", Action: "create",
-		Before: "absent", After: "staged", SourceDigest: digestBytes("restore-data"),
-		CiphertextDigest: "sha256:ciphertext",
+		Before: "absent", After: "staged", PlaintextDigest: digestBytes("restore-data"),
+		CiphertextDigest: "sha256:" + strings.Repeat("0", 64),
 	}
 	if err := tx.Append(record); err != nil {
 		t.Fatalf("Append: %v", err)
@@ -162,10 +328,10 @@ func TestRecoverTransactionOnlyRemovesRequestedTransaction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := oldTx.Append(JournalRecord{TransactionID: oldTx.ID, Entry: "old.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("old")}); err != nil {
+	if err := oldTx.Append(JournalRecord{TransactionID: oldTx.ID, Entry: "old.txt", Action: "create", Before: "absent", After: "created", PlaintextDigest: digestBytes("old")}); err != nil {
 		t.Fatal(err)
 	}
-	if err := newTx.Append(JournalRecord{TransactionID: newTx.ID, Entry: "new.txt", Action: "create", Before: "absent", After: "created", SourceDigest: digestBytes("new")}); err != nil {
+	if err := newTx.Append(JournalRecord{TransactionID: newTx.ID, Entry: "new.txt", Action: "create", Before: "absent", After: "created", PlaintextDigest: digestBytes("new")}); err != nil {
 		t.Fatal(err)
 	}
 	if err := RecoverTransaction(root, newTx.ID); err != nil {
@@ -181,11 +347,9 @@ func TestRecoverTransactionOnlyRemovesRequestedTransaction(t *testing.T) {
 
 func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
 	root := t.TempDir()
-	source := filepath.Join(t.TempDir(), "source.txt")
-	if err := os.WriteFile(source, []byte("restore-data"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	entry := Entry{RelativePath: "state.txt", SourcePath: source, SourceDigest: digestBytes("restore-data"), Size: int64(len("restore-data"))}
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := sealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
 	plan, err := BuildPlan(root, []Entry{entry})
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +361,7 @@ func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
 	if err := os.Mkdir(root, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := StageFile(plan, entry); err == nil || !strings.Contains(err.Error(), "identity") {
+	if err := StageFile(plan, entry, resolver); err == nil || !strings.Contains(err.Error(), "identity") {
 		t.Fatalf("StageFile root drift error = %v, want identity refusal", err)
 	}
 	if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {

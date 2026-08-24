@@ -161,6 +161,79 @@ func TestDeleteAndPurgeUseDistinctCapabilitiesAndPurgeRequiresEmptyLifecycle(t *
 		t.Fatalf("purge calls = %d", provider.purgeCalls)
 	}
 }
+func TestDeleteAndPurgeRejectReplayAfterSuccessfulProviderCall(t *testing.T) {
+	deleteRequest, deleteCapability := validDeleteMutation("delete-success")
+	deleteProvider := &fakeProvider{}
+	deleteClient := NewClient(deleteProvider)
+	deleteClient.Now = func() time.Time { return time.Unix(100, 0).UTC() }
+	if _, err := deleteClient.Delete(context.Background(), deleteRequest, deleteCapability); err != nil {
+		t.Fatalf("first Delete() error = %v", err)
+	}
+	if _, err := deleteClient.Delete(context.Background(), deleteRequest, deleteCapability); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("replayed Delete() error = %v, want replay rejection", err)
+	}
+	if deleteProvider.deleteCalls != 1 {
+		t.Fatalf("delete calls = %d, want 1", deleteProvider.deleteCalls)
+	}
+
+	purgeRequest := PurgeRequest{Object: deleteRequest.Quarantine, RequestID: "purge-success"}
+	purgeCapability := NewPurgeCapability(purgeRequest.Object, purgeRequest.RequestID, time.Unix(200, 0).UTC(), "signed-purge")
+	if _, err := deleteClient.Purge(context.Background(), purgeRequest, purgeCapability); err != nil {
+		t.Fatalf("first Purge() error = %v", err)
+	}
+	if _, err := deleteClient.Purge(context.Background(), purgeRequest, purgeCapability); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("replayed Purge() error = %v, want replay rejection", err)
+	}
+	if deleteProvider.purgeCalls != 1 {
+		t.Fatalf("purge calls = %d, want 1", deleteProvider.purgeCalls)
+	}
+}
+
+func TestDeleteAndPurgeRejectReplayAfterProviderFailure(t *testing.T) {
+	deleteRequest, deleteCapability := validDeleteMutation("delete-failure")
+	deleteProvider := &fakeProvider{deleteErr: errors.New("delete provider timeout")}
+	deleteClient := NewClient(deleteProvider)
+	deleteClient.Now = func() time.Time { return time.Unix(100, 0).UTC() }
+	if _, err := deleteClient.Delete(context.Background(), deleteRequest, deleteCapability); err == nil || !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("failed Delete() error = %v, want unknown settlement", err)
+	}
+	if _, err := deleteClient.Delete(context.Background(), deleteRequest, deleteCapability); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("replayed failed Delete() error = %v, want replay rejection", err)
+	}
+	if deleteProvider.deleteCalls != 1 {
+		t.Fatalf("failed delete calls = %d, want 1", deleteProvider.deleteCalls)
+	}
+
+	purgeRequest := PurgeRequest{Object: deleteRequest.Quarantine, RequestID: "purge-failure"}
+	purgeCapability := NewPurgeCapability(purgeRequest.Object, purgeRequest.RequestID, time.Unix(200, 0).UTC(), "signed-purge")
+	purgeProvider := &fakeProvider{purgeErr: errors.New("purge provider timeout")}
+	purgeClient := NewClient(purgeProvider)
+	purgeClient.Now = func() time.Time { return time.Unix(100, 0).UTC() }
+	if _, err := purgeClient.Purge(context.Background(), purgeRequest, purgeCapability); err == nil || !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("failed Purge() error = %v, want unknown settlement", err)
+	}
+	if _, err := purgeClient.Purge(context.Background(), purgeRequest, purgeCapability); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("replayed failed Purge() error = %v, want replay rejection", err)
+	}
+	if purgeProvider.purgeCalls != 1 {
+		t.Fatalf("failed purge calls = %d, want 1", purgeProvider.purgeCalls)
+	}
+}
+
+func validDeleteMutation(requestID string) (DeleteRequest, DeleteCapability) {
+	source := r2Identity("one", "v1", "e1")
+	quarantine := ObjectIdentity{AccountID: "acct-1", Bucket: "quarantine", Key: "one", VersionID: "v2", ETag: "e2"}
+	copyReceipt := CopyReceipt{
+		Source: source, Destination: quarantine, Size: 4, SHA256: "h1",
+		ReadbackVerified: true, RequestID: "copy-1", verifiedProof: &copyProof{},
+	}
+	request := DeleteRequest{
+		Source: source, Quarantine: quarantine, Copy: copyReceipt,
+		CopyRequestID: copyReceipt.RequestID, RequestID: requestID,
+	}
+	capability := NewDeleteCapability(source, quarantine, requestID, time.Unix(200, 0).UTC(), "signed-delete")
+	return request, capability
+}
 
 type fakeProvider struct {
 	pages           []Page
@@ -173,6 +246,8 @@ type fakeProvider struct {
 	purgeCalls      int
 	copyRequestID   string
 	cancelAfterCopy context.CancelFunc
+	deleteErr       error
+	purgeErr        error
 }
 
 func (provider *fakeProvider) List(_ context.Context, _ ListRequest) (Page, error) {
@@ -212,10 +287,16 @@ func (provider *fakeProvider) Copy(_ context.Context, request CopyRequest) (Copy
 
 func (provider *fakeProvider) Delete(_ context.Context, request DeleteRequest) (MutationReceipt, error) {
 	provider.deleteCalls++
+	if provider.deleteErr != nil {
+		return MutationReceipt{}, provider.deleteErr
+	}
 	return MutationReceipt{Identity: request.Source, State: "deleted", RequestID: request.RequestID}, nil
 }
 
 func (provider *fakeProvider) Purge(_ context.Context, request PurgeRequest) (MutationReceipt, error) {
 	provider.purgeCalls++
+	if provider.purgeErr != nil {
+		return MutationReceipt{}, provider.purgeErr
+	}
 	return MutationReceipt{Identity: request.Object, State: "purged", RequestID: request.RequestID}, nil
 }

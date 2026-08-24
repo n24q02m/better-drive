@@ -33,15 +33,16 @@ const (
 )
 
 type Policy struct {
-	ID                     string       `json:"id"`
-	Provider               Provider     `json:"provider"`
-	DeletePolicy           DeletePolicy `json:"delete_policy"`
-	MinCompleteRestoreSets int          `json:"min_complete_restore_sets"`
-	MaxObjects             int          `json:"max_objects"`
-	MaxBytes               int64        `json:"max_bytes"`
-	QuarantineBucket       string       `json:"quarantine_bucket,omitempty"`
-	QuarantinePrefix       string       `json:"quarantine_prefix,omitempty"`
-	ActivatedAt            time.Time    `json:"activated_at"`
+	ID                     string        `json:"id"`
+	Provider               Provider      `json:"provider"`
+	DeletePolicy           DeletePolicy  `json:"delete_policy"`
+	MinCompleteRestoreSets int           `json:"min_complete_restore_sets"`
+	MaxObjects             int           `json:"max_objects"`
+	MaxBytes               int64         `json:"max_bytes"`
+	MinimumObjectAge       time.Duration `json:"minimum_object_age"`
+	QuarantineBucket       string        `json:"quarantine_bucket,omitempty"`
+	QuarantinePrefix       string        `json:"quarantine_prefix,omitempty"`
+	ActivatedAt            time.Time     `json:"activated_at"`
 }
 
 func (policy Policy) Normalize() Policy {
@@ -65,7 +66,10 @@ func (policy Policy) Validate(now time.Time) error {
 	if policy.DeletePolicy != DeletePolicyNone && policy.DeletePolicy != DeletePolicyQuarantine {
 		return fmt.Errorf("unsupported delete policy %q", policy.DeletePolicy)
 	}
-	if policy.MinCompleteRestoreSets < 0 || policy.MaxObjects <= 0 || policy.MaxBytes <= 0 {
+	if policy.MinCompleteRestoreSets < 2 {
+		return errors.New("min_complete_restore_sets must be >= 2")
+	}
+	if policy.MaxObjects <= 0 || policy.MaxBytes <= 0 {
 		return errors.New("retention restore-set and budget limits are invalid")
 	}
 	if policy.ActivatedAt.IsZero() {
@@ -74,8 +78,13 @@ func (policy Policy) Validate(now time.Time) error {
 	if !policy.ActivatedAt.Before(now) && !policy.ActivatedAt.Equal(now) {
 		return errors.New("retention policy activation timestamp is in the future")
 	}
-	if policy.DeletePolicy == DeletePolicyQuarantine && strings.TrimSpace(policy.QuarantineBucket) == "" {
-		return errors.New("quarantine bucket is required")
+	if policy.DeletePolicy == DeletePolicyQuarantine {
+		if strings.TrimSpace(policy.QuarantineBucket) == "" {
+			return errors.New("quarantine bucket is required")
+		}
+		if policy.MinimumObjectAge <= 0 {
+			return errors.New("minimum object age must be > 0 for quarantine")
+		}
 	}
 	return nil
 }
@@ -142,6 +151,26 @@ func InventoryDigest(inventory Inventory) string {
 	data, _ := json.Marshal(copyInventory)
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
+}
+
+func validateInventoryScope(inventory Inventory, owner OwnershipMarker) error {
+	if strings.TrimSpace(inventory.AccountID) == "" || strings.TrimSpace(inventory.RootID) == "" || strings.TrimSpace(inventory.Namespace) == "" {
+		return errors.New("inventory ownership scope is required")
+	}
+	if inventory.AccountID != owner.AccountID || inventory.RootID != owner.RootID || inventory.Namespace != owner.Namespace {
+		return errors.New("inventory ownership scope does not match owner")
+	}
+	return nil
+}
+
+func validateObjectScope(policy Policy, inventory Inventory, owner OwnershipMarker, object Object) error {
+	if object.Provider != string(policy.Provider) ||
+		object.AccountID != owner.AccountID || object.AccountID != inventory.AccountID ||
+		object.RootID != owner.RootID || object.RootID != inventory.RootID ||
+		object.Namespace != owner.Namespace || object.Namespace != inventory.Namespace {
+		return fmt.Errorf("object %q ownership scope does not match policy, owner, and inventory", object.ObjectID)
+	}
+	return nil
 }
 
 func NewestCompleteRestoreSets(inventory Inventory, minimum int) ([]RestoreSet, error) {
@@ -248,6 +277,9 @@ func PlanRetention(policy Policy, inventory Inventory, owner OwnershipMarker, no
 	if err := owner.Validate(); err != nil {
 		return Plan{}, err
 	}
+	if err := validateInventoryScope(inventory, owner); err != nil {
+		return Plan{}, err
+	}
 	if !inventory.CapturedAt.IsZero() && inventory.CapturedAt.After(now) {
 		return Plan{}, errors.New("inventory timestamp is in the future")
 	}
@@ -255,8 +287,17 @@ func PlanRetention(policy Policy, inventory Inventory, owner OwnershipMarker, no
 		return Plan{}, errors.New("inventory drift detected")
 	}
 	for _, object := range inventory.Objects {
+		if err := validateObjectScope(policy, inventory, owner, object); err != nil {
+			return Plan{}, err
+		}
+		if object.ModifiedAt.IsZero() {
+			return Plan{}, fmt.Errorf("object %q modified timestamp is required", object.ObjectID)
+		}
 		if object.ModifiedAt.After(now) {
 			return Plan{}, fmt.Errorf("object %q has future timestamp", object.ObjectID)
+		}
+		if policy.DeletePolicy == DeletePolicyQuarantine && now.Sub(object.ModifiedAt) < policy.MinimumObjectAge {
+			return Plan{}, fmt.Errorf("object %q does not satisfy minimum object age %s", object.ObjectID, policy.MinimumObjectAge)
 		}
 		if object.Size < 0 || object.Hash == "" || object.ObjectID == "" || object.Version == "" || object.Generation == "" || object.ETag == "" {
 			return Plan{}, fmt.Errorf("object %q lacks exact inventory evidence", object.ObjectID)

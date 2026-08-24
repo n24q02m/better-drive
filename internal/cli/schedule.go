@@ -194,7 +194,16 @@ func ownerRecordFromState() (scheduler.OwnerRecord, error) {
 	}
 	jobID := persisted.Scheduler.OwnerJobID
 	if persisted.Scheduler.Owner == "better-drive" && jobID == aggregateSchedulerOwnerJobID {
-		jobID = ""
+		configured := false
+		for _, job := range persisted.Jobs {
+			if job.JobID == jobID {
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			jobID = ""
+		}
 	}
 	return scheduler.OwnerRecord{Owner: persisted.Scheduler.Owner, JobID: jobID}, nil
 }

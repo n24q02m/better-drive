@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -384,10 +385,10 @@ func TestStatusCmdReevaluatesPersistedSchedulerFreshness(t *testing.T) {
 	now := time.Now().UTC()
 	persisted := state.State{
 		SchemaVersion: state.CurrentSchemaVersion,
-		EngineVersion: "1.6.0",
+		EngineVersion: "test",
 		Jobs:          []state.JobState{{JobID: "job-pair0", Status: "ok", LastSuccess: now.Add(-2 * time.Hour), NextDue: now.Add(30 * time.Minute), ObjectCount: 3, ByteCount: 42}},
 		Scheduler: state.SchedulerState{
-			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
+			Owner: "better-drive", OwnerJobID: "job-pair0", Enabled: true,
 			ObservedAt: now.Add(-2 * time.Hour), FreshnessWindow: time.Minute,
 			CatchUpGrace: time.Hour, ActiveInstance: "one-shot", OverlapState: state.OverlapNone,
 			OverlapHealth: "ok", Health: state.HealthHealthy,
@@ -543,7 +544,7 @@ func TestRunSyncOnce_SyncFailedErrorHasRemediation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatal("want non-nil error")
 	}
@@ -659,7 +660,7 @@ func TestRunSyncOnceReportsPerPairAndFailsOnAnyError(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -684,7 +685,7 @@ func TestRunSyncOnceStopsImmediatelyOnContextCanceled(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err != context.Canceled {
 		t.Fatalf("runSyncOnce error = %v, want original context.Canceled", err)
 	}
@@ -711,7 +712,7 @@ func TestRunSyncOnce_FailuresGoToStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -735,7 +736,7 @@ func TestRunSyncOnceAllOkReturnsNil(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&buf)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -764,7 +765,7 @@ func TestRunSyncOnceSingleFilePairDoesNotTreatSourceAsDirectory(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, true, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, true, false, RuntimeDependencies{})
 	if err != nil {
 		t.Fatalf("runSyncOnce(single file): %v; stderr=%q", err, errOut.String())
 	}
@@ -805,7 +806,7 @@ func TestRunSyncOnce_WorkdirFollowsPairIdentityNotConfigOrder(t *testing.T) {
 		cmd := &cobra.Command{}
 		cmd.SetOut(&bytes.Buffer{})
 		cmd.SetErr(&bytes.Buffer{})
-		if _, err := runSyncOnce(cmd, s, &config.Config{Jobs: jobs}, output.FormatTable, false, false); err != nil {
+		if _, err := runSyncOnce(cmd, s, &config.Config{Jobs: jobs}, output.FormatTable, false, false, RuntimeDependencies{}); err != nil {
 			t.Fatalf("runSyncOnce: %v", err)
 		}
 		got := make(map[string]string, len(s.bisyncParams))
@@ -838,7 +839,7 @@ func TestRunSyncOnce_JSONFormatEmitsResultsNotPerPairLines(t *testing.T) {
 	cmd := &cobra.Command{}
 	cmd.SetOut(&out)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, false, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatJSON, false, false, RuntimeDependencies{})
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -870,7 +871,7 @@ func TestRunSyncOnce_DryRunThreadsToSyncerAndWarnsOnStderr(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false)
+	results, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false, RuntimeDependencies{})
 	if err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
@@ -896,7 +897,7 @@ func TestRunSyncOnceThreadsCommandContextAndProgressWriter(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false); err != nil {
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false, RuntimeDependencies{}); err != nil {
 		t.Fatalf("runSyncOnce: %v", err)
 	}
 	if len(s.copyParams) != 1 {
@@ -924,7 +925,7 @@ func TestRunSyncOnceReportsPairRunningBeforeRcloneCompletes(t *testing.T) {
 	cmd.SetErr(&errOut)
 	done := make(chan error, 1)
 	go func() {
-		_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false)
+		_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, false, RuntimeDependencies{})
 		done <- err
 	}()
 
@@ -955,7 +956,7 @@ func TestRunSyncOnce_ResyncForcesABaselineRebuild(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, true); err != nil {
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, true, RuntimeDependencies{}); err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
 	if len(s.bisyncParams) != 1 || !s.bisyncParams[0].Resync {
@@ -978,7 +979,7 @@ func TestRunSyncOnce_ResyncWithDryRunWritesNothing(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, true); err != nil {
+	if _, err := runSyncOnce(cmd, s, cfg, output.FormatTable, true, true, RuntimeDependencies{}); err != nil {
 		t.Fatalf("runSyncOnce err = %v, want nil", err)
 	}
 	if len(s.bisyncParams) != 1 {
@@ -1006,7 +1007,7 @@ func TestRunSyncOnce_NeedsResyncFailureNamesTheRecoveryCommand(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatal("want non-nil error when a pair needs a resync")
 	}
@@ -1034,7 +1035,7 @@ func TestRunSyncOnce_OrdinaryFailureKeepsItsOwnRemediation(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, cfg, output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatal("want non-nil error when a pair fails")
 	}
@@ -1054,7 +1055,7 @@ func TestRunSyncOnceAttemptsMultipleReplicas(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	results, err := runSyncOnce(cmd, s, &config.Config{Jobs: []config.Job{job}}, output.FormatTable, false, false)
+	results, err := runSyncOnce(cmd, s, &config.Config{Jobs: []config.Job{job}}, output.FormatTable, false, false, RuntimeDependencies{})
 	if err != nil {
 		t.Fatalf("runSyncOnce: %v", err)
 	}
@@ -1074,7 +1075,7 @@ func TestRunSyncOnceSupportsPullDirection(t *testing.T) {
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 
-	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false); err != nil {
+	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false, RuntimeDependencies{}); err != nil {
 		t.Fatalf("runSyncOnce pull: %v", err)
 	}
 	if len(s.copyParams) != 1 || s.copyParams[0].Local != "gdrive:backup" || s.copyParams[0].Remote != job.Source {
@@ -1094,7 +1095,7 @@ func TestRunSyncOnceRequiredReplicaFailureStillAttemptsOptional(t *testing.T) {
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
 
-	_, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false)
+	_, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatTable, false, false, RuntimeDependencies{})
 	if err == nil {
 		t.Fatalf("runSyncOnce error = nil, want required replica failure")
 	}
@@ -1121,7 +1122,7 @@ func TestRunSyncOnceJSONIncludesReplicaRequiredStatus(t *testing.T) {
 	var out, errOut bytes.Buffer
 	cmd.SetOut(&out)
 	cmd.SetErr(&errOut)
-	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatJSON, false, false); err != nil {
+	if _, err := runSyncOnce(cmd, s, fakeConfigWithJob(job), output.FormatJSON, false, false, RuntimeDependencies{}); err != nil {
 		t.Fatalf("runSyncOnce: %v; stderr=%q", err, errOut.String())
 	}
 	var got []output.PairResult
@@ -1149,8 +1150,67 @@ func TestBuildStateFromResultsPersistsJobAndReplicaOutcomes(t *testing.T) {
 	if got.Jobs[0].ObjectCount != 3 || got.Jobs[0].ByteCount != 42 || got.Jobs[0].NextDue.IsZero() {
 		t.Fatalf("job counters = %#v, want persisted source stats and next_due", got.Jobs[0])
 	}
-	if got.Scheduler.Health != state.HealthHealthy || got.Scheduler.OwnerJobID != "scheduled-sync" {
-		t.Fatalf("scheduler state = %#v, want healthy scheduled-sync owner", got.Scheduler)
+	if got.Scheduler.Health != state.HealthHealthy || got.Scheduler.OwnerJobID != "job-1" {
+		t.Fatalf("scheduler state = %#v, want healthy job-1 owner", got.Scheduler)
+	}
+}
+
+func TestBuildStateFromResultsLeavesAggregateWithoutSingularOwner(t *testing.T) {
+	now := time.Date(2026, 8, 22, 12, 0, 0, 0, time.UTC)
+	for _, tc := range []struct {
+		name    string
+		results []output.PairResult
+	}{
+		{name: "zero jobs"},
+		{name: "multiple jobs", results: []output.PairResult{
+			{JobID: "job-2", Status: "ok"},
+			{JobID: "job-1", Status: "ok"},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := buildStateFromResults(tc.results, now)
+			if got.Scheduler.OwnerJobID != "" {
+				t.Fatalf("scheduler owner_job_id = %q, want empty aggregate owner", got.Scheduler.OwnerJobID)
+			}
+			if got.Scheduler.Health != state.HealthMissing {
+				t.Fatalf("scheduler health = %q, want canonical missing aggregate health", got.Scheduler.Health)
+			}
+		})
+	}
+}
+
+func TestPersistDaemonResultSerializesConcurrentSnapshots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.json")
+	stateResults := make(map[string]output.PairResult)
+	var stateMu sync.Mutex
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	results := []output.PairResult{
+		{JobID: "job-2", Status: "ok"},
+		{JobID: "job-1", Status: "degraded"},
+	}
+	var wg sync.WaitGroup
+	errs := make(chan error, len(results))
+	for _, result := range results {
+		result := result
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- persistDaemonResult(&stateMu, stateResults, path, result, now)
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("persist daemon result: %v", err)
+		}
+	}
+	got, err := state.Load(path)
+	if err != nil {
+		t.Fatalf("load persisted state: %v", err)
+	}
+	if len(got.Jobs) != 2 || got.Jobs[0].JobID != "job-1" || got.Jobs[1].JobID != "job-2" {
+		t.Fatalf("persisted jobs = %#v, want deterministic complete snapshot [job-1 job-2]", got.Jobs)
 	}
 }
 

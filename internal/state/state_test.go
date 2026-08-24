@@ -51,6 +51,26 @@ func TestStateRejectsUnknownHealthAndMissingFreshness(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsHealthySchedulerWithForeignOwnerJobID(t *testing.T) {
+	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
+	fixture := validState(now)
+	fixture.Scheduler.OwnerJobID = "job-not-configured"
+	if err := fixture.Validate(); err == nil || !strings.Contains(err.Error(), "owner_job_id") {
+		t.Fatalf("Validate() error = %v, want foreign healthy owner rejection", err)
+	}
+	body, err := json.Marshal(fixture)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "state.json")
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "owner_job_id") {
+		t.Fatalf("Load() error = %v, want foreign healthy owner rejection", err)
+	}
+}
+
 func TestEvaluateSchedulerHealthMapsEveryCanonicalEnum(t *testing.T) {
 	now := time.Date(2026, 8, 24, 12, 0, 0, 0, time.UTC)
 

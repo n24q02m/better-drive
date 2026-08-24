@@ -6,12 +6,15 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"reflect"
 	"strings"
+
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 )
 
 type RootIdentity struct {
@@ -20,11 +23,12 @@ type RootIdentity struct {
 }
 
 type Entry struct {
-	RelativePath     string `json:"relative_path"`
-	SourcePath       string `json:"source_path"`
-	SourceDigest     string `json:"source_digest"`
-	CiphertextDigest string `json:"ciphertext_digest,omitempty"`
-	Size             int64  `json:"size"`
+	RelativePath     string                  `json:"relative_path"`
+	SourcePath       string                  `json:"source_path"`
+	ArtifactMetadata artifactcrypto.Metadata `json:"artifact_metadata"`
+	PlaintextDigest  string                  `json:"plaintext_digest"`
+	CiphertextDigest string                  `json:"ciphertext_digest"`
+	PlaintextSize    int64                   `json:"plaintext_size"`
 }
 
 type Plan struct {
@@ -39,11 +43,9 @@ func CaptureRootIdentity(root string) (RootIdentity, error) {
 	if err != nil {
 		return RootIdentity{}, fmt.Errorf("restore root path: %w", err)
 	}
-	resolved, err := filepath.EvalSymlinks(clean)
-	if err != nil {
-		return RootIdentity{}, fmt.Errorf("resolve restore root: %w", err)
+	if err := ensureNoSymlinkComponents(clean); err != nil {
+		return RootIdentity{}, err
 	}
-	clean = filepath.Clean(resolved)
 	if err := ensureSafeRoot(clean); err != nil {
 		return RootIdentity{}, err
 	}
@@ -108,6 +110,11 @@ func BuildPlan(root string, entries []Entry) (Plan, error) {
 		}
 		seen[clean] = struct{}{}
 		entry.RelativePath = clean
+		if entryIsExecutable(entry) {
+			if err := validateExecutableEntry(entry); err != nil {
+				return Plan{}, fmt.Errorf("entry %d: %w", i, err)
+			}
+		}
 		destination := filepath.Join(cleanRoot, filepath.FromSlash(clean))
 		if _, err := os.Lstat(destination); err == nil {
 			plan.Conflicts = append(plan.Conflicts, clean)
@@ -145,8 +152,69 @@ func cleanRelativePath(value string) (string, error) {
 	}
 	return strings.Join(clean, "/"), nil
 }
+func entryIsExecutable(entry Entry) bool {
+	return strings.TrimSpace(entry.SourcePath) != "" ||
+		strings.TrimSpace(entry.PlaintextDigest) != "" ||
+		strings.TrimSpace(entry.CiphertextDigest) != "" ||
+		entry.PlaintextSize != 0 ||
+		entry.ArtifactMetadata != (artifactcrypto.Metadata{})
+}
 
-func StageFile(plan Plan, entry Entry) error {
+func validateExecutableEntry(entry Entry) error {
+	if strings.TrimSpace(entry.SourcePath) == "" {
+		return fmt.Errorf("executable entry requires source_path")
+	}
+	if err := validateSHA256Digest("plaintext_digest", entry.PlaintextDigest); err != nil {
+		return err
+	}
+	if err := validateSHA256Digest("ciphertext_digest", entry.CiphertextDigest); err != nil {
+		return err
+	}
+	if entry.PlaintextSize < 0 {
+		return fmt.Errorf("plaintext_size must be non-negative")
+	}
+	if strings.TrimSpace(entry.ArtifactMetadata.RestoreSetID) == "" ||
+		strings.TrimSpace(entry.ArtifactMetadata.Component) == "" ||
+		strings.TrimSpace(entry.ArtifactMetadata.KeyRef) == "" ||
+		entry.ArtifactMetadata.KeyVersion == 0 {
+		return fmt.Errorf("artifact_metadata requires restore_set_id, component, key_ref, and key_version")
+	}
+	return nil
+}
+
+func validateSHA256Digest(field, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return fmt.Errorf("%s is required", field)
+	}
+	if len(value) != len("sha256:")+sha256.Size*2 || !strings.HasPrefix(value, "sha256:") {
+		return fmt.Errorf("%s must be a sha256 digest", field)
+	}
+	if _, err := hex.DecodeString(value[len("sha256:"):]); err != nil {
+		return fmt.Errorf("%s must be a sha256 digest", field)
+	}
+	return nil
+}
+
+type sanitizedArtifactResolver struct {
+	resolver artifactcrypto.Resolver
+}
+
+func (r sanitizedArtifactResolver) Resolve(reference artifactcrypto.KeyReference) ([]byte, error) {
+	key, err := r.resolver.Resolve(reference)
+	if err != nil {
+		return nil, errors.New("artifact key resolution failed")
+	}
+	return key, nil
+}
+
+func StageFile(plan Plan, entry Entry, resolver artifactcrypto.Resolver) error {
+	if resolver == nil {
+		return fmt.Errorf("artifact resolver is required for restore execution")
+	}
+	if err := validateExecutableEntry(entry); err != nil {
+		return err
+	}
 	clean, err := cleanRelativePath(entry.RelativePath)
 	if err != nil {
 		return err
@@ -168,8 +236,24 @@ func StageFile(plan Plan, entry Entry) error {
 	if sourceInfo.Mode()&os.ModeSymlink != 0 || !sourceInfo.Mode().IsRegular() {
 		return fmt.Errorf("source must be a regular non-symlink file")
 	}
-	if entry.Size < 0 || sourceInfo.Size() != entry.Size {
-		return fmt.Errorf("source size mismatch")
+	source, err := os.Open(entry.SourcePath)
+	if err != nil {
+		return fmt.Errorf("open source: %w", err)
+	}
+	defer source.Close()
+	openedInfo, err := source.Stat()
+	if err != nil {
+		return fmt.Errorf("stat source: %w", err)
+	}
+	if !openedInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, openedInfo) {
+		return fmt.Errorf("source must be a regular non-symlink file")
+	}
+	currentInfo, err := os.Lstat(entry.SourcePath)
+	if err != nil {
+		return fmt.Errorf("recheck source: %w", err)
+	}
+	if currentInfo.Mode()&os.ModeSymlink != 0 || !currentInfo.Mode().IsRegular() || !os.SameFile(sourceInfo, currentInfo) {
+		return fmt.Errorf("source must be a regular non-symlink file")
 	}
 	parent, err := safeParent(plan.Root, clean)
 	if err != nil {
@@ -186,11 +270,6 @@ func StageFile(plan Plan, entry Entry) error {
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("inspect restore destination: %w", err)
 	}
-	source, err := os.Open(entry.SourcePath)
-	if err != nil {
-		return fmt.Errorf("open source: %w", err)
-	}
-	defer source.Close()
 	tmp, err := os.CreateTemp(parent, ".restore-*.tmp")
 	if err != nil {
 		return fmt.Errorf("create staging file: %w", err)
@@ -204,12 +283,26 @@ func StageFile(plan Plan, entry Entry) error {
 	if err := tmp.Chmod(0o600); err != nil {
 		return err
 	}
-	hash := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmp, hash), source); err != nil {
-		return fmt.Errorf("stage restore file: %w", err)
+	cipherHash := sha256.New()
+	if err := artifactcrypto.Open(tmp, io.TeeReader(source, cipherHash), sanitizedArtifactResolver{resolver}, entry.ArtifactMetadata); err != nil {
+		return fmt.Errorf("open sealed restore artifact: %w", err)
 	}
-	if got := "sha256:" + hex.EncodeToString(hash.Sum(nil)); got != entry.SourceDigest {
-		return fmt.Errorf("source digest mismatch: got %s", got)
+	if got := "sha256:" + hex.EncodeToString(cipherHash.Sum(nil)); got != entry.CiphertextDigest {
+		return fmt.Errorf("ciphertext digest mismatch: got %s", got)
+	}
+	if _, err := tmp.Seek(0, io.SeekStart); err != nil {
+		return fmt.Errorf("rewind staged restore file: %w", err)
+	}
+	plainHash := sha256.New()
+	plainSize, err := io.Copy(plainHash, tmp)
+	if err != nil {
+		return fmt.Errorf("hash staged restore file: %w", err)
+	}
+	if plainSize != entry.PlaintextSize {
+		return fmt.Errorf("plaintext size mismatch: got %d", plainSize)
+	}
+	if got := "sha256:" + hex.EncodeToString(plainHash.Sum(nil)); got != entry.PlaintextDigest {
+		return fmt.Errorf("plaintext digest mismatch: got %s", got)
 	}
 	if err := tmp.Sync(); err != nil {
 		return fmt.Errorf("sync restore file: %w", err)
@@ -227,7 +320,7 @@ func StageFile(plan Plan, entry Entry) error {
 	} else if !exists {
 		return fmt.Errorf("restore ancestor disappeared")
 	}
-	if err := os.Link(tmpPath, destination); err != nil {
+	if err := commitNoReplace(tmpPath, destination); err != nil {
 		return fmt.Errorf("commit restore file without overwrite: %w", err)
 	}
 	if plan.RootIdentity.Path != "" {
@@ -272,7 +365,29 @@ func commitNoReplace(source, destination string) error {
 	return nil
 }
 
+func ensureNoSymlinkComponents(path string) error {
+	clean := filepath.Clean(path)
+	for current := clean; ; current = filepath.Dir(current) {
+		info, err := os.Lstat(current)
+		if err == nil {
+			if info.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("restore root contains a symlink or junction: %s", current)
+			}
+		} else if !os.IsNotExist(err) {
+			return fmt.Errorf("inspect restore root component %q: %w", current, err)
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+	}
+	return nil
+}
+
 func ensureSafeRoot(root string) error {
+	if err := ensureNoSymlinkComponents(root); err != nil {
+		return err
+	}
 	info, err := os.Lstat(root)
 	if err != nil {
 		return fmt.Errorf("restore root: %w", err)
@@ -284,13 +399,11 @@ func ensureSafeRoot(root string) error {
 }
 
 func isSafeDirectoryPath(path string) bool {
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil {
+	info, err := os.Lstat(path)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
 		return false
 	}
-	cleanPath := filepath.Clean(path)
-	cleanResolved := filepath.Clean(resolved)
-	return cleanPath == cleanResolved || strings.EqualFold(cleanPath, cleanResolved)
+	return ensureNoSymlinkComponents(path) == nil
 }
 
 func safeParent(root, relative string) (string, error) {
@@ -327,7 +440,7 @@ type JournalRecord struct {
 	Action           string `json:"action"`
 	Before           string `json:"before"`
 	After            string `json:"after"`
-	SourceDigest     string `json:"source_digest"`
+	PlaintextDigest  string `json:"plaintext_digest"`
 	CiphertextDigest string `json:"ciphertext_digest,omitempty"`
 	Root             string `json:"root,omitempty"`
 	RootIdentity     string `json:"root_identity,omitempty"`
@@ -515,7 +628,7 @@ func (j Journal) ValidateRecovery(records []JournalRecord) error {
 	}
 	var transactionID string
 	for i, record := range records {
-		if record.TransactionID == "" || record.Before == "" || record.After == "" || record.SourceDigest == "" {
+		if record.TransactionID == "" || record.Before == "" || record.After == "" || record.PlaintextDigest == "" {
 			return fmt.Errorf("journal record %d lacks recovery fields", i)
 		}
 		if transactionID == "" {
@@ -653,7 +766,7 @@ func RecoverCreateOnlyWithIdentity(root string, identity RootIdentity, records [
 			return fmt.Errorf("close recovery destination %q: %w", clean, closeErr)
 		}
 		got := "sha256:" + hex.EncodeToString(hash.Sum(nil))
-		if got != record.SourceDigest {
+		if got != record.PlaintextDigest {
 			return fmt.Errorf("recovery destination %q digest mismatch", clean)
 		}
 		if err := identity.Validate(root); err != nil {

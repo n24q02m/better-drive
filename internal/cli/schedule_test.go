@@ -69,8 +69,9 @@ func TestOwnerRecordFromStatePreservesOwnerJobID(t *testing.T) {
 	persisted := state.State{
 		SchemaVersion: state.CurrentSchemaVersion,
 		EngineVersion: "1.6.0",
+		Jobs:          []state.JobState{{JobID: "scheduled-sync", Status: "ok", LastSuccess: now}},
 		Scheduler: state.SchedulerState{
-			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,
+			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
 			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
 			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthHealthy,
 		},
@@ -83,12 +84,12 @@ func TestOwnerRecordFromStatePreservesOwnerJobID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ownerRecordFromState: %v", err)
 	}
-	if got.Owner != "better-drive" || got.JobID != "job-1" {
+	if got.Owner != "better-drive" || got.JobID != "scheduled-sync" {
 		t.Fatalf("owner record = %#v, want owner and job id readback", got)
 	}
 }
 
-func TestOwnerRecordFromStateMapsAggregateSyncOwnerToManagedOwner(t *testing.T) {
+func TestOwnerRecordFromStateMapsLegacyAggregateOwnerOnlyWithoutHealthyClaim(t *testing.T) {
 	statePath := filepath.Join(t.TempDir(), "state.json")
 	now := time.Now().UTC()
 	persisted := state.State{
@@ -97,7 +98,7 @@ func TestOwnerRecordFromStateMapsAggregateSyncOwnerToManagedOwner(t *testing.T) 
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "scheduled-sync", Enabled: true,
 			ObservedAt: now, FreshnessWindow: time.Hour, CatchUpGrace: time.Hour,
-			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthHealthy,
+			ActiveInstance: "one-shot", OverlapState: state.OverlapNone, OverlapHealth: "ok", Health: state.HealthMissing,
 		},
 	}
 	if err := state.Save(statePath, persisted); err != nil {
@@ -119,6 +120,7 @@ func TestScheduleStatusReevaluatesSchedulerFreshness(t *testing.T) {
 	now := time.Now().UTC()
 	persisted := state.State{
 		SchemaVersion: state.CurrentSchemaVersion,
+		Jobs:          []state.JobState{{JobID: "job-1", Status: "ok", LastSuccess: now}},
 		EngineVersion: "1.6.0",
 		Scheduler: state.SchedulerState{
 			Owner: "better-drive", OwnerJobID: "job-1", Enabled: true,

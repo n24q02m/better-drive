@@ -25,6 +25,18 @@ func validClaimRequest() ClaimRequest {
 		},
 	}
 }
+func validReconcileRequest(claim ClaimReadback, requestID, targetRef, settlement string) ReconcileRequest {
+	return ReconcileRequest{
+		ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence,
+		TargetRef: targetRef, TargetOID: claim.Scope.DesiredOID, Settlement: settlement, RequestID: requestID,
+		CancellationReceipt: "cancel-receipt-1",
+		StableReadbacks: []StableReadback{
+			{Digest: "stable-digest-1", Settlement: settlement, ObservedAt: time.Unix(100, 0).UTC()},
+			{Digest: "stable-digest-1", Settlement: settlement, ObservedAt: time.Unix(101, 0).UTC()},
+		},
+		ConsistencyWindow: time.Second,
+	}
+}
 
 func TestBrokerClaimScopesExactRefsAndReturnsSignedSecretFreeReadback(t *testing.T) {
 	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
@@ -59,7 +71,7 @@ func TestBrokerRejectsRefEscapeAndAlternateOID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	complete := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: "alternate-oid", Settlement: SettlementSettled}
+	complete := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "complete-oid", TargetRef: claim.Scope.DesiredRef, TargetOID: "alternate-oid", Settlement: SettlementSettled}
 	if _, err := broker.Complete(complete); err == nil || !strings.Contains(err.Error(), "OID") {
 		t.Fatalf("alternate OID error = %v, want exact-OID rejection", err)
 	}
@@ -75,7 +87,10 @@ func TestBrokerRejectsReplayAndStaleOwnerOrGeneration(t *testing.T) {
 	if _, err := broker.Claim(request); err == nil || !strings.Contains(err.Error(), "replay") {
 		t.Fatalf("replayed Claim error = %v, want replay rejection", err)
 	}
-	stale := CompleteRequest{ClaimID: claim.ClaimID, Owner: "other-owner", Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
+	stale := CompleteRequest{ClaimID: claim.ClaimID, Owner: "other-owner", Generation: claim.Generation, Fence: claim.Fence, RequestID: "complete-replay", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
+	if _, err := broker.Complete(CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}); err == nil || !strings.Contains(err.Error(), "request ID") {
+		t.Fatalf("empty Complete request ID error = %v, want request-ID rejection", err)
+	}
 	if _, err := broker.Complete(stale); err == nil || !strings.Contains(err.Error(), "owner") {
 		t.Fatalf("stale owner error = %v, want owner rejection", err)
 	}
@@ -94,42 +109,74 @@ func TestBrokerRejectsReplayAndStaleOwnerOrGeneration(t *testing.T) {
 	}
 }
 
-func TestBrokerUnknownSettlementRetainsFence(t *testing.T) {
+func TestBrokerUnknownSettlementRequiresReconciliationBeforeComplete(t *testing.T) {
 	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	claim, err := broker.Claim(validClaimRequest())
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	unknown := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: "provider-returned-something-new"}
+	unknown := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "operation-1", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: "provider-returned-something-new"}
 	if _, err := broker.Complete(unknown); !errors.Is(err, ErrUnknownSettlement) {
 		t.Fatalf("unknown settlement error = %v, want ErrUnknownSettlement", err)
 	}
-	readback, err := broker.Complete(CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled})
-	if err != nil {
-		t.Fatalf("settlement after unknown: %v", err)
+	if got := broker.claims[claim.ClaimID]; got.State != BrokerStateNeedsReconciliation || got.Fence != claim.Fence || got.RequestID != unknown.RequestID || got.Signature == "" {
+		t.Fatalf("claim after unknown settlement = %+v, want signed reconciliation-required state with retained request/fence", got)
 	}
-	if readback.Fence != claim.Fence {
-		t.Fatalf("fence = %d, want retained %d", readback.Fence, claim.Fence)
+	known := unknown
+	known.Settlement = SettlementSettled
+	if _, err := broker.Complete(known); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("Complete after unknown settlement error = %v, want replay rejection", err)
 	}
 }
 
-func TestBrokerReconcileUsesSameExactScopeAndRejectsAlternateAuthority(t *testing.T) {
+func TestBrokerUnknownSettlementReconcileUsesExactEvidence(t *testing.T) {
 	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
 	claim, err := broker.Claim(validClaimRequest())
 	if err != nil {
 		t.Fatalf("Claim: %v", err)
 	}
-	request := ReconcileRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: "drive:other", TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
+	unknown := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "operation-2", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: "provider-returned-something-new"}
+	if _, err := broker.Complete(unknown); !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("unknown settlement error = %v, want ErrUnknownSettlement", err)
+	}
+	request := validReconcileRequest(claim, unknown.RequestID, "drive:other", SettlementSettled)
 	if _, err := broker.Reconcile(request); err == nil || !strings.Contains(err.Error(), "ref") {
 		t.Fatalf("alternate reconcile ref error = %v, want exact-ref rejection", err)
 	}
 	request.TargetRef = claim.Scope.DesiredRef
+	request.StableReadbacks = request.StableReadbacks[:1]
+	if _, err := broker.Reconcile(request); err == nil || !strings.Contains(err.Error(), "stable readbacks") {
+		t.Fatalf("short stable-readback evidence error = %v, want exact-two rejection", err)
+	}
+	request = validReconcileRequest(claim, unknown.RequestID, claim.Scope.DesiredRef, SettlementSettled)
 	readback, err := broker.Reconcile(request)
 	if err != nil {
 		t.Fatalf("Reconcile: %v", err)
 	}
-	if readback.Fence != claim.Fence || readback.State != BrokerStateReconciled {
-		t.Fatalf("reconcile readback = %#v, want retained fence/reconciled state", readback)
+	if readback.Fence != claim.Fence || readback.State != BrokerStateReconciled || readback.Settlement != SettlementSettled || readback.RequestID != unknown.RequestID || readback.Signature == "" {
+		t.Fatalf("reconcile readback = %#v, want retained fence/reconciled signed state", readback)
+	}
+	if _, err := broker.Complete(CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: unknown.RequestID, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}); err == nil || !strings.Contains(err.Error(), "replay") {
+		t.Fatalf("Complete after Reconcile error = %v, want replay rejection", err)
+	}
+}
+
+func TestBrokerReconcileRejectsRequestIDEvidenceDrift(t *testing.T) {
+	broker := &Broker{Now: func() time.Time { return time.Unix(100, 0).UTC() }}
+	claim, err := broker.Claim(validClaimRequest())
+	if err != nil {
+		t.Fatalf("Claim: %v", err)
+	}
+	unknown := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "operation-3", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: "provider-returned-something-new"}
+	if _, err := broker.Complete(unknown); !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("unknown settlement error = %v, want ErrUnknownSettlement", err)
+	}
+	request := validReconcileRequest(claim, "different-operation", claim.Scope.DesiredRef, SettlementSettled)
+	if _, err := broker.Reconcile(request); err == nil || !strings.Contains(err.Error(), "request ID") {
+		t.Fatalf("request ID drift error = %v, want exact-request rejection", err)
+	}
+	if got := broker.claims[claim.ClaimID]; got.State != BrokerStateNeedsReconciliation {
+		t.Fatalf("claim after request ID drift = %+v, want reconciliation-required state", got)
 	}
 }
 
@@ -153,7 +200,7 @@ func TestBrokerSettlementSignerFailureLeavesClaimClaimedForRetry(t *testing.T) {
 		t.Fatalf("Claim: %v", err)
 	}
 	signer.fail = true
-	complete := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
+	complete := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "operation-complete", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
 	if _, err := broker.Complete(complete); err == nil || !strings.Contains(err.Error(), "sign broker readback") {
 		t.Fatalf("signing Complete error = %v, want signer failure", err)
 	}
@@ -167,13 +214,20 @@ func TestBrokerSettlementSignerFailureLeavesClaimClaimedForRetry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Claim reconcile: %v", err)
 	}
+	unknown := CompleteRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, RequestID: "operation-reconcile", TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: "provider-returned-something-new"}
+	if _, err := broker.Complete(unknown); !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("unknown reconcile settlement error = %v, want ErrUnknownSettlement", err)
+	}
 	signer.fail = true
-	reconcile := ReconcileRequest{ClaimID: claim.ClaimID, Owner: claim.Owner, Generation: claim.Generation, Fence: claim.Fence, TargetRef: claim.Scope.DesiredRef, TargetOID: claim.Scope.DesiredOID, Settlement: SettlementSettled}
+	reconcile := validReconcileRequest(claim, unknown.RequestID, claim.Scope.DesiredRef, SettlementSettled)
 	if _, err := broker.Reconcile(reconcile); err == nil || !strings.Contains(err.Error(), "sign broker readback") {
 		t.Fatalf("signing Reconcile error = %v, want signer failure", err)
 	}
+	if got := broker.claims[claim.ClaimID]; got.State != BrokerStateNeedsReconciliation {
+		t.Fatalf("claim after failed Reconcile = %+v, want reconciliation-required state", got)
+	}
 	signer.fail = false
 	if readback, err := broker.Reconcile(reconcile); err != nil || readback.State != BrokerStateReconciled || readback.Fence != claim.Fence {
-		t.Fatalf("retry Reconcile readback=%+v err=%v, want claimed fence reusable", readback, err)
+		t.Fatalf("retry Reconcile readback=%+v err=%v, want reconciliation-required fence reusable", readback, err)
 	}
 }
