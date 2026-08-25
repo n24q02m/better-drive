@@ -15,6 +15,6 @@
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
 
-## 2024-08-24 - Disable Operational Actions on Error State
-**Learning:** When an application is in an unrecoverable error state that requires manual CLI intervention (like NeedsResync), normal operational UI actions (like Pause/Resume) become irrelevant. Leaving them enabled causes user confusion as they appear actionable but won't resolve the underlying issue.
-**Action:** Explicitly disable normal operational UI elements when the system is in a broken/error state requiring manual intervention, and update their tooltips to point to the required resolution step.
+## 2024-08-24 - Handle Rejected Operational UI Changes
+**Learning:** If a proposed UX change (like explicitly disabling operational UI elements on an error state) is rejected because it was superseded by another PR or is deemed obsolete, acknowledge the feedback, revert the changes, document the learning in the journal, and push the journal update to the same branch.
+**Action:** When a PR is rejected, ensure local working tree changes are reverted, and update the journal to reflect the outcome.

@@ -40,15 +40,13 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 		systray.SetTooltip("better-drive - " + st.String())
 		mStatus.SetTitle("Status: " + st.String())
 		mStatus.SetTooltip("Current status: " + st.String())
-		pauseEnabled, pauseTitle, pauseTooltip := pauseMenuState(aggregate)
-		if pauseEnabled {
-			mPause.Enable()
+		if st == syncloop.StatePaused {
+			mPause.SetTitle("Resume")
+			mPause.SetTooltip("Resume scheduled syncs for all pairs")
 		} else {
-			mPause.Disable()
+			mPause.SetTitle("Pause")
+			mPause.SetTooltip("Pause scheduled syncs for all pairs")
 		}
-		mPause.SetTitle(pauseTitle)
-		mPause.SetTooltip(pauseTooltip)
-
 		syncEnabled, syncTooltip := syncMenuState(aggregate)
 		if syncEnabled {
 			mSync.Enable()
