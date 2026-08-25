@@ -26,3 +26,7 @@
 **Vulnerability:** Unhandled errors, such as ignoring the return value of resource cleanups or core application logic, can silently obscure resource exhaustion or logic bypasses (CWE-703), which gosec flags as G104.
 **Learning:** In Go, blindly suppressing unhandled errors (e.g., using `_ = err`) without comment makes the code unauditable. For cases where an error is truly unactionable (like a best-effort `os.Remove` on a temp file or a read-only `root.Close()`), it must be explicitly documented.
 **Prevention:** Document intentional error suppressions with `// #nosec G104 -- [reason]` to prove to auditors and linters that the ignored error was consciously evaluated as benign and not a forgotten security or reliability boundary.
+## 2026-08-25 - Prevent Path Traversal in Cleanup Journals
+**Vulnerability:** `internal/cleanup/journal.go` used `os.Open` and `os.OpenFile` which could be vulnerable to path traversal via symlinks or crafted path strings.
+**Learning:** `os.OpenRoot` scopes the path correctly to its expected base directory.
+**Prevention:** Use Go 1.24+ `os.OpenRoot` when dealing with potentially user-controlled file paths, even for journals or local configuration paths.
