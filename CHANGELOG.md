@@ -2,6 +2,147 @@
 
 <!-- version list -->
 
+## v1.7.0 (2026-08-25)
+
+### Bug Fixes
+
+- Align Go floor across CI platforms ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Bind cleanup intents to canonical approvals
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Bind restore floors to provider ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Close final backup safety gaps ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Consolidate BDrive verification gates ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Document cleanup binding flags ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Fail closed on unsupported child image platforms
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Gate unsupported Darwin runtime paths ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Harden release publication policy ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Isolate mutable rclone transfer config ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Make runtime fixtures portable across CI hosts
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Push release commit with the CI App identity
+  ([#140](https://github.com/n24q02m/better-drive/pull/140),
+  [`cf5e67b`](https://github.com/n24q02m/better-drive/commit/cf5e67bd312bed8de9e7b9744bf562dfac4c337d))
+
+- Reject cleanup budget overflow
+  ([`98c88b6`](https://github.com/n24q02m/better-drive/commit/98c88b6e85fbb7a13cd1668a58e27895065916b8))
+
+- Reject duplicate inventory cursors ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Reject inventory byte count overflow
+  ([`ae86974`](https://github.com/n24q02m/better-drive/commit/ae8697467e593f000b8e16a7c74ef6e462bcb811))
+
+- Require authenticated backup evidence ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Require exact inventory metadata ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Restrict Scorecard to default branch ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Support macOS candidate verification ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- **ci**: Snapshot untagged candidate builds
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- **safety**: Harden local backup contracts
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+### Features
+
+- Add authenticated artifact seal and open
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add cleanup approval workflow ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add config schema v2 and pinned runtime ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add credential-free release preparation ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add direction and replica transfer execution
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add exact-id cleanup controls ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add protected stable publication path via better-semantic-release
+  ([#139](https://github.com/n24q02m/better-drive/pull/139),
+  [`5bce437`](https://github.com/n24q02m/better-drive/commit/5bce43756293524f4768d87f1dc858c041a0d741))
+
+- Add read-only managed scheduler surfaces
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add safe restore planning and staging ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Add transfer safety guard primitives ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Bind cleanup manifests to inventory ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Collect deterministic drive root sets ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Collect paginated drive inventory ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Complete local backup safety contracts ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Enforce enrolled cleanup approval roots ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Harden cleanup approval and inventory controls
+  ([`8bae7f3`](https://github.com/n24q02m/better-drive/commit/8bae7f3484c26c5dc52f96b292546b30d0a8f177))
+
+- Harden replica floors and runtime preflight
+  ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Harden restore and installer gates ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Journal cleanup previews ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+- Persist scheduler and replica state ([#134](https://github.com/n24q02m/better-drive/pull/134),
+  [`edb394e`](https://github.com/n24q02m/better-drive/commit/edb394ed6c98aeb1e7c125b41a44ab1150e8b79c))
+
+
 ## v1.6.0 (2026-08-15)
 
 ### Bug Fixes
