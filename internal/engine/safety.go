@@ -67,35 +67,23 @@ type DestinationIdentity struct {
 	Namespace string
 }
 
-type canonicalDestination struct {
-	Provider  string
-	AccountID string
-	RootID    string
-	Namespace string
-}
-
-func (d DestinationIdentity) canonical() (canonicalDestination, error) {
+func (d DestinationIdentity) canonical() (string, error) {
 	provider := strings.ToLower(strings.TrimSpace(d.Provider))
 	account := strings.ToLower(strings.TrimSpace(d.AccountID))
 	root := strings.ToLower(strings.TrimSpace(d.RootID))
 	namespace := strings.Trim(strings.ReplaceAll(strings.TrimSpace(d.Namespace), "\\", "/"), "/")
 	namespace = strings.ToLower(namespace)
 	if provider == "" || account == "" || root == "" || namespace == "" {
-		return canonicalDestination{}, fmt.Errorf("destination identity requires provider, account, root, and namespace")
+		return "", fmt.Errorf("destination identity requires provider, account, root, and namespace")
 	}
 	if filepath.IsAbs(namespace) || namespace == "." || strings.HasPrefix(namespace, "../") || strings.Contains(namespace, "/../") {
-		return canonicalDestination{}, fmt.Errorf("destination namespace must stay relative")
+		return "", fmt.Errorf("destination namespace must stay relative")
 	}
-	return canonicalDestination{
-		Provider:  provider,
-		AccountID: account,
-		RootID:    root,
-		Namespace: namespace,
-	}, nil
+	return provider + "\x00" + account + "\x00" + root + "\x00" + namespace, nil
 }
 
 func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
-	canonical := make([]canonicalDestination, len(destinations))
+	canonical := make([]string, len(destinations))
 	for i, destination := range destinations {
 		value, err := destination.canonical()
 		if err != nil {
@@ -105,16 +93,16 @@ func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
 	}
 	for i := range canonical {
 		for j := i + 1; j < len(canonical); j++ {
-			left := canonical[i]
-			right := canonical[j]
-			if left.Provider != right.Provider || left.AccountID != right.AccountID || left.RootID != right.RootID {
+			left := strings.Split(canonical[i], "\x00")
+			right := strings.Split(canonical[j], "\x00")
+			if len(left) != 4 || len(right) != 4 || left[0] != right[0] || left[1] != right[1] || left[2] != right[2] {
 				continue
 			}
-			if left.Namespace == right.Namespace {
-				return fmt.Errorf("destination identities collide exactly: %q", left.Namespace)
+			if left[3] == right[3] {
+				return fmt.Errorf("destination identities collide exactly: %q", left[3])
 			}
-			if strings.HasPrefix(left.Namespace, right.Namespace+"/") || strings.HasPrefix(right.Namespace, left.Namespace+"/") {
-				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left.Namespace, right.Namespace)
+			if strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
+				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left[3], right[3])
 			}
 		}
 	}
@@ -122,16 +110,18 @@ func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
 }
 
 func ValidateQuarantineIdentity(transfer, quarantine DestinationIdentity) error {
-	left, err := transfer.canonical()
+	transferKey, err := transfer.canonical()
 	if err != nil {
 		return fmt.Errorf("transfer identity: %w", err)
 	}
-	right, err := quarantine.canonical()
+	quarantineKey, err := quarantine.canonical()
 	if err != nil {
 		return fmt.Errorf("quarantine identity: %w", err)
 	}
-	if left.Provider == right.Provider && left.AccountID == right.AccountID && left.RootID == right.RootID {
-		if left.Namespace == right.Namespace || strings.HasPrefix(left.Namespace, right.Namespace+"/") || strings.HasPrefix(right.Namespace, left.Namespace+"/") {
+	left := strings.Split(transferKey, "\x00")
+	right := strings.Split(quarantineKey, "\x00")
+	if len(left) == 4 && len(right) == 4 && left[0] == right[0] && left[1] == right[1] && left[2] == right[2] {
+		if left[3] == right[3] || strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
 			return fmt.Errorf("quarantine identity overlaps transfer namespace")
 		}
 	}

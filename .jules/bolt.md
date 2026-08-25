@@ -13,3 +13,7 @@
 ## 2024-10-25 - Avoid O(N²) garbage collector pressure by passing structured data
 **Learning:** Avoid serializing structured data to delimited strings only to immediately parse them back out with `strings.Split` in a loop, as it causes significant O(N²) garbage collection pressure.
 **Action:** Pass structured structs directly between internal boundaries.
+
+## 2024-10-25 - Avoid embedded NUL fields in parsed struct
+**Learning:** The PR was rejected because the main branch's `canonicalDestinationIdentity` replaces the NUL-delimited string canonical form with a struct and additionally rejects embedded-NUL fields. When refactoring string canonicalization to a struct form, one should verify the integrity of the data passed, e.g. embedded nulls.
+**Action:** When replacing delimited strings with struct forms, verify there are no embedded delimiters like null-bytes that could indicate malformed or maliciously crafted data.
