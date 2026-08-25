@@ -74,14 +74,32 @@ def check(root: Path) -> list[str]:
     if re.search(r"args:\s+release\s+--clean(?!\s+--config)", workflow):
         findings.append("CD must not execute plain unconstrained 'release --clean'")
 
-    # Check for forbidden secrets in candidate preparation
+    # Check for forbidden secrets in candidate preparation only. The stable
+    # publish job legitimately uses the CI App identity and the tap token.
+    prepare_block = workflow.split("  publish-stable:", 1)[0]
     for secret in ("TAP_GITHUB_TOKEN", "CI_APP_KEY", "CI_APP_ID"):
-        if secret in workflow:
+        if secret in prepare_block:
             findings.append(f"CD prepare candidate workflow must not reference secret/var '{secret}'")
 
     # 5. Candidate artifact archiving
     if "actions/upload-artifact" not in workflow:
         findings.append("CD must upload candidate artifacts via actions/upload-artifact")
+
+    # 6. Stable publication policy
+    stable_block = workflow.split("  publish-stable:", 1)[-1]
+    if "  publish-stable:" not in workflow:
+        findings.append("CD must own the consolidated publish-stable job")
+    if "environment: stable-publish" not in stable_block:
+        findings.append("CD stable publication must run in the protected stable-publish environment")
+    if "n24q02m/better-semantic-release@087b84e8d2ba75bdec350924d3bf8247088e0b1a" not in stable_block:
+        findings.append("CD stable release must use the pinned better-semantic-release action (v1.4.0)")
+    if "actions/create-github-app-token" not in stable_block:
+        findings.append("CD stable release must push the release commit via the CI App identity")
+    if "args: release --config=.goreleaser.yaml --clean" not in stable_block:
+        findings.append("CD stable publication must build with the full pinned .goreleaser.yaml")
+    if "config_file: semantic-release.toml" not in stable_block:
+        findings.append("CD stable release must consume semantic-release.toml")
+
 
     return findings
 

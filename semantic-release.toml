@@ -3,6 +3,12 @@ tag_format = "v{version}"
 commit_message = "fix(release): v{version} [skip ci]"
 major_on_zero = false
 
+# Integration waves land as "candidate: ..." squash merges; treat them as
+# feature-level (minor) bumps so a candidate wave releases the next minor
+# version instead of being ignored by the Angular parser.
+[semantic_release.commit_parser_options]
+minor_tags = ["feat", "candidate"]
+
 [semantic_release.changelog]
 changelog_file = "CHANGELOG.md"
 
