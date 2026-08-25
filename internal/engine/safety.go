@@ -67,23 +67,47 @@ type DestinationIdentity struct {
 	Namespace string
 }
 
-func (d DestinationIdentity) canonical() (string, error) {
-	provider := strings.ToLower(strings.TrimSpace(d.Provider))
-	account := strings.ToLower(strings.TrimSpace(d.AccountID))
-	root := strings.ToLower(strings.TrimSpace(d.RootID))
-	namespace := strings.Trim(strings.ReplaceAll(strings.TrimSpace(d.Namespace), "\\", "/"), "/")
-	namespace = strings.ToLower(namespace)
-	if provider == "" || account == "" || root == "" || namespace == "" {
-		return "", fmt.Errorf("destination identity requires provider, account, root, and namespace")
+type canonicalDestinationIdentity struct {
+	provider  string
+	accountID string
+	rootID    string
+	namespace string
+}
+
+func (d DestinationIdentity) canonical() (canonicalDestinationIdentity, error) {
+	for name, value := range map[string]string{
+		"provider": d.Provider, "account": d.AccountID, "root": d.RootID, "namespace": d.Namespace,
+	} {
+		if strings.ContainsRune(value, '\x00') {
+			return canonicalDestinationIdentity{}, fmt.Errorf("destination %s must not contain NUL", name)
+		}
 	}
-	if filepath.IsAbs(namespace) || namespace == "." || strings.HasPrefix(namespace, "../") || strings.Contains(namespace, "/../") {
-		return "", fmt.Errorf("destination namespace must stay relative")
+	identity := canonicalDestinationIdentity{
+		provider:  strings.ToLower(strings.TrimSpace(d.Provider)),
+		accountID: strings.ToLower(strings.TrimSpace(d.AccountID)),
+		rootID:    strings.ToLower(strings.TrimSpace(d.RootID)),
+		namespace: strings.ToLower(strings.Trim(strings.ReplaceAll(strings.TrimSpace(d.Namespace), "\\", "/"), "/")),
 	}
-	return provider + "\x00" + account + "\x00" + root + "\x00" + namespace, nil
+	if identity.provider == "" || identity.accountID == "" || identity.rootID == "" || identity.namespace == "" {
+		return canonicalDestinationIdentity{}, fmt.Errorf("destination identity requires provider, account, root, and namespace")
+	}
+	if filepath.IsAbs(identity.namespace) || identity.namespace == "." ||
+		strings.HasPrefix(identity.namespace, "../") || strings.Contains(identity.namespace, "/../") {
+		return canonicalDestinationIdentity{}, fmt.Errorf("destination namespace must stay relative")
+	}
+	return identity, nil
+}
+
+func (d canonicalDestinationIdentity) sameRoot(other canonicalDestinationIdentity) bool {
+	return d.provider == other.provider && d.accountID == other.accountID && d.rootID == other.rootID
+}
+
+func namespacesOverlap(left, right string) bool {
+	return left == right || strings.HasPrefix(left, right+"/") || strings.HasPrefix(right, left+"/")
 }
 
 func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
-	canonical := make([]string, len(destinations))
+	canonical := make([]canonicalDestinationIdentity, len(destinations))
 	for i, destination := range destinations {
 		value, err := destination.canonical()
 		if err != nil {
@@ -93,16 +117,15 @@ func ValidateDestinationCollisions(destinations []DestinationIdentity) error {
 	}
 	for i := range canonical {
 		for j := i + 1; j < len(canonical); j++ {
-			left := strings.Split(canonical[i], "\x00")
-			right := strings.Split(canonical[j], "\x00")
-			if len(left) != 4 || len(right) != 4 || left[0] != right[0] || left[1] != right[1] || left[2] != right[2] {
+			left, right := canonical[i], canonical[j]
+			if !left.sameRoot(right) {
 				continue
 			}
-			if left[3] == right[3] {
-				return fmt.Errorf("destination identities collide exactly: %q", left[3])
+			if left.namespace == right.namespace {
+				return fmt.Errorf("destination identities collide exactly: %q", left.namespace)
 			}
-			if strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
-				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left[3], right[3])
+			if namespacesOverlap(left.namespace, right.namespace) {
+				return fmt.Errorf("destination identities collide by ancestor overlap: %q and %q", left.namespace, right.namespace)
 			}
 		}
 	}
@@ -118,12 +141,8 @@ func ValidateQuarantineIdentity(transfer, quarantine DestinationIdentity) error 
 	if err != nil {
 		return fmt.Errorf("quarantine identity: %w", err)
 	}
-	left := strings.Split(transferKey, "\x00")
-	right := strings.Split(quarantineKey, "\x00")
-	if len(left) == 4 && len(right) == 4 && left[0] == right[0] && left[1] == right[1] && left[2] == right[2] {
-		if left[3] == right[3] || strings.HasPrefix(left[3], right[3]+"/") || strings.HasPrefix(right[3], left[3]+"/") {
-			return fmt.Errorf("quarantine identity overlaps transfer namespace")
-		}
+	if transferKey.sameRoot(quarantineKey) && namespacesOverlap(transferKey.namespace, quarantineKey.namespace) {
+		return fmt.Errorf("quarantine identity overlaps transfer namespace")
 	}
 	return nil
 }

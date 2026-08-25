@@ -49,13 +49,17 @@ func writeCleanupTestManifest(t *testing.T, dir string) string {
 func writeCleanupTestRootSet(t *testing.T, dir string) string {
 	t.Helper()
 	rootSet := cleanup.RootSet{
-		SchemaVersion: cleanup.CurrentInventorySchemaVersion,
+		SchemaVersion: cleanup.CurrentRootSetSchemaVersion,
 		Roots: []cleanup.Root{{
 			Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", ExpectedPages: 1,
 			Pages: []cleanup.Page{{Number: 1, Cursor: "cursor-1", Status: cleanup.PageComplete, Objects: []cleanup.Object{{
 				ID: "object-1", Name: "object.bin", ContentHash: strings.Repeat("a", 64), Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Version: "v1", ETag: "etag-1", Size: 5,
 			}}},
 			}}},
+	}
+	rootSet, err := cleanup.FreezeRootSet(rootSet)
+	if err != nil {
+		t.Fatal(err)
 	}
 	path := filepath.Join(dir, "all-roots.json")
 	data, err := json.Marshal(rootSet)

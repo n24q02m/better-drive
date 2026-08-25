@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -84,6 +85,112 @@ delete_policy = "none"
 	}
 }
 
+func TestLoadV2PreservesWorkstationCategoryPolicyBindings(t *testing.T) {
+	body := "schema_version = 2\n" +
+		workstationJobTOML("vscode-user", "C:/Users/me/AppData/Roaming/Code - Insiders/User", "Backups/home/VSCode-Insiders/User", "vscode-insiders-user") +
+		workstationJobTOML("vscode-extensions", "C:/Users/me/.vscode-insiders/extensions", "Backups/home/VSCode-Insiders/Extensions", "vscode-insiders-extensions") +
+		workstationJobTOML("curseforge", "C:/Users/me/AppData/Roaming/CurseForge", "Backups/home/CurseForge", "curseforge-instances")
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.Jobs) != 3 {
+		t.Fatalf("jobs = %d, want 3", len(cfg.Jobs))
+	}
+	for _, job := range cfg.Jobs {
+		if job.CategoryPolicyID == "" || job.CategoryPolicyVersion != 1 || len(job.CategoryPolicyDigest) != len("sha256:")+64 {
+			t.Fatalf("job %q missing policy binding: %#v", job.ID, job)
+		}
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestLoadV2PreservesCategoryPolicyRegistry(t *testing.T) {
+	body := `schema_version = 2
+
+[[category_policy]]
+id = "vscode-insiders-user"
+version = 1
+digest = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+binding_ref = "policy:vscode-insiders-user"
+allowlisted_root = "C:/Users/me/AppData/Roaming/Code - Insiders/User"
+mandatory_denylist = ["Cache/", "logs/"]
+restore_expectation = "empty-or-exact-hash"
+
+[category_policy.size_guard]
+max_bytes = 1073741824
+
+` + workstationJobTOML("vscode-user", "C:/Users/me/AppData/Roaming/Code - Insiders/User", "Backups/home/VSCode-Insiders/User", "vscode-insiders-user")
+	cfg, err := Load(writeTemp(t, body))
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(cfg.CategoryPolicies) != 1 {
+		t.Fatalf("category policies = %d, want 1", len(cfg.CategoryPolicies))
+	}
+	if err := cfg.CategoryPolicies[0].Validate(); err != nil {
+		t.Fatalf("CategoryPolicy.Validate: %v", err)
+	}
+}
+
+func TestCategoryPolicyRejectsMissingRequiredFields(t *testing.T) {
+	base := CategoryPolicy{
+		ID: "policy", Version: 1, Digest: "sha256:" + strings.Repeat("a", 64), BindingRef: "policy:category",
+		AllowlistedRoot: "C:/Users/me/source", MandatoryDenylist: []string{"Cache/"},
+		SizeGuard: CategorySizeGuard{MaxBytes: 1024}, RestoreExpectation: "empty-or-exact-hash",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*CategoryPolicy)
+		want   string
+	}{
+		{name: "binding ref", mutate: func(policy *CategoryPolicy) { policy.BindingRef = "" }, want: "binding_ref"},
+		{name: "binding ref control", mutate: func(policy *CategoryPolicy) { policy.BindingRef = "policy:\ncategory" }, want: "binding_ref"},
+		{name: "digest", mutate: func(policy *CategoryPolicy) { policy.Digest = "sha256:bad" }, want: "digest"},
+		{name: "allowlisted root", mutate: func(policy *CategoryPolicy) { policy.AllowlistedRoot = "" }, want: "allowlisted_root"},
+		{name: "denylist", mutate: func(policy *CategoryPolicy) { policy.MandatoryDenylist = nil }, want: "mandatory_denylist"},
+		{name: "size guard", mutate: func(policy *CategoryPolicy) { policy.SizeGuard.MaxBytes = 0 }, want: "size_guard.max_bytes"},
+		{name: "restore expectation", mutate: func(policy *CategoryPolicy) { policy.RestoreExpectation = "" }, want: "restore_expectation"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			policy := base
+			test.mutate(&policy)
+			if err := policy.Validate(); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("CategoryPolicy.Validate error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func workstationJobTOML(id, source, destination, policyID string) string {
+	return fmt.Sprintf(`[[job]]
+id = %q
+source = %q
+direction = "push"
+mode = "copy"
+required = true
+category_policy_id = %q
+category_policy_version = 1
+category_policy_digest = "sha256:%s"
+symlink_policy = "preserve"
+schedule = "6h"
+
+[[job.destination]]
+backend = "drive"
+path = %q
+account_id = "home"
+root_id = "drive-root"
+credential_ref = "rclone:gdrive"
+required = true
+min_complete_restore_sets = 2
+delete_policy = "none"
+
+`, id, source, policyID, strings.Repeat("a", 64), destination)
+}
+
 func TestLoadLegacyMissingModeMigratesToSafeCopyPush(t *testing.T) {
 	path := writeTemp(t, `[[pair]]
 local = "C:/Users/me/.claude"
@@ -107,6 +214,21 @@ interval = "30s"
 	}
 	if len(job.Destinations) != 1 || !job.Destinations[0].Required || job.Destinations[0].MinCompleteRestoreSets != 2 {
 		t.Fatalf("legacy destination = %#v", job.Destinations)
+	}
+}
+
+func TestLoadLegacyConfigFailsExecutionValidationWithoutCategoryPolicy(t *testing.T) {
+	path := writeTemp(t, `[[pair]]
+local = "C:/Users/me/.vscode-insiders/User"
+remote = "gdrive:Backups/home/VSCode-Insiders/User"
+interval = "30s"
+`)
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "category policy") {
+		t.Fatalf("Validate error = %v, want category-policy fail-closed result", err)
 	}
 }
 

@@ -4,22 +4,28 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/n24q02m/better-drive/internal/artifactcrypto"
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
 	"github.com/n24q02m/better-drive/internal/restore"
 	"github.com/spf13/cobra"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 func restoreCmd() *cobra.Command {
+	return restoreCmdWithDependencies(RuntimeDependencies{})
+}
+
+func restoreCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 	c := &cobra.Command{
 		Use:     "restore",
 		Short:   "Plan and stage safe isolated restores",
-		Long:    "Restore plan is read-only. Fetch writes only to the explicit staging root with no-overwrite semantics. Apply remains owner-gated.",
+		Long:    "Plan is read-only. Fetch and apply write only below an explicit isolated root with create-only no-overwrite semantics. Live source replacement is disabled.",
 		Example: "  better-drive restore plan --root C:/staging --manifest restore.json --format json",
 	}
-	c.AddCommand(restorePlanCmd(), restoreFetchCmd(), restoreApplyCmd())
+	c.AddCommand(restorePlanCmd(), restoreFetchCmd(deps.ArtifactResolver, deps.StagingVerifier), restoreApplyCmd(deps.ArtifactResolver, deps.StagingVerifier), restoreRecoverCmd())
 	return c
 }
 
@@ -37,6 +43,36 @@ func readRestorePlan(root, manifest string) (restore.Plan, error) {
 		return restore.Plan{}, fmt.Errorf("manifest must be a JSON array of restore entries: %w", err)
 	}
 	return restore.BuildPlan(root, entries)
+}
+
+func requireRestoreDependencies(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
+	missing := make([]string, 0, 2)
+	if resolver == nil {
+		missing = append(missing, "artifact resolver")
+	}
+	if verifier == nil {
+		missing = append(missing, "staging verifier")
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	return exitcode.WithRemediation(
+		exitcode.ConfigError(fmt.Errorf("restore execution requires %s", strings.Join(missing, " and "))),
+		"configure an artifact resolver and staging verifier before executing restore",
+	)
+}
+
+func preflightRestore(plan restore.Plan, resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
+	if err := requireRestoreDependencies(resolver, verifier); err != nil {
+		return err
+	}
+	if _, err := restore.VerifyStagingEvidence(plan.Root, plan.RootIdentity, verifier); err != nil {
+		return exitcode.WithRemediation(
+			exitcode.ConfigError(err),
+			"verify encrypted-at-rest, owner-only, non-inherited ACL, and backup-excluded staging evidence before executing restore",
+		)
+	}
+	return nil
 }
 
 func renderRestorePlan(cmd *cobra.Command, format string, plan restore.Plan) error {
@@ -73,7 +109,7 @@ func restorePlanCmd() *cobra.Command {
 	return c
 }
 
-func restoreFetchCmd() *cobra.Command {
+func restoreFetchCmd(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) *cobra.Command {
 	var root string
 	var manifest string
 	var format string
@@ -101,14 +137,46 @@ func restoreFetchCmd() *cobra.Command {
 			if len(plan.Conflicts) != 0 {
 				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
 			}
+			if err := preflightRestore(plan, resolver, verifier); err != nil {
+				return err
+			}
 			journal := restore.Journal{Path: filepath.Join(plan.Root, ".restore-apply.jsonl")}
+			transactionID, err := restore.NewTransactionID()
+			if err != nil {
+				return err
+			}
+			runRecords := make([]restore.JournalRecord, 0, len(plan.Entries)*2)
+			recoverFailure := func(cause error) error {
+				if len(runRecords) == 0 {
+					return cause
+				}
+				if recoveryErr := restore.RecoverCreateOnly(plan.Root, runRecords); recoveryErr != nil {
+					return fmt.Errorf("%v; recover staged files: %w", cause, recoveryErr)
+				}
+				return cause
+			}
 			for _, entry := range plan.Entries {
-				if err := restore.StageFile(plan, entry); err != nil {
-					return err
+				record := restore.JournalRecord{
+					TransactionID:    transactionID,
+					Entry:            entry.RelativePath,
+					Action:           "create",
+					Before:           "absent",
+					After:            "staged",
+					PlaintextDigest:  entry.PlaintextDigest,
+					CiphertextDigest: entry.CiphertextDigest,
 				}
-				if err := journal.Append(restore.JournalRecord{Entry: entry.RelativePath, Action: "create", Before: "absent", After: "created", SourceDigest: entry.SourceDigest}); err != nil {
-					return err
+				if err := journal.Append(record); err != nil {
+					return recoverFailure(err)
 				}
+				runRecords = append(runRecords, record)
+				if err := restore.StageFile(plan, entry, resolver, verifier); err != nil {
+					return recoverFailure(err)
+				}
+				record.After = "created"
+				if err := journal.Append(record); err != nil {
+					return recoverFailure(err)
+				}
+				runRecords = append(runRecords, record)
 			}
 			fmt.Fprintf(cmd.OutOrStdout(), "fetched %d entries into isolated root %s\n", len(plan.Entries), plan.Root)
 			return nil
@@ -122,21 +190,140 @@ func restoreFetchCmd() *cobra.Command {
 	return c
 }
 
-func restoreApplyCmd() *cobra.Command {
+func restoreApplyCmd(resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) *cobra.Command {
+	var root string
+	var manifest string
+	var transactionID string
+	var format string
 	var dryRun bool
+	var execute bool
+	var replace bool
 	c := &cobra.Command{
 		Use:     "apply",
-		Short:   "Keep live restore apply owner-gated",
-		Long:    "Live create or replace is a separate data-owner gate. This command currently exposes only an explicit dry-run block and never mutates a live source.",
-		Example: "  better-drive restore apply --dry-run",
+		Short:   "Apply a create-only restore in an explicit isolated root",
+		Long:    "Apply requires an absolute isolated root, a JSON manifest, and one transaction ID. It never replaces a destination or mutates a live source.",
+		Example: "  better-drive restore apply --root C:/staging --manifest restore.json --transaction tx-1",
 		RunE: func(cmd *cobra.Command, _ []string) error {
-			if !dryRun {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("restore apply requires a named data-owner gate; live mutation is disabled")), "run restore plan/fetch in an isolated root, then obtain the owner gate")
+			if replace {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("restore apply replace mode is disabled")), "use create-only apply in a new isolated root")
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), "dry-run: restore apply not executed")
+			if root == "" || manifest == "" || transactionID == "" {
+				if dryRun && root == "" && manifest == "" && transactionID == "" {
+					fmt.Fprintln(cmd.OutOrStdout(), "dry-run: restore apply not executed")
+					return nil
+				}
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("restore apply requires --root, --manifest, and --transaction; live data-owner apply is disabled")), "provide an explicit isolated root, manifest, and transaction ID")
+			}
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			plan, err := readRestorePlan(root, manifest)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix the restore manifest before apply")
+			}
+			if dryRun {
+				return renderRestorePlan(cmd, format, plan)
+			}
+			if len(plan.Conflicts) != 0 {
+				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("restore has %d existing destination conflicts", len(plan.Conflicts))), "remove conflicts or use a new isolated staging root")
+			}
+			if err := preflightRestore(plan, resolver, verifier); err != nil {
+				return err
+			}
+			tx, err := restore.BeginTransaction(plan.Root, transactionID)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "choose a new transaction ID and preserve prior transaction evidence")
+			}
+			if err := applyRestorePlan(plan, tx, resolver, verifier); err != nil {
+				return err
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "applied %d entries into isolated root %s (transaction %s)\n", len(plan.Entries), plan.Root, transactionID)
+			_ = execute
 			return nil
 		},
 	}
-	c.Flags().BoolVar(&dryRun, "dry-run", false, "show the live-apply gate without mutating")
+	output.AddFormatFlag(c, &format)
+	c.Flags().StringVar(&root, "root", "", "isolated absolute restore root")
+	c.Flags().StringVar(&manifest, "manifest", "", "JSON restore manifest")
+	c.Flags().StringVar(&transactionID, "transaction", "", "explicit transaction ID")
+	c.Flags().BoolVar(&dryRun, "dry-run", false, "validate and preview without writing")
+	c.Flags().BoolVar(&execute, "execute", false, "accepted for explicit create-only apply")
+	c.Flags().BoolVar(&replace, "replace", false, "rejected: live/overwrite replacement is disabled")
+	return c
+}
+
+func applyRestorePlan(plan restore.Plan, tx *restore.Transaction, resolver artifactcrypto.Resolver, verifier restore.StagingVerifier) error {
+	runRecords := make([]restore.JournalRecord, 0, len(plan.Entries)*2)
+	recoverFailure := func(cause error) error {
+		if len(runRecords) == 0 {
+			return cause
+		}
+		if recoveryErr := restore.RecoverCreateOnly(plan.Root, runRecords); recoveryErr != nil {
+			return fmt.Errorf("%v; recover staged files: %w", cause, recoveryErr)
+		}
+		return cause
+	}
+	for _, entry := range plan.Entries {
+		record := restore.JournalRecord{
+			TransactionID:    tx.ID,
+			Entry:            entry.RelativePath,
+			Action:           "create",
+			Before:           "absent",
+			After:            "staged",
+			PlaintextDigest:  entry.PlaintextDigest,
+			CiphertextDigest: entry.CiphertextDigest,
+			Root:             plan.Root,
+			RootIdentity:     tx.RootIdentity.Token,
+		}
+		if err := tx.Append(record); err != nil {
+			return recoverFailure(err)
+		}
+		runRecords = append(runRecords, record)
+		if err := restore.StageFile(plan, entry, resolver, verifier); err != nil {
+			return recoverFailure(err)
+		}
+		record.After = "created"
+		if err := tx.Append(record); err != nil {
+			return recoverFailure(err)
+		}
+		runRecords = append(runRecords, record)
+	}
+	return nil
+}
+
+func restoreRecoverCmd() *cobra.Command {
+	var root string
+	var transactionID string
+	var format string
+	var live bool
+	c := &cobra.Command{
+		Use:     "recover",
+		Short:   "Recover exactly one interrupted isolated restore transaction",
+		Long:    "Recover removes only matching create-only files from the named transaction. Live source replacement and cross-root deletion are disabled.",
+		Example: "  better-drive restore recover --root C:/staging --transaction tx-1",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if live {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("restore recover live mode is disabled")), "name one isolated root and transaction")
+			}
+			if root == "" || transactionID == "" {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("restore recover requires --root and --transaction")), "provide the exact isolated root and transaction ID")
+			}
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			if err := restore.RecoverTransaction(root, transactionID); err != nil {
+				return err
+			}
+			if format == output.FormatJSON {
+				return output.RenderJSON(cmd.OutOrStdout(), map[string]string{"root": root, "transaction": transactionID, "status": "recovered"})
+			}
+			fmt.Fprintf(cmd.OutOrStdout(), "recovered transaction %s in isolated root %s\n", transactionID, root)
+			return nil
+		},
+	}
+	output.AddFormatFlag(c, &format)
+	c.Flags().StringVar(&root, "root", "", "isolated absolute restore root")
+	c.Flags().StringVar(&transactionID, "transaction", "", "exact transaction ID to recover")
+	c.Flags().BoolVar(&live, "live", false, "rejected: live-source recovery is disabled")
 	return c
 }

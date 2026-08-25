@@ -19,7 +19,7 @@ import (
 type mountEngine interface {
 	RemoteConfigured(name string) (bool, error)
 	Mount(context.Context, engine.MountParams) error
-	Close()
+	Close() error
 }
 
 type mountEngineFactory func(rcloneConfig string) mountEngine
@@ -64,7 +64,7 @@ func mountCmdWithFactory(factory mountEngineFactory) *cobra.Command {
 			}
 			return nil
 		},
-		RunE: func(cmd *cobra.Command, args []string) error {
+		RunE: func(cmd *cobra.Command, args []string) (commandErr error) {
 			remoteName, _ := mountRemoteName(args[0])
 			configPath := paths.ConfigFile()
 			rcloneConfig, err := config.LoadRcloneConfigOnly(configPath)
@@ -76,7 +76,9 @@ func mountCmdWithFactory(factory mountEngineFactory) *cobra.Command {
 			}
 
 			e := factory(rcloneConfig)
-			defer e.Close()
+			defer func() {
+				commandErr = errors.Join(commandErr, e.Close())
+			}()
 			configured, err := e.RemoteConfigured(remoteName)
 			if err != nil {
 				return fmt.Errorf("check remote %q: %w", remoteName, err)

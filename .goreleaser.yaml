@@ -13,6 +13,7 @@ builds:
     binary: better-drive
     env:
       - CGO_ENABLED=0
+    mod_timestamp: "{{ .CommitTimestamp }}"
     goos:
       - windows
       - linux
@@ -24,7 +25,7 @@ builds:
       - -s -w
       - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
       - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-      - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+      - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
     # Windows tray needs the GUI subsystem (no console window on launch).
     # goreleaser requires both goos AND goarch set on each override entry for
     # it to match anything, so windows/amd64 and windows/arm64 need one each;
@@ -37,7 +38,7 @@ builds:
           - -H windowsgui
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       - goos: windows
         goarch: arm64
         ldflags:
@@ -45,7 +46,7 @@ builds:
           - -H windowsgui
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       # The darwin tray needs fyne.io/systray's cgo implementation, so these
       # two overrides turn cgo on for darwin only; every other goos/goarch
       # combination stays on the CGO_ENABLED=0 base build above. The
@@ -59,7 +60,7 @@ builds:
           - -s -w
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
       - goos: darwin
         goarch: amd64
         env:
@@ -69,7 +70,7 @@ builds:
           - -s -w
           - -X github.com/n24q02m/better-drive/internal/version.Version={{.Version}}
           - -X github.com/n24q02m/better-drive/internal/version.Commit={{.Commit}}
-          - -X github.com/n24q02m/better-drive/internal/version.Date={{.Date}}
+          - -X github.com/n24q02m/better-drive/internal/version.Date={{.CommitTimestamp}}
 
 archives:
   - id: default

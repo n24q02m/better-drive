@@ -76,7 +76,7 @@ func New(s Syncer, path1, path2, workdir, mode string, ignore IgnoreFunc) *Loop 
 	if mode == "" || mode == "bisync" {
 		direction = "bidirectional"
 	}
-	return NewWithReplicas(s, path1, []engine.ReplicaSpec{{ID: "default", Target: path2, Workdir: workdir, Required: true, MinCompleteRestoreSets: 2}}, mode, direction, ignore)
+	return NewWithReplicas(s, path1, []engine.ReplicaSpec{{ID: "default", Target: path2, Workdir: workdir, Required: true}}, mode, direction, ignore)
 }
 
 // NewWithReplicas creates a Loop whose one cycle attempts every destination.
@@ -118,6 +118,19 @@ func baselineExists(workdir string) bool {
 	return len(matches) > 0
 }
 
+// inspectSourceSafety records conservative source evidence for destructive
+// push-side transfers. The transferer computes the effective object count with
+// the same filters it will pass to rclone, so excluded-only inputs cannot make
+// an empty destructive source look non-empty.
+func inspectSourceSafety(ctx context.Context, syncer Syncer, path string, filters []string, stderr io.Writer) (wasNonEmpty *bool, objectCount *int64, err error) {
+	count, err := syncer.CountSourceObjects(ctx, path, filters, stderr)
+	if err != nil {
+		return nil, nil, fmt.Errorf("inspect source %q: %w", path, err)
+	}
+	history := true
+	return &history, &count, nil
+}
+
 func (l *Loop) State() State {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -131,10 +144,8 @@ func (l *Loop) OnChange(fn func(State)) {
 }
 
 // OnResult registers fn to be called once per completed sync cycle with that
-// cycle's outcome (nil on success, the Syncer's error on failure). Unlike
-// OnChange (state transitions), this fires exactly once per runOnce on the
-// normal path only - never from the panic-recover path - so a caller (the
-// daemon's per-cycle log line) gets the real cycle error, not a synthetic one.
+// cycle's outcome (nil on success, the Syncer's error on failure, or the
+// recovered error on panic).
 func (l *Loop) OnResult(fn func(error)) {
 	l.mu.Lock()
 	l.onResult = fn
@@ -230,8 +241,21 @@ func (l *Loop) runOnce() (err error) {
 	stderr := l.stderr
 	l.mu.Unlock()
 
+	var resultOnce sync.Once
+	fireResult := func(cycleErr error) {
+		resultOnce.Do(func() {
+			l.mu.Lock()
+			onResult := l.onResult
+			l.mu.Unlock()
+			if onResult != nil {
+				onResult(cycleErr)
+			}
+		})
+	}
+
 	// A panicking Syncer must not leave l.running stuck at true (which would
-	// wedge the no-overlap guard for the rest of the process's life).
+	// wedge the no-overlap guard for the rest of the process's life), and must
+	// invoke OnResult exactly once with the recovered failure.
 	defer func() {
 		if r := recover(); r != nil {
 			l.mu.Lock()
@@ -243,17 +267,25 @@ func (l *Loop) runOnce() (err error) {
 				fn(StateError)
 			}
 			err = fmt.Errorf("syncloop: recovered panic: %v", r)
+			fireResult(err)
 		}
 	}()
 
 	l.setState(StateSyncing)
 	var filters []string
 	filters, err = l.ignore()
+	var sourceWasNonEmpty *bool
+	var sourceObjectCount *int64
+	if err == nil && l.mode != "copy" && l.direction != "pull" {
+		sourceWasNonEmpty, sourceObjectCount, err = inspectSourceSafety(execContext, l.s, l.path1, filters, stderr)
+	}
 	var summary engine.ReplicaSummary
 	if err == nil {
 		summary, err = engine.ExecuteReplicas(l.s, engine.TransferSpec{
 			Local: l.path1, Mode: l.mode, Direction: l.direction, DryRun: dryRun,
-			Filters: filters, Context: execContext, Stderr: stderr, Replicas: replicas,
+			Filters: filters, Context: execContext, Stderr: stderr,
+			SourceWasNonEmpty: sourceWasNonEmpty, SourceObjectCount: sourceObjectCount,
+			Replicas: replicas,
 		})
 	}
 
@@ -283,14 +315,11 @@ func (l *Loop) runOnce() (err error) {
 	}
 	st := l.state
 	fn := l.onChange
-	onResult := l.onResult
 	l.mu.Unlock()
 	if fn != nil {
 		fn(st)
 	}
-	if onResult != nil {
-		onResult(err)
-	}
+	fireResult(err)
 	return err
 }
 

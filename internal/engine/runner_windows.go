@@ -30,7 +30,7 @@ func hideConsole(cmd *exec.Cmd) {
 // kill the direct child when its context is canceled, but an abrupt parent
 // termination bypasses that path. A kill-on-close Job Object prevents a
 // foreground mount from leaving rclone and its filesystem driver behind.
-func runCommand(cmd *exec.Cmd) error {
+func runCommand(cmd *exec.Cmd, guard *runtimeGuard) error {
 	job, err := windows.CreateJobObject(nil, nil)
 	if err != nil {
 		return fmt.Errorf("create rclone job object: %w", err)
@@ -53,7 +53,7 @@ func runCommand(cmd *exec.Cmd) error {
 	}
 
 	process, err := windows.OpenProcess(
-		windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
+		windows.PROCESS_QUERY_LIMITED_INFORMATION|windows.PROCESS_SET_QUOTA|windows.PROCESS_TERMINATE,
 		false,
 		uint32(cmd.Process.Pid),
 	)
@@ -68,6 +68,11 @@ func runCommand(cmd *exec.Cmd) error {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
 		return fmt.Errorf("assign rclone process to job object: %w", assignErr)
+	}
+	if err := guard.verifyChild(cmd); err != nil {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return fmt.Errorf("rclone child image verification: %w", err)
 	}
 
 	return cmd.Wait()

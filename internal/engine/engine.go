@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -18,9 +19,8 @@ var ErrNeedsResync = errors.New("bisync needs --resync (baseline lost)")
 
 type Engine struct {
 	// bin and cfg are only used by the explicit foreground compatibility
-	// constructor below. Scheduled sync/account operations use NewVerified,
-	// which requires an enrolled absolute executable/config identity and an
-	// allowlisted child environment.
+	// constructor below. Scheduled sync/account operations require an enrolled
+	// absolute executable/config identity and an allowlisted child environment.
 	bin    string
 	cfg    string
 	run    runner
@@ -29,6 +29,10 @@ type Engine struct {
 	// subprocess is independent, but the lock protects temp filter-file
 	// lifetimes and keeps one sync operation's state isolated from another.
 	syncMu sync.Mutex
+
+	workingConfigDir string
+	closeOnce        sync.Once
+	closeErr         error
 }
 
 // NewForeground builds an Engine for the separate foreground mount path.
@@ -47,9 +51,19 @@ func NewForeground(rcloneConfigPath string) *Engine {
 	}
 }
 
-// Close is a no-op: each rclone invocation is an independent subprocess with
-// nothing to finalize (unlike the previous in-process librclone engine).
-func (e *Engine) Close() {}
+// Close removes any private working rclone config created for a transfer
+// engine. Foreground and direct verified engines have nothing to finalize.
+func (e *Engine) Close() error {
+	if e == nil {
+		return nil
+	}
+	e.closeOnce.Do(func() {
+		if e.workingConfigDir != "" {
+			e.closeErr = os.RemoveAll(e.workingConfigDir)
+		}
+	})
+	return e.closeErr
+}
 
 // args prepends --config <cfg> to base when the engine has a non-empty
 // config path, so every rclone invocation goes through it.
@@ -271,6 +285,25 @@ func (w *stderrTailWriter) retain(p []byte) {
 
 func (w *stderrTailWriter) String() string { return string(w.tail) }
 
+// execCaptureWithContext runs a bounded command while preserving both stdout
+// and the diagnostic tail of stderr. Callers that need machine-readable output
+// use this instead of routing stdout to the live progress stream.
+func (e *Engine) execCaptureWithContext(ctx context.Context, stderrOut io.Writer, argv ...string) (string, string, error) {
+	if ctx == nil && stderrOut == nil {
+		return e.exec(argv...)
+	}
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if stderrOut == nil {
+		stderrOut = io.Discard
+	}
+	var stdout bytes.Buffer
+	stderr := newStderrTailWriter(stderrOut)
+	err := e.streamExec(ctx, &stdout, stderr, argv...)
+	return stdout.String(), stderr.String(), err
+}
+
 // execWithContext preserves the captured runner for short-lived daemon calls,
 // but switches to the context-aware runner when a one-shot caller supplies a
 // context or live stderr writer. Streaming stderr remains bounded in memory so
@@ -354,6 +387,49 @@ func (e *Engine) Mount(ctx context.Context, p MountParams) error {
 		return fmt.Errorf("rclone mount: %w: %s", err, msg)
 	}
 	return nil
+}
+
+// CountSourceObjects returns the number of files rclone would actually
+// transfer after applying the same filter rules as copy, sync, or bisync.
+// Destructive-mode safety must use this effective count rather than a raw
+// filesystem walk, because an excluded-only source is empty from rclone's
+// perspective.
+func (e *Engine) CountSourceObjects(ctx context.Context, local string, filters []string, stderrOut io.Writer) (int64, error) {
+	info, err := os.Stat(local)
+	if errors.Is(err, os.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, fmt.Errorf("inspect source %q: %w", local, err)
+	}
+	if !info.IsDir() {
+		if info.Mode().IsRegular() {
+			return 1, nil
+		}
+		return 0, nil
+	}
+
+	filterArgv, cleanup, err := writeFilters("--filter-from", filters)
+	if err != nil {
+		return 0, err
+	}
+	defer cleanup()
+	argv := []string{"size", local, "--json", "--fast-list"}
+	argv = append(argv, filterArgv...)
+	stdout, stderr, err := e.execCaptureWithContext(ctx, stderrOut, argv...)
+	if err != nil {
+		return 0, fmt.Errorf("rclone size: %w: %s", err, strings.TrimSpace(stderr))
+	}
+	var result struct {
+		Count int64 `json:"count"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &result); err != nil {
+		return 0, fmt.Errorf("rclone size: parse json: %w", err)
+	}
+	if result.Count < 0 {
+		return 0, fmt.Errorf("rclone size: invalid negative object count %d", result.Count)
+	}
+	return result.Count, nil
 }
 
 type BisyncParams struct {

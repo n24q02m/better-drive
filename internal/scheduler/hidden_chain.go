@@ -1,6 +1,9 @@
 package scheduler
 
-import "fmt"
+import (
+	"fmt"
+	"strings"
+)
 
 type ProcessSnapshot struct {
 	Role         string `json:"role"`
@@ -26,6 +29,15 @@ func ValidateHiddenChain(readback HiddenChainReadback) error {
 		if process.Role == "" {
 			continue
 		}
+		if _, exists := seen[process.Role]; exists {
+			return fmt.Errorf("hidden-chain duplicate role %q", process.Role)
+		}
+		if process.PID == 0 {
+			return fmt.Errorf("hidden-chain role %q has zero pid", process.Role)
+		}
+		if strings.TrimSpace(process.Subsystem) == "" {
+			return fmt.Errorf("hidden-chain role %q has no subsystem readback", process.Role)
+		}
 		if process.WindowHandle != 0 || process.WindowTitle != "" {
 			return fmt.Errorf("hidden-chain role %q has a visible window", process.Role)
 		}
@@ -37,6 +49,20 @@ func ValidateHiddenChain(readback HiddenChainReadback) error {
 	for _, role := range []string{"wscript", "powershell", "better-drive", "rclone"} {
 		if _, ok := seen[role]; !ok {
 			return fmt.Errorf("hidden-chain missing required role %q", role)
+		}
+	}
+	for _, link := range []struct {
+		child  string
+		parent string
+	}{
+		{child: "powershell", parent: "wscript"},
+		{child: "better-drive", parent: "powershell"},
+		{child: "rclone", parent: "better-drive"},
+	} {
+		child := seen[link.child]
+		parent := seen[link.parent]
+		if child.ParentPID != parent.PID {
+			return fmt.Errorf("hidden-chain role %q parent %d does not match %q pid %d", link.child, child.ParentPID, link.parent, parent.PID)
 		}
 	}
 	return nil

@@ -99,14 +99,12 @@ func TestValidateManifestRejectsBudgetAndExpiry(t *testing.T) {
 	}
 }
 
-func TestValidateManifestRejectsByteBudgetOverflow(t *testing.T) {
+func TestValidateManifestRejectsByteCountOverflow(t *testing.T) {
 	m := validManifest()
-	m.Budget.MaxBytes = int64(^uint64(0) >> 1)
-	m.Objects[0].Size = m.Budget.MaxBytes
+	m.Objects[0].Size = maxInt64
 	m.Objects[1].Size = 1
-
-	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "byte budget") {
-		t.Fatalf("expected byte budget overflow rejection, got %v", err)
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "overflow") {
+		t.Fatalf("ValidateManifest overflow error = %v, want overflow rejection", err)
 	}
 }
 

@@ -1,6 +1,8 @@
 package tray
 
 import (
+	"context"
+	"io"
 	"sync"
 	"testing"
 
@@ -87,6 +89,10 @@ func TestDeriveEmptyIsIdle(t *testing.T) {
 // tests below only drive loop state via Pause/Resume (synchronous, no
 // goroutines), so Bisync/Copy/Sync never actually run.
 type noopSyncer struct{}
+
+func (noopSyncer) CountSourceObjects(context.Context, string, []string, io.Writer) (int64, error) {
+	return 0, nil
+}
 
 func (noopSyncer) Bisync(engine.BisyncParams) (engine.BisyncResult, error) {
 	return engine.BisyncResult{}, nil

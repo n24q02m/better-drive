@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -14,6 +15,8 @@ import (
 	"github.com/n24q02m/better-drive/internal/state"
 	"github.com/spf13/cobra"
 )
+
+const aggregateSchedulerOwnerJobID = "scheduled-sync"
 
 type schedulePreview struct {
 	JobID      string `json:"job_id"`
@@ -65,12 +68,28 @@ func scheduleInstallCmd() *cobra.Command {
 			if err != nil {
 				return err
 			}
+
+			// Validate definitions through the scheduler adapter seam while
+			// enforcing no live registration.
+			adapter := scheduler.NewMemoryAdapter(resolved, time.Now)
+			ctx := cmd.Context()
+			if ctx == nil {
+				ctx = context.Background()
+			}
+
 			previews := make([]schedulePreview, 0, len(cfg.Jobs))
 			for _, job := range cfg.Jobs {
 				seconds := int(job.Interval / time.Second)
-				definition := scheduler.Definition{JobID: job.ID, Executable: executable, Config: paths.ConfigFile(), IntervalSeconds: seconds, CatchUp: true, ExecutionLimitSeconds: max(3600, seconds*2), Owner: "better-drive"}
+				definition := scheduler.Definition{
+					JobID: job.ID, Executable: executable, Config: paths.ConfigFile(),
+					IntervalSeconds: seconds, CatchUp: true, ExecutionLimitSeconds: max(3600, seconds*2),
+					Owner: "better-drive",
+				}
 				if err := scheduler.ValidateOwner(currentOwner, definition, replace); err != nil {
 					return exitcode.WithRemediation(exitcode.ConfigError(err), "use --replace only after an exact scheduler owner readback")
+				}
+				if err := adapter.Install(ctx, definition, replace); err != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(err), "scheduler definition rejected by adapter validation")
 				}
 				definitionBytes, err := scheduler.Render(resolved, definition)
 				if err != nil {
@@ -107,9 +126,20 @@ func scheduleStatusCmd() *cobra.Command {
 			}
 			persisted, err := state.Load(paths.StateFile())
 			if errors.Is(err, os.ErrNotExist) {
-				persisted = &state.State{SchemaVersion: state.CurrentSchemaVersion, Scheduler: state.SchedulerState{Health: state.HealthUnknownOverlap}}
+				persisted = &state.State{
+					SchemaVersion: state.CurrentSchemaVersion,
+					Scheduler: state.SchedulerState{
+						Health:          state.HealthUnknown,
+						OverlapState:    state.OverlapUnknown,
+						FreshnessWindow: 15 * time.Minute,
+						CatchUpGrace:    6*time.Hour + 15*time.Minute,
+					},
+				}
 			} else if err != nil {
 				return err
+			}
+			if err == nil {
+				persisted.Scheduler.Health = state.EvaluateSchedulerHealth(persisted.Scheduler, time.Now().UTC())
 			}
 			if format == output.FormatJSON {
 				return output.RenderJSON(cmd.OutOrStdout(), persisted.Scheduler)
@@ -162,5 +192,18 @@ func ownerRecordFromState() (scheduler.OwnerRecord, error) {
 	if err != nil {
 		return scheduler.OwnerRecord{}, err
 	}
-	return scheduler.OwnerRecord{Owner: persisted.Scheduler.Owner}, nil
+	jobID := persisted.Scheduler.OwnerJobID
+	if persisted.Scheduler.Owner == "better-drive" && jobID == aggregateSchedulerOwnerJobID {
+		configured := false
+		for _, job := range persisted.Jobs {
+			if job.JobID == jobID {
+				configured = true
+				break
+			}
+		}
+		if !configured {
+			jobID = ""
+		}
+	}
+	return scheduler.OwnerRecord{Owner: persisted.Scheduler.Owner, JobID: jobID}, nil
 }

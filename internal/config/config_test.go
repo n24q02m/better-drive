@@ -20,17 +20,24 @@ func validV2Config(t *testing.T) *Config {
 	t.Helper()
 	runtimeDir := t.TempDir()
 	sourceDir := t.TempDir()
+	categoryBindingRef, policyDigest := bindingFile(t, "category-policy.json", `{"category":"claude-state"}`)
 	return &Config{
 		SchemaVersion: CurrentSchemaVersion,
 		RcloneRuntime: RcloneRuntime{
-			Executable: filepath.Join(runtimeDir, "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:exe",
+			Executable: filepath.Join(runtimeDir, "rclone"), ExecutableFileID: "exe-id", ExecutableDigest: "sha256:" + strings.Repeat("b", 64),
 			Version: "1.67.0", Provenance: "release", Signature: "sig", Owner: "role", ACL: "owner-only",
-			Config: filepath.Join(runtimeDir, "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:cfg",
+			Config: filepath.Join(runtimeDir, "rclone.conf"), ConfigFileID: "cfg-id", ConfigDigest: "sha256:" + strings.Repeat("c", 64),
 			AllowedRemotes: []string{"gdrive"}, AllowedBackends: []string{"drive"},
 		},
+		CategoryPolicies: []CategoryPolicy{{
+			ID: "claude-state", Version: 1, Digest: policyDigest, BindingRef: categoryBindingRef,
+			AllowlistedRoot: sourceDir, MandatoryDenylist: []string{"node_modules/"},
+			SizeGuard: CategorySizeGuard{MaxBytes: 1 << 30}, RestoreExpectation: "empty-or-exact-hash",
+		}},
 		Jobs: []Job{{
 			ID: "home-claude", Source: sourceDir, Direction: "push", Mode: "copy", Required: true,
-			CategoryPolicyID: "claude-state", CategoryPolicyVersion: 1, CategoryPolicyDigest: "sha256:policy",
+			CategoryPolicyID: "claude-state", CategoryPolicyVersion: 1, CategoryPolicyDigest: policyDigest,
+			Exclude:       []string{"node_modules/"},
 			SymlinkPolicy: "preserve", Schedule: "30s", Interval: 30_000_000_000,
 			Destinations: []Destination{{Backend: "drive", Path: "Backups/home/Claude", AccountID: "account", RootID: "root", CredentialRef: "rclone:gdrive", Required: true, Retention: "30d", MinCompleteRestoreSets: 2, DeletePolicy: "none"}},
 		}},
@@ -40,6 +47,66 @@ func validV2Config(t *testing.T) *Config {
 func TestValidateAcceptsCompleteV2Config(t *testing.T) {
 	if err := validV2Config(t).Validate(); err != nil {
 		t.Fatalf("Validate: %v", err)
+	}
+}
+
+func TestValidateForExecutionAcceptsEnrolledRuntimeFixture(t *testing.T) {
+	if err := validV2Config(t).ValidateForExecution(); err != nil {
+		t.Fatalf("ValidateForExecution: %v", err)
+	}
+}
+
+func TestValidateForExecutionAllowsMissingOptionalSourceForRuntimeClassification(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Required = false
+	cfg.Jobs[0].Source = filepath.Join(cfg.CategoryPolicies[0].AllowlistedRoot, "missing")
+
+	if err := cfg.ValidateForExecution(); err != nil {
+		t.Fatalf("ValidateForExecution: %v, want missing optional source deferred to runtime", err)
+	}
+}
+
+func TestValidateForExecutionRejectsMissingCategoryPolicyRegistry(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.CategoryPolicies = nil
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "category policy registry") {
+		t.Fatalf("ValidateForExecution error = %v, want missing category policy registry", err)
+	}
+}
+
+func TestValidateForExecutionRejectsSourceOutsideCategoryPolicyRoot(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Source = filepath.Join(t.TempDir(), "outside")
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "allowlisted_root") {
+		t.Fatalf("ValidateForExecution error = %v, want allowlisted-root rejection", err)
+	}
+}
+
+func TestValidateForExecutionRejectsMissingMandatoryDenylist(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Exclude = nil
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "mandatory denylist") {
+		t.Fatalf("ValidateForExecution error = %v, want mandatory-denylist rejection", err)
+	}
+}
+
+func TestValidateForExecutionRejectsCategorySizeGuardBreach(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.CategoryPolicies[0].SizeGuard.MaxBytes = 1
+	path := filepath.Join(cfg.Jobs[0].Source, "settings.json")
+	if err := os.WriteFile(path, []byte("too large"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "size guard") {
+		t.Fatalf("ValidateForExecution error = %v, want size-guard rejection", err)
+	}
+}
+
+func TestValidateForExecutionRejectsMalformedRuntimeDigest(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.RcloneRuntime.ConfigDigest = "sha256:not-a-digest"
+	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "digest") {
+		t.Fatalf("ValidateForExecution error = %v, want runtime-digest rejection", err)
 	}
 }
 
@@ -56,6 +123,17 @@ func TestValidateRejectsUnsupportedDirectionModeCombination(t *testing.T) {
 	cfg.Jobs[0].Direction = "bidirectional"
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "bidirectional") {
 		t.Fatalf("Validate error = %v, want direction/mode rejection", err)
+	}
+}
+
+func TestValidateRejectsPullDirectionForDestructiveSync(t *testing.T) {
+	cfg := validV2Config(t)
+	cfg.Jobs[0].Mode = "sync"
+	cfg.Jobs[0].Direction = "pull"
+	cfg.Jobs[0].ModeGateRef = "drive-e2e:test"
+	cfg.Jobs[0].ModeGateDigest = "sha256:" + strings.Repeat("d", 64)
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "push") {
+		t.Fatalf("Validate error = %v, want push-only destructive sync rejection", err)
 	}
 }
 

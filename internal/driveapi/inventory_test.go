@@ -66,7 +66,7 @@ func TestCollectAllRootsSortsAndRejectsDuplicateScope(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CollectAllRoots() error = %v", err)
 	}
-	if rootSet.SchemaVersion != cleanup.CurrentInventorySchemaVersion || len(rootSet.Roots) != 2 {
+	if rootSet.SchemaVersion != cleanup.CurrentRootSetSchemaVersion || len(rootSet.Roots) != 2 {
 		t.Fatalf("unexpected root set: %+v", rootSet)
 	}
 	if rootSet.Roots[0].RootID != "root-1" || rootSet.Roots[1].RootID != "root-2" {

@@ -10,7 +10,7 @@ func renderWindows(d Definition) []byte {
 	if d.CatchUp {
 		wake = "true"
 	}
-	args := append([]string{"sync", "--format", "json", "--config", d.Config}, d.Arguments...)
+	args := schedulerArguments(d)
 	return []byte(fmt.Sprintf(`<?xml version="1.0" encoding="UTF-16"?>
 <Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
   <RegistrationInfo><URI>\%s</URI></RegistrationInfo>

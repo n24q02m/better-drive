@@ -1,22 +1,17 @@
 name: CD
 
-# CD is dispatch-only. Tag pushes are read-only observers; publication must
-# remain one transaction owned by workflow_dispatch and a protected channel
-# environment.
+# CD is dispatch-only and fail-closed. It prepares exact candidate artifacts;
+# live publication remains disabled until the terminal BDrive stable gate and
+# its protected environment are explicitly approved.
 #
-# Repo Secrets required:
-#   GITHUB_TOKEN         - built-in
-#   CI_APP_KEY           - n24q02m-ci GitHub App private key
-#   TAP_GITHUB_TOKEN     - fine-grained PAT with contents:write on n24q02m/scoop-bucket
-#
-# Repo Variables required:
-#   CI_APP_ID            - n24q02m-ci GitHub App ID (3200052)
+# Prepared candidate artifacts and provenance are built credential-free via
+# .goreleaser.prepare.yaml and archived as run artifacts.
 
 on:
   workflow_dispatch:
     inputs:
       release_type:
-        description: "Release type"
+        description: "Release type (stable or beta candidate)"
         required: true
         default: "stable"
         type: choice
@@ -32,81 +27,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ==================== Release (workflow_dispatch) ====================
-  release:
-    name: Semantic Release
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      id-token: write
-    outputs:
-      released: ${{ steps.release.outputs.released }}
-      tag: ${{ steps.release.outputs.tag }}
-      version: ${{ steps.release.outputs.version }}
-    steps:
-      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
-        with:
-          egress-policy: audit
-      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
-        id: app-token
-        with:
-          app-id: ${{ vars.CI_APP_ID }}
-          private-key: ${{ secrets.CI_APP_KEY }}
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          token: ${{ steps.app-token.outputs.token }}
-      - id: release
-        uses: n24q02m/better-semantic-release@9b8ee6275b7dae995bac090282ccb1cabc99ae0f # v1.2.3
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          prerelease: ${{ github.event.inputs.release_type == 'beta' }}
-          prerelease_token: beta
-      - if: steps.release.outputs.released == 'true'
-        uses: python-semantic-release/publish-action@5a5718ce47b892ef699f2972dae122297771d641 # v10.6.1
-        with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
-          tag: ${{ steps.release.outputs.tag }}
-
-  # A dispatch-owned run is the only publisher. The protected environment
-  # pauses the same run before it receives channel credentials.
-  goreleaser:
-    name: Build and Publish Binaries
-    if: needs.release.outputs.released == 'true'
-    needs: [release]
-    environment:
-      name: ${{ github.event.inputs.release_type == 'beta' && 'beta-publish' || 'stable-publish' }}
+  # ==================== Prepare Candidate (workflow_dispatch) ====================
+  prepare-candidate:
+    name: Prepare Candidate Artifacts
     runs-on: macos-latest
     permissions:
-      contents: write
-      id-token: write
+      contents: read
     steps:
-      - uses: step-security/harden-runner@b09bb98e06d4d774595224525879c09bc6e98c40 # v2.20.1
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
         with:
           egress-policy: audit
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-          ref: ${{ needs.release.outputs.tag || github.ref }}
+
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - name: Verify release preparation, release policy, and installers
+        run: |
+          python scripts/verify_prepare_config.py .
+          python scripts/verify_release_policy.py .
+          python scripts/verify_installers.py .
+
       - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-      - uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+
+      - name: Build candidate binaries credential-free
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
-          version: latest
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          # Pin goreleaser to the exact tag semantic-release produced.
-          # Without this, git-describe is ambiguous when a stable tag and
-          # a prerelease tag (e.g. v1.5.1 + v1.5.1-beta.1) point at the same
-          # commit, and goreleaser may pick the wrong one (duplicate-asset 422).
-          GORELEASER_CURRENT_TAG: ${{ needs.release.outputs.tag }}
-          # Fine-grained PAT with `contents:write` on
-          # n24q02m/scoop-bucket. Goreleaser uses this to push
-          # manifest updates on release.
-          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+          version: '~> v2'
+          args: release --snapshot --config=.goreleaser.prepare.yaml --skip=publish --clean
+
+      - name: Record candidate provenance manifest
+        shell: bash
+        run: |
+          mkdir -p dist/provenance
+          {
+            echo "Candidate release manifest"
+            echo "Timestamp: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "Ref: ${{ github.ref }}"
+            echo "Commit: ${{ github.sha }}"
+            echo "Release type: ${{ github.event.inputs.release_type }}"
+            echo "Status: PREPARED_CREDENTIAL_FREE_CANDIDATE"
+            echo ""
+            echo "Checksums:"
+            if [ -f dist/checksums.txt ]; then
+              cat dist/checksums.txt
+            else
+              echo "No checksums.txt generated"
+            fi
+          } > dist/provenance/manifest.txt
+
+      - name: Upload prepared candidate artifacts and provenance
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-release-artifacts
+          path: dist/
+          if-no-files-found: error
+
+      - name: Fail closed on unverified live publication
+        shell: bash
+        run: |
+          echo "==> Candidate release preparation successful."
+          echo "==> Live publication remains disabled pending the terminal BDrive stable gate."
