@@ -1,11 +1,14 @@
 name: CD
 
-# CD is dispatch-only and fail-closed. It prepares exact candidate artifacts;
-# live publication remains disabled until the terminal BDrive stable gate and
-# its protected environment are explicitly approved.
+# CD is dispatch-only and fail-closed. Beta dispatches prepare exact
+# credential-free candidate artifacts via .goreleaser.prepare.yaml; stable
+# dispatches publish live through the protected stable-publish environment
+# (required reviewer n24q02m, self-review disabled, main-only branch policy).
 #
-# Prepared candidate artifacts and provenance are built credential-free via
-# .goreleaser.prepare.yaml and archived as run artifacts.
+# The stable path computes the release with the pinned better-semantic-release
+# action (release commit/tag pushed by the n24q02m-ci App identity, never the
+# user account), then GoReleaser builds, signs keylessly via sigstore, and
+# publishes the GitHub release plus the homebrew/scoop stable channels.
 
 on:
   workflow_dispatch:
@@ -30,6 +33,7 @@ jobs:
   # ==================== Prepare Candidate (workflow_dispatch) ====================
   prepare-candidate:
     name: Prepare Candidate Artifacts
+    if: github.event.inputs.release_type != 'stable'
     runs-on: macos-latest
     permissions:
       contents: read
@@ -93,3 +97,94 @@ jobs:
         run: |
           echo "==> Candidate release preparation successful."
           echo "==> Live publication remains disabled pending the terminal BDrive stable gate."
+
+  # ==================== Publish Stable (workflow_dispatch, protected) ====================
+  publish-stable:
+    name: Publish Stable Release
+    if: github.event.inputs.release_type == 'stable'
+    environment: stable-publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - uses: step-security/harden-runner@05e31511f85b41b11d1cf0ef85d0992719546e2c # v2.21.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3
+        id: app-token
+        with:
+          app-id: ${{ vars.CI_APP_ID }}
+          private-key: ${{ secrets.CI_APP_KEY }}
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+
+      - name: Verify release preparation, release policy, and installers
+        run: |
+          python scripts/verify_prepare_config.py .
+          python scripts/verify_release_policy.py .
+          python scripts/verify_installers.py .
+
+      - name: Compute and push semantic release
+        id: release
+        uses: n24q02m/better-semantic-release@087b84e8d2ba75bdec350924d3bf8247088e0b1a # v1.4.0
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          config_file: semantic-release.toml
+          git_committer_name: n24q02m-ci
+          git_committer_email: 3200052+n24q02m-ci@users.noreply.github.com
+
+      - name: Check out the released tag for publishing
+        if: steps.release.outputs.released == 'true'
+        run: |
+          git fetch --tags --force origin
+          git checkout "${{ steps.release.outputs.tag }}"
+
+      - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
+
+      - uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+
+      - name: Build, sign, and publish stable release
+        if: steps.release.outputs.released == 'true'
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: '~> v2'
+          args: release --config=.goreleaser.yaml --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GORELEASER_CURRENT_TAG: ${{ steps.release.outputs.tag }}
+          TAP_GITHUB_TOKEN: ${{ secrets.TAP_GITHUB_TOKEN }}
+
+      - name: Read back published stable state or fail closed
+        if: steps.release.outputs.released == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          tag="${{ steps.release.outputs.tag }}"
+          git fetch --tags --force origin
+          rev=$(git rev-parse "${tag}^{commit}")
+          echo "Published tag ${tag} -> ${rev}"
+          gh release view "${tag}" --repo n24q02m/better-drive --json isDraft,assets \
+            --jq '{isDraft: .isDraft, asset_count: (.assets | length), assets: [.assets[].name]}'
+          count=$(gh release view "${tag}" --repo n24q02m/better-drive --json assets --jq '.assets | length')
+          if [ "${count}" -eq 0 ]; then
+            echo "FAIL: release ${tag} has no assets" >&2
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Report no-op when no release was due
+        if: steps.release.outputs.released != 'true'
+        shell: bash
+        run: |
+          echo "==> semantic-release determined no release was due; nothing published."
