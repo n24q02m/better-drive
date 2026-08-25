@@ -3,7 +3,6 @@
 package tray
 
 import (
-	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -89,9 +88,7 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 func openFolder(path string) {
 	if runtime.GOOS == "windows" {
 		cleanPath := filepath.Clean(path)
-		if info, err := os.Stat(cleanPath); err == nil && info.IsDir() {
-			/* #nosec G204 */
-			_ = exec.Command("explorer", cleanPath).Start()
-		}
+		/* #nosec G204 */
+		_ = exec.Command("explorer", cleanPath).Start()
 	}
 }
