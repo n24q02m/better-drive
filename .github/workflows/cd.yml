@@ -137,7 +137,7 @@ jobs:
         id: release
         uses: n24q02m/better-semantic-release@087b84e8d2ba75bdec350924d3bf8247088e0b1a # v1.4.0
         with:
-          github_token: ${{ secrets.GITHUB_TOKEN }}
+          github_token: ${{ steps.app-token.outputs.token }}
           config_file: semantic-release.toml
           git_committer_name: n24q02m-ci
           git_committer_email: 3200052+n24q02m-ci@users.noreply.github.com
