@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2024-08-26 - Explicitly disable unsupported platform actions
+**Learning:** Silently ignoring an action (like opening a folder) on unsupported platforms causes user confusion because the UI element appears interactive. It is a critical UX and accessibility issue when a control fails silently without explaining why.
+**Action:** Always explicitly disable UI elements that are not supported on the current platform and update their tooltip to explain the platform constraint to the user.
