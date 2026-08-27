@@ -3,6 +3,7 @@ package cleanup
 import (
 	"bytes"
 	"crypto/ed25519"
+	"io"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -110,7 +111,19 @@ func (store *ApprovalStore) ReadState(approvalID string) (Intent, error) {
 	if store == nil || store.Root == "" || approvalID == "" {
 		return Intent{}, errors.New("approval store root and approval ID are required")
 	}
-	data, err := os.ReadFile(filepath.Join(store.Root, "cleanup-states", approvalID+".json"))
+	root, err := os.OpenRoot(filepath.Join(store.Root, "cleanup-states"))
+	if err != nil {
+		return Intent{}, err
+	}
+	defer root.Close()
+
+	f, err := root.Open(approvalID+".json")
+	if err != nil {
+		return Intent{}, err
+	}
+	defer f.Close()
+
+	data, err := io.ReadAll(f)
 	if err != nil {
 		return Intent{}, err
 	}

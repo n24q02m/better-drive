@@ -26,3 +26,8 @@
 **Vulnerability:** Unhandled errors, such as ignoring the return value of resource cleanups or core application logic, can silently obscure resource exhaustion or logic bypasses (CWE-703), which gosec flags as G104.
 **Learning:** In Go, blindly suppressing unhandled errors (e.g., using `_ = err`) without comment makes the code unauditable. For cases where an error is truly unactionable (like a best-effort `os.Remove` on a temp file or a read-only `root.Close()`), it must be explicitly documented.
 **Prevention:** Document intentional error suppressions with `// #nosec G104 -- [reason]` to prove to auditors and linters that the ignored error was consciously evaluated as benign and not a forgotten security or reliability boundary.
+
+## 2026-08-27 - os.OpenRoot must use a trusted base directory
+**Vulnerability:** Path traversal (CWE-22) in `os.ReadFile` usage in `ReadState`.
+**Learning:** When using Go 1.24+ `os.OpenRoot` to fix path traversal, the root directory must be a known, trusted, and strictly bounded path (e.g., `store.Root` or a fixed application directory). Deriving the root directory directly from an untrusted, user-provided path (e.g., via `filepath.Dir(path)`) provides zero protection against traversal, as the attacker still controls the evaluation of the root directory itself.
+**Prevention:** Always identify the logical "root" boundary that untrusted paths should not escape, pass *that* trusted boundary to `os.OpenRoot`, and then pass the untrusted remainder to `root.Open()`.
