@@ -31,6 +31,10 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 	mPause := systray.AddMenuItem("Pause", "Pause scheduled syncs for all pairs")
 	systray.AddSeparator()
 	mOpen := systray.AddMenuItem("Open folder", "Open the local sync folder(s)")
+	if runtime.GOOS != "windows" {
+		mOpen.Disable()
+		mOpen.SetTooltip("Opening folders is only supported on Windows")
+	}
 	systray.AddSeparator()
 	mQuit := systray.AddMenuItem("Quit", "Exit better-drive")
 
