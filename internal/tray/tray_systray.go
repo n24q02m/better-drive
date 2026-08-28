@@ -89,13 +89,19 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 }
 
 func openFolder(path string) {
-	if runtime.GOOS != "windows" {
-		return
-	}
 	cleanPath, err := validateOpenFolder(path)
 	if err != nil {
 		return
 	}
+	var cmd string
+	switch runtime.GOOS {
+	case "windows":
+		cmd = "explorer"
+	case "darwin":
+		cmd = "open"
+	default:
+		cmd = "xdg-open"
+	}
 	/* #nosec G204 */
-	_ = exec.Command("explorer", cleanPath).Start()
+	_ = exec.Command(cmd, cleanPath).Start()
 }
