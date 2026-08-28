@@ -2,9 +2,12 @@ package cli
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -49,6 +52,45 @@ func (v *cliStagingVerifier) Verify(_ string, identity restore.RootIdentity) (re
 	return evidence, nil
 }
 
+type cliSourceProvider struct {
+	artifacts map[string][]byte
+}
+
+func (p *cliSourceProvider) Open(_ context.Context, ref restore.SourceReference) (io.ReadCloser, restore.SourceReadback, error) {
+	key := fmt.Sprintf("%s/%s/%s/%s", ref.Provider, ref.AccountID, ref.ObjectID, ref.Version)
+	data, ok := p.artifacts[key]
+	if !ok {
+		return nil, restore.SourceReadback{}, fmt.Errorf("source artifact %q not found in test provider", key)
+	}
+	sum := sha256.Sum256(data)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	readback := restore.SourceReadback{
+		Reference:        ref,
+		Size:             int64(len(data)),
+		CiphertextDigest: digest,
+		Version:          ref.Version,
+	}
+	return io.NopCloser(bytes.NewReader(data)), readback, nil
+}
+
+type cliCheckpointVerifier struct{}
+
+func (v *cliCheckpointVerifier) Verify(_ context.Context, checkpoint restore.MachineCheckpoint, intent restore.ApplyIntent) error {
+	if checkpoint.Signature != "valid-sig" {
+		return fmt.Errorf("invalid checkpoint signature")
+	}
+	return nil
+}
+
+type cliCleanupVerifier struct{}
+
+func (v *cliCleanupVerifier) Verify(_ context.Context, claim restore.CleanupClaim, intent restore.CleanupIntent) error {
+	if claim.Signature != "valid-claim-sig" {
+		return fmt.Errorf("invalid cleanup claim signature")
+	}
+	return nil
+}
+
 func cliDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return "sha256:" + hex.EncodeToString(sum[:])
@@ -74,22 +116,31 @@ func cliSealedEntry(t *testing.T, relative string, payload []byte, metadata arti
 		t.Fatal(closeErr)
 	}
 	return restore.Entry{
-		RelativePath: relative, SourcePath: source, ArtifactMetadata: metadata,
-		PlaintextDigest: result.PlaintextDigest, CiphertextDigest: result.CiphertextDigest,
-		PlaintextSize: int64(len(payload)),
+		RelativePath:     relative,
+		SourcePath:       source,
+		ArtifactMetadata: metadata,
+		PlaintextDigest:  result.PlaintextDigest,
+		CiphertextDigest: result.CiphertextDigest,
+		PlaintextSize:    int64(len(payload)),
 	}
 }
 
-func restoreTestCmd(deps RuntimeDependencies) *cobra.Command {
-	return restoreCmdWithDependencies(deps)
+func restoreTestCmd(deps RestoreDependencies) *cobra.Command {
+	return restoreCmdWithRestoreDependencies(deps)
 }
 
-func restoreDeps(resolver artifactcrypto.Resolver) RuntimeDependencies {
-	return RuntimeDependencies{ArtifactResolver: resolver, StagingVerifier: &cliStagingVerifier{}}
+func restoreDeps(resolver artifactcrypto.Resolver) RestoreDependencies {
+	return RestoreDependencies{
+		ArtifactResolver:   resolver,
+		StagingVerifier:    &cliStagingVerifier{},
+		CheckpointVerifier: &cliCheckpointVerifier{},
+		CleanupVerifier:    &cliCleanupVerifier{},
+	}
 }
+
 func TestRestorePlanJSONValidatesCanonicalManifest(t *testing.T) {
 	manifest := filepath.Join(t.TempDir(), "manifest.json")
-	if err := os.WriteFile(manifest, []byte(`[{"relative_path":"category/state.txt"}]`), 0o600); err != nil {
+	if err := os.WriteFile(manifest, []byte(`[{"relative_path":"category/state.txt","plaintext_size":120}]`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	cmd := newRootCmd()
@@ -100,7 +151,7 @@ func TestRestorePlanJSONValidatesCanonicalManifest(t *testing.T) {
 	if err := cmd.Execute(); err != nil {
 		t.Fatalf("restore plan: %v; stderr=%s", err, errOut.String())
 	}
-	if !strings.Contains(out.String(), "category/state.txt") || !strings.Contains(out.String(), "conflicts") {
+	if !strings.Contains(out.String(), "category/state.txt") || !strings.Contains(out.String(), "capacity_bytes") {
 		t.Fatalf("restore plan output = %s", out.String())
 	}
 }
@@ -160,7 +211,10 @@ func TestRootRestoreUsesInjectedDependencies(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := newRootCmdWithDependencies(restoreDeps(resolver))
+	cmd := newRootCmdWithDependencies(RuntimeDependencies{
+		ArtifactResolver: resolver,
+		StagingVerifier:  &cliStagingVerifier{},
+	})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"restore", "fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
@@ -264,7 +318,7 @@ func TestRestoreFetchExecuteRequiresStagingVerifierBeforeJournal(t *testing.T) {
 		t.Fatal(err)
 	}
 	rootPath := t.TempDir()
-	cmd := restoreTestCmd(RuntimeDependencies{ArtifactResolver: resolver})
+	cmd := restoreTestCmd(RestoreDependencies{ArtifactResolver: resolver})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
@@ -297,7 +351,7 @@ func TestRestoreFetchEvidenceFailureLeavesNoExecutionResidue(t *testing.T) {
 		e.EncryptedAtRest = false
 		return e
 	}}
-	cmd := restoreTestCmd(RuntimeDependencies{ArtifactResolver: resolver, StagingVerifier: verifier})
+	cmd := restoreTestCmd(RestoreDependencies{ArtifactResolver: resolver, StagingVerifier: verifier})
 	cmd.SetOut(&bytes.Buffer{})
 	cmd.SetErr(&bytes.Buffer{})
 	cmd.SetArgs([]string{"fetch", "--root", rootPath, "--manifest", manifest, "--execute"})
@@ -349,7 +403,77 @@ func TestRestoreApplyUsesExplicitIsolatedTransaction(t *testing.T) {
 	}
 }
 
-func TestRestoreApplyRejectsLiveReplaceAndIncompleteContract(t *testing.T) {
+func TestRestoreApplyReplaceWithMachineCheckpoint(t *testing.T) {
+	rootPath := t.TempDir()
+	destPath := filepath.Join(rootPath, "file.txt")
+	if err := os.WriteFile(destPath, []byte("old-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata := cliMetadata()
+	resolver := cliArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := cliSealedEntry(t, "file.txt", []byte("new-content"), metadata, resolver)
+	manifest := filepath.Join(t.TempDir(), "manifest.json")
+	data, err := json.Marshal([]restore.Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifest, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	identity, err := restore.CaptureRootIdentity(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkpoint := restore.MachineCheckpoint{
+		ID:            "cp-replace-1",
+		Kind:          restore.CheckpointKindReplace,
+		Root:          rootPath,
+		RootIdentity:  identity,
+		Entries:       []string{"file.txt"},
+		CapacityBytes: int64(len("new-content")),
+		ExpiresAt:     time.Now().Add(1 * time.Hour),
+		Signature:     "valid-sig",
+	}
+	checkpointPath := filepath.Join(t.TempDir(), "checkpoint.json")
+	cpData, err := json.Marshal(checkpoint)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(checkpointPath, cpData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cmd := restoreTestCmd(restoreDeps(resolver))
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"apply", "--root", rootPath, "--manifest", manifest, "--transaction", "tx-replace", "--replace", "--checkpoint", checkpointPath})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("restore apply replace: %v", err)
+	}
+
+	got, err := os.ReadFile(destPath)
+	if err != nil || string(got) != "new-content" {
+		t.Fatalf("replaced content = %q err=%v", got, err)
+	}
+
+	// Recover transaction rolls back to original content.
+	recoverCmd := newRootCmd()
+	recoverCmd.SetOut(&bytes.Buffer{})
+	recoverCmd.SetErr(&bytes.Buffer{})
+	recoverCmd.SetArgs([]string{"restore", "recover", "--root", rootPath, "--transaction", "tx-replace"})
+	if err := recoverCmd.Execute(); err != nil {
+		t.Fatalf("restore recover replace: %v", err)
+	}
+
+	restored, err := os.ReadFile(destPath)
+	if err != nil || string(restored) != "old-content" {
+		t.Fatalf("recovered content = %q err=%v", restored, err)
+	}
+}
+
+func TestRestoreApplyRejectsLiveReplaceWithoutCheckpoint(t *testing.T) {
 	for _, args := range [][]string{
 		{"restore", "apply"},
 		{"restore", "apply", "--root", t.TempDir(), "--manifest", "missing.json"},
@@ -362,6 +486,31 @@ func TestRestoreApplyRejectsLiveReplaceAndIncompleteContract(t *testing.T) {
 		if err := cmd.Execute(); err == nil {
 			t.Fatalf("restore apply accepted unsafe args %v", args)
 		}
+	}
+}
+
+func TestRestoreCleanupCommand(t *testing.T) {
+	rootPath := t.TempDir()
+	stagingDir, _ := restore.StagingRollbackDirs(rootPath)
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	testFile := filepath.Join(stagingDir, "stage.tmp")
+	if err := os.WriteFile(testFile, []byte("temp-data"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Check TTL passes for fresh file.
+	cmd := restoreTestCmd(restoreDeps(nil))
+	var out bytes.Buffer
+	cmd.SetOut(&out)
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"cleanup", "--root", rootPath, "--check-ttl", "--format", "json"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("restore cleanup --check-ttl: %v", err)
+	}
+	if !strings.Contains(out.String(), "ttl_ok") {
+		t.Fatalf("cleanup output = %s", out.String())
 	}
 }
 
