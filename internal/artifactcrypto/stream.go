@@ -330,18 +330,9 @@ func resolveKey(resolver Resolver, reference KeyReference) ([]byte, error) {
 }
 
 func createSpool() (*os.File, error) {
-	spool, err := os.CreateTemp("", spoolPattern)
+	spool, err := createSecureSpool()
 	if err != nil {
 		return nil, wrapError("create artifact spool", err)
-	}
-	info, err := spool.Stat()
-	if err != nil {
-		_ = cleanupSpool(spool)
-		return nil, wrapError("inspect artifact spool", err)
-	}
-	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
-		_ = cleanupSpool(spool)
-		return nil, errors.New("artifact spool is not a private regular file")
 	}
 	return spool, nil
 }
@@ -522,8 +513,9 @@ func readFrameHeader(src io.Reader) (uint64, uint32, uint32, error) {
 }
 
 func zeroBytes(data []byte) {
-	for i := range data[:cap(data)] {
-		data[i] = 0
+	full := data[:cap(data)]
+	for i := range full {
+		full[i] = 0
 	}
 }
 
