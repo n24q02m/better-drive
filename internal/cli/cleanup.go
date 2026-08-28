@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -29,10 +30,50 @@ func cleanupCmd() *cobra.Command {
 func cleanupApprovalCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "approval",
-		Short: "Canonicalize cleanup approvals",
-		Long:  "Canonicalize approvals for offline signing; protected approval preparation and activation are unavailable in this client.",
+		Short: "Manage cleanup approvals and intents",
+		Long:  "Prepare drafts, canonicalize approvals for offline signing, and activate sealed intents against enrolled trust roots.",
 	}
-	command.AddCommand(cleanupApprovalCanonicalizeCmd())
+	command.AddCommand(
+		cleanupApprovalPrepareCmd(),
+		cleanupApprovalCanonicalizeCmd(),
+		cleanupApprovalActivateCmd(),
+	)
+	return command
+}
+
+func cleanupApprovalPrepareCmd() *cobra.Command {
+	var approvalPath string
+	var storePath string
+	var format string
+	command := &cobra.Command{
+		Use:   "prepare",
+		Short: "Store a create-only cleanup approval draft",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			approval, err := readApproval(approvalPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a valid approval JSON record")
+			}
+			if strings.TrimSpace(storePath) == "" {
+				storePath = filepath.Join(os.TempDir(), "bdrive-approval-store")
+			}
+			store := cleanup.NewApprovalStore(storePath)
+			draft, err := store.Prepare(approval)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix the approval draft or resolve store conflicts")
+			}
+			if format == output.FormatJSON {
+				return output.RenderJSON(cmd.OutOrStdout(), draft)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "prepared draft: id=%s digest=%s\n", draft.Approval.ApprovalID, draft.DraftDigest)
+			return err
+		},
+	}
+	output.AddFormatFlag(command, &format)
+	command.Flags().StringVar(&approvalPath, "approval", "", "approval JSON to prepare")
+	command.Flags().StringVar(&storePath, "store", "", "approval store root path")
 	return command
 }
 
@@ -55,6 +96,58 @@ func cleanupApprovalCanonicalizeCmd() *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&approvalPath, "approval", "", "approval JSON to canonicalize")
+	return command
+}
+
+func cleanupApprovalActivateCmd() *cobra.Command {
+	var approvalPath string
+	var signatureHex string
+	var rootPath string
+	var storePath string
+	var format string
+	command := &cobra.Command{
+		Use:   "activate",
+		Short: "Activate a sealed cleanup intent against an enrolled trust root",
+		RunE: func(cmd *cobra.Command, _ []string) error {
+			if err := output.Validate(format); err != nil {
+				return badFormatErr(err)
+			}
+			approval, err := readApproval(approvalPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a valid approval JSON record")
+			}
+			sigBytes, err := hex.DecodeString(strings.TrimSpace(signatureHex))
+			if err != nil || len(sigBytes) == 0 {
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("invalid signature hex encoding")), "provide a valid hex-encoded Ed25519 signature")
+			}
+			root, err := readTrustRoot(rootPath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide an enrolled trust root record")
+			}
+			now := time.Now().UTC()
+			intent, err := cleanup.ActivateApproval(approval, sigBytes, root, now)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "ensure the signature and trust root match the canonical approval")
+			}
+			if strings.TrimSpace(storePath) == "" {
+				storePath = filepath.Join(os.TempDir(), "bdrive-approval-store")
+			}
+			store := cleanup.NewApprovalStore(storePath)
+			if err := store.Activate(intent); err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "activate intent in approval store")
+			}
+			if format == output.FormatJSON {
+				return output.RenderJSON(cmd.OutOrStdout(), intent)
+			}
+			_, err = fmt.Fprintf(cmd.OutOrStdout(), "activated intent: id=%s digest=%s state=%s\n", intent.Approval.ApprovalID, intent.IntentDigest, intent.State)
+			return err
+		},
+	}
+	output.AddFormatFlag(command, &format)
+	command.Flags().StringVar(&approvalPath, "approval", "", "approval JSON to activate")
+	command.Flags().StringVar(&signatureHex, "signature", "", "hex-encoded detached Ed25519 signature")
+	command.Flags().StringVar(&rootPath, "root", "", "enrolled trust root JSON file")
+	command.Flags().StringVar(&storePath, "store", "", "approval store root path")
 	return command
 }
 
@@ -241,6 +334,21 @@ func readApproval(path string) (cleanup.Approval, error) {
 		return cleanup.Approval{}, err
 	}
 	return approval, nil
+}
+
+func readTrustRoot(path string) (cleanup.TrustRoot, error) {
+	if strings.TrimSpace(path) == "" {
+		return cleanup.TrustRoot{}, errors.New("--root is required")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return cleanup.TrustRoot{}, err
+	}
+	var root cleanup.TrustRoot
+	if err := json.Unmarshal(data, &root); err != nil {
+		return cleanup.TrustRoot{}, fmt.Errorf("decode trust root: %w", err)
+	}
+	return root, nil
 }
 
 func readManifest(path string) (cleanup.Manifest, error) {
