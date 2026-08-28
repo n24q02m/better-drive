@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/n24q02m/better-drive/internal/cleanup"
+	"github.com/n24q02m/better-drive/internal/driveapi"
 	"github.com/n24q02m/better-drive/internal/r2api"
 )
 
@@ -323,6 +325,142 @@ func TestDriveQuarantinePlanningEmitsNonAuthoritativeIntent(t *testing.T) {
 	}
 }
 
+func TestEngineRechecksTrustHeadAndLeaseBeforeBatch(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	policy := validR2Policy()
+	inventory := retentionInventory(now)
+	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Actions = plan.Actions[:1]
+	plan.Actions[0].R2CopyCapability = r2api.NewCopyCapability(plan.Actions[0].R2Copy.Source, plan.Actions[0].R2Copy.Destination, plan.Actions[0].RequestID, now.Add(time.Hour), "signed")
+
+	provider := &fakeRetentionProvider{}
+	engine := NewEngine(provider, NewJournal())
+	engine.Now = func() time.Time { return now }
+
+	// TrustChecker fails
+	engine.TrustChecker = func(time.Time) (string, error) {
+		return "", errors.New("trust head rotation in-flight")
+	}
+	if _, err := engine.Apply(context.Background(), plan, policy); err == nil || !strings.Contains(err.Error(), "trust head") {
+		t.Fatalf("expected trust head recheck error, got %v", err)
+	}
+	if provider.copyCalls != 0 {
+		t.Fatalf("copyCalls = %d, want 0 when trust check fails", provider.copyCalls)
+	}
+
+	// TrustChecker succeeds, LeaseChecker fails
+	engine.TrustChecker = func(time.Time) (string, error) {
+		return "valid-trust-oid", nil
+	}
+	engine.LeaseChecker = func(_ context.Context, _ Lease) error {
+		return errors.New("destination lease stolen by another host")
+	}
+	if _, err := engine.Apply(context.Background(), plan, policy); err == nil || !strings.Contains(err.Error(), "destination lease") {
+		t.Fatalf("expected lease recheck error, got %v", err)
+	}
+	if provider.copyCalls != 0 {
+		t.Fatalf("copyCalls = %d, want 0 when lease check fails", provider.copyCalls)
+	}
+
+	// Both succeed
+	engine.LeaseChecker = func(context.Context, Lease) error { return nil }
+	report, err := engine.Apply(context.Background(), plan, policy)
+	if err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if report.SettledActions != 1 || provider.copyCalls != 1 {
+		t.Fatalf("unexpected report: %+v calls=%d", report, provider.copyCalls)
+	}
+}
+
+func TestEngineExecutesDriveQuarantineWithValidCapability(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	inventory := retentionInventory(now)
+	for index := range inventory.Objects {
+		inventory.Objects[index].Provider = string(ProviderDrive)
+	}
+	setRestoreProvider(&inventory, ProviderDrive)
+	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
+	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Actions = plan.Actions[:1]
+	plan.Actions[0].DriveCapability = driveapi.MutationCapability{
+		ClaimID:          "claim-1",
+		Role:             "workstation",
+		Intent:           "BD-DRIVE-MUTATION-RW",
+		ObjectID:         plan.Actions[0].Object.ObjectID,
+		AccountID:        plan.Actions[0].Object.AccountID,
+		RootID:           plan.Actions[0].Object.RootID,
+		Mode:             cleanup.ModeQuarantine,
+		Budget:           cleanup.Budget{MaxObjects: 10, MaxBytes: 1000},
+		ExpiresAt:        now.Add(time.Hour),
+		Nonce:            "nonce-1",
+		Issuer:           "issuer-1",
+		Signature:        "signed-drive-cap",
+		AcceptsNoCASRisk: true,
+	}
+
+	driveMock := &fakeDriveRetentionProvider{}
+	engine := NewEngine(nil, NewJournal())
+	engine.Drive = driveMock
+	engine.Now = func() time.Time { return now }
+
+	report, err := engine.Apply(context.Background(), plan, policy)
+	if err != nil {
+		t.Fatalf("Apply() Drive quarantine error = %v", err)
+	}
+	if report.SettledActions != 1 || driveMock.quarantineCalls != 1 {
+		t.Fatalf("unexpected report: %+v calls=%d", report, driveMock.quarantineCalls)
+	}
+}
+
+func TestEngineDriveQuarantineUnknownSettlementRejection(t *testing.T) {
+	now := time.Unix(100, 0).UTC()
+	inventory := retentionInventory(now)
+	for index := range inventory.Objects {
+		inventory.Objects[index].Provider = string(ProviderDrive)
+	}
+	setRestoreProvider(&inventory, ProviderDrive)
+	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
+	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.Actions = plan.Actions[:1]
+	plan.Actions[0].DriveCapability = driveapi.MutationCapability{
+		ClaimID:          "claim-1",
+		Role:             "workstation",
+		Intent:           "BD-DRIVE-MUTATION-RW",
+		ObjectID:         plan.Actions[0].Object.ObjectID,
+		AccountID:        plan.Actions[0].Object.AccountID,
+		RootID:           plan.Actions[0].Object.RootID,
+		Mode:             cleanup.ModeQuarantine,
+		Budget:           cleanup.Budget{MaxObjects: 10, MaxBytes: 1000},
+		ExpiresAt:        now.Add(time.Hour),
+		Nonce:            "nonce-1",
+		Issuer:           "issuer-1",
+		Signature:        "signed-drive-cap",
+		AcceptsNoCASRisk: true,
+	}
+
+	driveMock := &fakeDriveRetentionProvider{quarantineErr: driveapi.ErrUnknownSettlement}
+	engine := NewEngine(nil, NewJournal())
+	engine.Drive = driveMock
+	engine.Now = func() time.Time { return now }
+
+	if _, err := engine.Apply(context.Background(), plan, policy); !errors.Is(err, ErrUnknownSettlement) {
+		t.Fatalf("expected unknown settlement error, got %v", err)
+	}
+	if engine.Lease.State != LeaseClaimed {
+		t.Fatalf("lease state = %q, want claimed (fenced)", engine.Lease.State)
+	}
+}
+
 func TestEngineRetainsLeaseOnUnknownSettlementAndNeverRetriesAmbiguous(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	policy := validR2Policy()
@@ -498,4 +636,23 @@ func (provider *fakeRetentionProvider) Delete(context.Context, r2api.DeleteReque
 
 func (provider *fakeRetentionProvider) Purge(context.Context, r2api.PurgeRequest, r2api.PurgeCapability) (r2api.MutationReceipt, error) {
 	return r2api.MutationReceipt{}, nil
+}
+
+type fakeDriveRetentionProvider struct {
+	quarantineCalls int
+	quarantineErr   error
+}
+
+func (p *fakeDriveRetentionProvider) Quarantine(_ context.Context, req driveapi.QuarantineRequest, _ driveapi.MutationCapability) (driveapi.MutationReceipt, error) {
+	p.quarantineCalls++
+	if p.quarantineErr != nil {
+		return driveapi.MutationReceipt{}, p.quarantineErr
+	}
+	return driveapi.MutationReceipt{
+		ObjectID:         req.ObjectID,
+		ParentID:         req.QuarantineParentID,
+		State:            "quarantined",
+		ReadbackVerified: true,
+		RequestID:        req.RequestID,
+	}, nil
 }

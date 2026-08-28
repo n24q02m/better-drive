@@ -10,89 +10,290 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
+// DraftRefFormat: refs/cleanup-drafts/<approval-id>
+func DraftRef(approvalID string) string {
+	return "refs/cleanup-drafts/" + approvalID
+}
+
+// IntentRefFormat: refs/cleanup-intents/<approval-id>
+func IntentRef(approvalID string) string {
+	return "refs/cleanup-intents/" + approvalID
+}
+
+// StateRefFormat: refs/cleanup-states/<approval-id>
+func StateRef(approvalID string) string {
+	return "refs/cleanup-states/" + approvalID
+}
+
+// LeaseRefFormat: refs/destination-leases/<identity-hash>
+func LeaseRef(identityHash string) string {
+	return "refs/destination-leases/" + identityHash
+}
+
+// JournalRefFormat: refs/cleanup-journals/<approval-id>
+func JournalRef(approvalID string) string {
+	return "refs/cleanup-journals/" + approvalID
+}
+
+// DraftRecord is the canonical envelope stored in refs/cleanup-drafts/<id>.
+type DraftRecord struct {
+	SchemaVersion int       `json:"schema_version"`
+	DraftDigest   string    `json:"draft_digest"`
+	Approval      Approval  `json:"approval"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// SealedIntentRecord is the canonical sealed record stored in refs/cleanup-intents/<id>.
+type SealedIntentRecord struct {
+	SchemaVersion int       `json:"schema_version"`
+	IntentDigest  string    `json:"intent_digest"`
+	DraftRef      string    `json:"draft_ref"`
+	DraftOID      string    `json:"draft_oid"`
+	Approval      Approval  `json:"approval"`
+	SignatureHex  string    `json:"signature"`
+	Issuer        string    `json:"issuer"`
+	CreatedAt     time.Time `json:"created_at"`
+}
+
+// StateRecord is the hash-chained lifecycle state in refs/cleanup-states/<id>.
+type StateRecord struct {
+	SchemaVersion uint64    `json:"schema_version"`
+	ApprovalID    string    `json:"approval_id"`
+	IntentRef     string    `json:"intent_ref"`
+	IntentOID     string    `json:"intent_oid"`
+	State         string    `json:"state"`
+	ExecutionID   string    `json:"execution_id,omitempty"`
+	Timestamp     time.Time `json:"timestamp"`
+	PreviousOID   string    `json:"previous_oid,omitempty"`
+}
+
+// LeaseRecord is the authoritative destination lease record in refs/destination-leases/<hash>.
+type LeaseRecord struct {
+	SchemaVersion uint64    `json:"schema_version"`
+	IdentityHash  string    `json:"identity_hash"`
+	ApprovalID    string    `json:"approval_id"`
+	Owner         string    `json:"owner"`
+	ExecutionID   string    `json:"execution_id,omitempty"`
+	Generation    uint64    `json:"generation"`
+	State         string    `json:"state"` // free, claimed, needs_reconciliation, consumed
+	Timestamp     time.Time `json:"timestamp"`
+	PreviousOID   string    `json:"previous_oid,omitempty"`
+}
+
+// DraftAuthorityTransport allows create-only draft writing. It is restricted from
+// writing sealed intent, state, lease, or journal refs.
+type DraftAuthorityTransport interface {
+	CreateDraft(ref string, data []byte) (oid string, err error)
+	ReadRef(ref string) (oid string, exists bool, err error)
+	ReadBlob(oid string) ([]byte, error)
+}
+
+// ActivationAuthorityTransport allows creating sealed intent and initial state atomically.
+// It cannot write drafts or runtime journals.
+type ActivationAuthorityTransport interface {
+	CreateSealedIntentAndState(intentRef, intentData, stateRef, stateData string) (intentOID, stateOID string, err error)
+	ReadRef(ref string) (oid string, exists bool, err error)
+	ReadBlob(oid string) ([]byte, error)
+}
+
+// RuntimeAuthorityTransport allows updating state, journal, and destination lease CAS refs.
+// It cannot write drafts or create new sealed intents.
+type RuntimeAuthorityTransport interface {
+	ReadRef(ref string) (oid string, exists bool, err error)
+	ReadBlob(oid string) ([]byte, error)
+	CASState(ref, expectedOID, newData string) (newOID string, err error)
+	CASLease(ref, expectedOID, newData string) (newOID string, err error)
+	AppendJournal(ref, expectedHeadOID, recordData string) (newHeadOID string, err error)
+}
+
+// LocalGitTransport wraps *GitRepo into the authority-scoped transport interfaces.
+type LocalGitTransport struct {
+	Repo *GitRepo
+}
+
+func NewLocalGitTransport(repo *GitRepo) *LocalGitTransport {
+	return &LocalGitTransport{Repo: repo}
+}
+
+func (t *LocalGitTransport) ReadRef(ref string) (string, bool, error) {
+	if t.Repo == nil {
+		return "", false, errors.New("git repo is not configured")
+	}
+	return t.Repo.ReadRef(ref)
+}
+
+func (t *LocalGitTransport) ReadBlob(oid string) ([]byte, error) {
+	if t.Repo == nil {
+		return nil, errors.New("git repo is not configured")
+	}
+	return t.Repo.ReadBlob(oid)
+}
+
+func (t *LocalGitTransport) CreateDraft(ref string, data []byte) (string, error) {
+	if !strings.HasPrefix(ref, "refs/cleanup-drafts/") {
+		return "", fmt.Errorf("draft transport denied writing outside refs/cleanup-drafts/: %q", ref)
+	}
+	oid, err := t.Repo.WriteBlob(data)
+	if err != nil {
+		return "", err
+	}
+	if _, err := t.Repo.CreateRef(ref, oid); err != nil {
+		existingOID, exists, readErr := t.Repo.ReadRef(ref)
+		if readErr == nil && exists {
+			return existingOID, err
+		}
+		return "", err
+	}
+	return oid, nil
+}
+
+func (t *LocalGitTransport) CreateSealedIntentAndState(intentRef, intentData, stateRef, stateData string) (string, string, error) {
+	if !strings.HasPrefix(intentRef, "refs/cleanup-intents/") {
+		return "", "", fmt.Errorf("activation transport denied writing intent outside refs/cleanup-intents/: %q", intentRef)
+	}
+	if !strings.HasPrefix(stateRef, "refs/cleanup-states/") {
+		return "", "", fmt.Errorf("activation transport denied writing state outside refs/cleanup-states/: %q", stateRef)
+	}
+	intentOID, err := t.Repo.WriteBlob([]byte(intentData))
+	if err != nil {
+		return "", "", err
+	}
+	stateOID, err := t.Repo.WriteBlob([]byte(stateData))
+	if err != nil {
+		return "", "", err
+	}
+	if err := t.Repo.AtomicCreateTwoRefs(intentRef, intentOID, stateRef, stateOID); err != nil {
+		return "", "", err
+	}
+	return intentOID, stateOID, nil
+}
+
+func (t *LocalGitTransport) CASState(ref, expectedOID, newData string) (string, error) {
+	if !strings.HasPrefix(ref, "refs/cleanup-states/") {
+		return "", fmt.Errorf("runtime transport denied writing outside refs/cleanup-states/: %q", ref)
+	}
+	newOID, err := t.Repo.WriteBlob([]byte(newData))
+	if err != nil {
+		return "", err
+	}
+	if err := t.Repo.CAS(ref, expectedOID, newOID); err != nil {
+		return "", err
+	}
+	return newOID, nil
+}
+
+func (t *LocalGitTransport) CASLease(ref, expectedOID, newData string) (string, error) {
+	if !strings.HasPrefix(ref, "refs/destination-leases/") {
+		return "", fmt.Errorf("runtime transport denied writing outside refs/destination-leases/: %q", ref)
+	}
+	newOID, err := t.Repo.WriteBlob([]byte(newData))
+	if err != nil {
+		return "", err
+	}
+	if err := t.Repo.CAS(ref, expectedOID, newOID); err != nil {
+		return "", err
+	}
+	return newOID, nil
+}
+
+func (t *LocalGitTransport) AppendJournal(ref, expectedHeadOID, recordData string) (string, error) {
+	if !strings.HasPrefix(ref, "refs/cleanup-journals/") {
+		return "", fmt.Errorf("runtime transport denied writing outside refs/cleanup-journals/: %q", ref)
+	}
+	newOID, err := t.Repo.WriteBlob([]byte(recordData))
+	if err != nil {
+		return "", err
+	}
+	if err := t.Repo.CAS(ref, expectedHeadOID, newOID); err != nil {
+		return "", err
+	}
+	return newOID, nil
+}
+
+// ApprovalStore manages cleanup drafts, sealed intents, and states via private Git.
 type ApprovalStore struct {
-	Root string
+	DraftTransport      DraftAuthorityTransport
+	ActivationTransport ActivationAuthorityTransport
+	RuntimeTransport    RuntimeAuthorityTransport
+	Root                string // Root directory for local bare-repo backend
+	Now                 func() time.Time
 }
 
-func NewApprovalStore(root string) *ApprovalStore { return &ApprovalStore{Root: root} }
-func (store *ApprovalStore) path(subdir, filename string) (string, error) {
-	if store == nil || strings.TrimSpace(store.Root) == "" {
-		return "", errors.New("approval store root is required")
+// NewApprovalStore creates an ApprovalStore backed by a local bare Git repository.
+func NewApprovalStore(root string) *ApprovalStore {
+	if strings.TrimSpace(root) == "" {
+		return &ApprovalStore{Now: time.Now}
 	}
-	if strings.TrimSpace(subdir) == "" || filepath.Base(subdir) != subdir {
-		return "", errors.New("approval store subdirectory is invalid")
-	}
-	if strings.TrimSpace(filename) == "" || filepath.Base(filename) != filename {
-		return "", errors.New("approval store filename is invalid")
-	}
-	base, err := filepath.Abs(filepath.Join(store.Root, subdir))
+	repo, err := NewGitRepo(root)
 	if err != nil {
-		return "", err
+		return &ApprovalStore{Root: root, Now: time.Now}
 	}
-	candidate, err := filepath.Abs(filepath.Join(base, filename))
-	if err != nil {
-		return "", err
+	local := NewLocalGitTransport(repo)
+	return &ApprovalStore{
+		DraftTransport:      local,
+		ActivationTransport: local,
+		RuntimeTransport:    local,
+		Root:                root,
+		Now:                 time.Now,
 	}
-	relative, err := filepath.Rel(base, candidate)
-	if err != nil {
-		return "", err
-	}
-	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", errors.New("approval store path escapes fixed subdirectory")
-	}
-	return candidate, nil
 }
 
-type draftRecord struct {
-	SchemaVersion int      `json:"schema_version"`
-	DraftDigest   string   `json:"draft_digest"`
-	Approval      Approval `json:"approval"`
+func (store *ApprovalStore) now() time.Time {
+	if store != nil && store.Now != nil {
+		return store.Now().UTC()
+	}
+	return time.Now().UTC()
 }
 
-func (store *ApprovalStore) Prepare(approval Approval) (draftRecord, error) {
-	if store == nil || store.Root == "" {
-		return draftRecord{}, errors.New("approval store root is required")
+func (store *ApprovalStore) Prepare(approval Approval) (DraftRecord, error) {
+	if store == nil || store.DraftTransport == nil {
+		return DraftRecord{}, errors.New("draft authority transport is not configured")
 	}
 	canonical, err := CanonicalApproval(approval)
 	if err != nil {
-		return draftRecord{}, err
+		return DraftRecord{}, err
 	}
-	record := draftRecord{SchemaVersion: CurrentApprovalSchemaVersion, DraftDigest: Digest(canonical), Approval: approval}
-	path, err := store.path("cleanup-drafts", approval.ApprovalID+".json")
+	draftRecord := DraftRecord{
+		SchemaVersion: CurrentApprovalSchemaVersion,
+		DraftDigest:   Digest(canonical),
+		Approval:      approval,
+		CreatedAt:     store.now(),
+	}
+	data, err := json.MarshalIndent(draftRecord, "", "  ")
 	if err != nil {
-		return draftRecord{}, err
+		return DraftRecord{}, err
 	}
-	data, err := json.MarshalIndent(record, "", "  ")
-	if err != nil {
-		return draftRecord{}, err
-	}
-	if existing, readErr := os.ReadFile(path); readErr == nil {
-		var current draftRecord
-		if err := json.Unmarshal(existing, &current); err != nil {
-			return draftRecord{}, fmt.Errorf("decode existing draft: %w", err)
+	ref := DraftRef(approval.ApprovalID)
+	_, createErr := store.DraftTransport.CreateDraft(ref, append(data, '\n'))
+	if createErr != nil {
+		// If ref exists, read back and verify exact byte equality.
+		existingOID, exists, readErr := store.DraftTransport.ReadRef(ref)
+		if readErr != nil || !exists {
+			return DraftRecord{}, createErr
 		}
-		currentData, err := json.MarshalIndent(current, "", "  ")
-		if err != nil {
-			return draftRecord{}, err
+		existingBytes, blobErr := store.DraftTransport.ReadBlob(existingOID)
+		if blobErr != nil {
+			return DraftRecord{}, createErr
 		}
-		if !bytes.Equal(bytes.TrimSpace(existing), bytes.TrimSpace(currentData)) || current.DraftDigest != record.DraftDigest {
-			return draftRecord{}, errors.New("foreign draft exists for approval ID")
+		var current DraftRecord
+		if err := json.Unmarshal(existingBytes, &current); err != nil {
+			return DraftRecord{}, fmt.Errorf("decode existing draft: %w", err)
+		}
+		currentCanonical, err := CanonicalApproval(current.Approval)
+		if err != nil || !bytes.Equal(currentCanonical, canonical) || current.DraftDigest != draftRecord.DraftDigest {
+			return DraftRecord{}, errors.New("foreign draft exists for approval ID")
 		}
 		return current, nil
-	} else if !errors.Is(readErr, os.ErrNotExist) {
-		return draftRecord{}, readErr
 	}
-	if err := writeCreateOnly(path, append(data, '\n')); err != nil {
-		return draftRecord{}, err
-	}
-	return record, nil
+	return draftRecord, nil
 }
 
 func (store *ApprovalStore) Activate(intent Intent) error {
-	if store == nil || store.Root == "" {
-		return errors.New("approval store root is required")
+	if store == nil || store.ActivationTransport == nil {
+		return errors.New("activation authority transport is not configured")
 	}
 	if intent.SchemaVersion != CurrentApprovalSchemaVersion || intent.IntentDigest == "" || intent.Approval.ApprovalID == "" || intent.State != ApprovalApproved {
 		return errors.New("sealed intent is incomplete or not approved")
@@ -108,15 +309,18 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		return errors.New("sealed intent signature is not valid Ed25519 hex")
 	}
-	draftPath, err := store.path("cleanup-drafts", intent.Approval.ApprovalID+".json")
-	if err != nil {
-		return err
-	}
-	draftData, err := os.ReadFile(draftPath)
-	if err != nil {
+
+	// 1. Verify draft exists and matches canonical approval.
+	draftRef := DraftRef(intent.Approval.ApprovalID)
+	draftOID, exists, err := store.ActivationTransport.ReadRef(draftRef)
+	if err != nil || !exists {
 		return fmt.Errorf("draft must exist before activation: %w", err)
 	}
-	var draft draftRecord
+	draftData, err := store.ActivationTransport.ReadBlob(draftOID)
+	if err != nil {
+		return fmt.Errorf("read draft blob %q: %w", draftOID, err)
+	}
+	var draft DraftRecord
 	if err := json.Unmarshal(draftData, &draft); err != nil {
 		return fmt.Errorf("decode existing draft: %w", err)
 	}
@@ -125,78 +329,125 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 		draft.DraftDigest != Digest(draftCanonical) || !bytes.Equal(draftCanonical, canonical) {
 		return errors.New("draft approval does not match sealed intent")
 	}
-	intentPath, err := store.path("cleanup-intents", intent.Approval.ApprovalID+".json")
+
+	// 2. Prepare sealed intent and initial state records.
+	now := store.now()
+	sealedRecord := SealedIntentRecord{
+		SchemaVersion: CurrentApprovalSchemaVersion,
+		IntentDigest:  intent.IntentDigest,
+		DraftRef:      draftRef,
+		DraftOID:      draftOID,
+		Approval:      intent.Approval,
+		SignatureHex:  intent.SignatureHex,
+		Issuer:        intent.Approval.Issuer,
+		CreatedAt:     now,
+	}
+	sealedData, err := json.MarshalIndent(sealedRecord, "", "  ")
 	if err != nil {
 		return err
 	}
-	statePath, err := store.path("cleanup-states", intent.Approval.ApprovalID+".json")
+	intentRef := IntentRef(intent.Approval.ApprovalID)
+	stateRef := StateRef(intent.Approval.ApprovalID)
+
+	stateRecord := StateRecord{
+		SchemaVersion: CurrentApprovalSchemaVersion,
+		ApprovalID:    intent.Approval.ApprovalID,
+		IntentRef:     intentRef,
+		IntentOID:     Digest(sealedData),
+		State:         ApprovalApproved,
+		Timestamp:     now,
+	}
+	stateData, err := json.MarshalIndent(stateRecord, "", "  ")
 	if err != nil {
 		return err
 	}
-	intentData, err := json.MarshalIndent(intent, "", "  ")
-	if err != nil {
-		return err
-	}
-	stateData, err := json.MarshalIndent(intent, "", "  ")
-	if err != nil {
-		return err
-	}
-	if existingIntent, existingState := readFile(intentPath), readFile(statePath); existingIntent != nil || existingState != nil {
-		if existingIntent == nil || existingState == nil || !bytes.Equal(bytes.TrimSpace(existingIntent), bytes.TrimSpace(intentData)) || !bytes.Equal(bytes.TrimSpace(existingState), bytes.TrimSpace(stateData)) {
+
+	// 3. Atomically create intent and state refs.
+	intentOID, stateOID, createErr := store.ActivationTransport.CreateSealedIntentAndState(
+		intentRef, string(append(sealedData, '\n')),
+		stateRef, string(append(stateData, '\n')),
+	)
+	if createErr != nil {
+		// Idempotency: check if both exist and match.
+		exIntentOID, exIntentExists, _ := store.ActivationTransport.ReadRef(intentRef)
+		exStateOID, exStateExists, _ := store.ActivationTransport.ReadRef(stateRef)
+		if exIntentExists && exStateExists {
+			exIntentBytes, _ := store.ActivationTransport.ReadBlob(exIntentOID)
+			exStateBytes, _ := store.ActivationTransport.ReadBlob(exStateOID)
+			var curIntent SealedIntentRecord
+			var curState StateRecord
+			if json.Unmarshal(exIntentBytes, &curIntent) == nil && json.Unmarshal(exStateBytes, &curState) == nil {
+				curCanonical, _ := CanonicalApproval(curIntent.Approval)
+				if bytes.Equal(curCanonical, canonical) && curIntent.IntentDigest == intent.IntentDigest &&
+					curIntent.SignatureHex == intent.SignatureHex && curState.State == ApprovalApproved {
+					return nil
+				}
+			}
 			return errors.New("foreign sealed intent or state exists")
 		}
-		return nil
+		if exIntentExists != exStateExists {
+			return errors.New("split sealed intent/state error: reconciliation required")
+		}
+		return createErr
 	}
-	if err := writeCreateOnly(intentPath, append(intentData, '\n')); err != nil {
-		return err
-	}
-	if err := writeCreateOnly(statePath, append(stateData, '\n')); err != nil {
-		return fmt.Errorf("sealed intent created but state activation failed: %w", err)
+	if intentOID == "" || stateOID == "" {
+		return errors.New("sealed intent or state OID is empty")
 	}
 	return nil
 }
 
 func (store *ApprovalStore) ReadState(approvalID string) (Intent, error) {
-	if store == nil || store.Root == "" || approvalID == "" {
-		return Intent{}, errors.New("approval store root and approval ID are required")
+	if store == nil {
+		return Intent{}, errors.New("approval store is nil")
 	}
 	if err := validateOpaqueApprovalID(approvalID); err != nil {
 		return Intent{}, err
 	}
-	path, err := store.path("cleanup-states", approvalID+".json")
+	transport := store.RuntimeTransport
+	if transport == nil {
+		if store.ActivationTransport != nil {
+			transport = store.ActivationTransport.(RuntimeAuthorityTransport)
+		}
+	}
+	if transport == nil {
+		return Intent{}, errors.New("runtime authority transport is not configured")
+	}
+	stateRef := StateRef(approvalID)
+	stateOID, exists, err := transport.ReadRef(stateRef)
 	if err != nil {
 		return Intent{}, err
 	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return Intent{}, err
+	if !exists {
+		return Intent{}, fmt.Errorf("state ref %q does not exist", stateRef)
 	}
-	var intent Intent
-	if err := json.Unmarshal(data, &intent); err != nil {
+	stateData, err := transport.ReadBlob(stateOID)
+	if err != nil {
+		return Intent{}, fmt.Errorf("read state blob %q: %w", stateOID, err)
+	}
+	var stateRecord StateRecord
+	if err := json.Unmarshal(stateData, &stateRecord); err != nil {
 		return Intent{}, fmt.Errorf("decode approval state: %w", err)
 	}
-	return intent, nil
-}
 
-func writeCreateOnly(path string, data []byte) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		return err
+	intentRef := stateRecord.IntentRef
+	intentOID, intentExists, err := transport.ReadRef(intentRef)
+	if err != nil || !intentExists {
+		return Intent{}, fmt.Errorf("sealed intent ref %q absent for state %q: %w", intentRef, approvalID, err)
 	}
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	intentData, err := transport.ReadBlob(intentOID)
 	if err != nil {
-		return err
+		return Intent{}, fmt.Errorf("read intent blob %q: %w", intentOID, err)
 	}
-	defer file.Close()
-	if _, err := file.Write(data); err != nil {
-		return err
+	var sealed SealedIntentRecord
+	if err := json.Unmarshal(intentData, &sealed); err != nil {
+		return Intent{}, fmt.Errorf("decode sealed intent: %w", err)
 	}
-	return file.Sync()
-}
-
-func readFile(path string) []byte {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return data
+	return Intent{
+		SchemaVersion: sealed.SchemaVersion,
+		IntentDigest:  sealed.IntentDigest,
+		Approval:      sealed.Approval,
+		SignatureHex:  sealed.SignatureHex,
+		State:         stateRecord.State,
+		CreatedAt:     sealed.CreatedAt,
+	}, nil
 }

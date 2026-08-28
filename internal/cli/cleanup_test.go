@@ -2,6 +2,9 @@ package cli
 
 import (
 	"bytes"
+	"crypto/ed25519"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -69,6 +72,106 @@ func writeCleanupTestRootSet(t *testing.T, dir string) string {
 		t.Fatal(err)
 	}
 	return path
+}
+
+func writeCleanupTestApproval(t *testing.T, dir string) (string, cleanup.Approval) {
+	t.Helper()
+	approval := cleanup.Approval{
+		SchemaVersion:  cleanup.CurrentApprovalSchemaVersion,
+		ApprovalID:     "approval-test-1",
+		ManifestDigest: strings.Repeat("a", 64),
+		AccountID:      "account-1",
+		RootID:         "root-1",
+		Mode:           cleanup.ModeQuarantine,
+		MaxObjects:     10,
+		MaxBytes:       1000,
+		ExpiresAt:      time.Now().UTC().Add(time.Hour),
+		Nonce:          "nonce-123",
+		Issuer:         "sec-team",
+		FixtureDigest:  strings.Repeat("f", 64),
+	}
+	path := filepath.Join(dir, "approval.json")
+	data, err := cleanup.CanonicalApproval(approval)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path, approval
+}
+
+func TestCleanupApprovalWorkflowCommands(t *testing.T) {
+	dir := t.TempDir()
+	storePath := filepath.Join(dir, "approval-store")
+	approvalPath, approval := writeCleanupTestApproval(t, dir)
+
+	// 1. Canonicalize command
+	root := newRootCmd()
+	var canonOut bytes.Buffer
+	root.SetOut(&canonOut)
+	root.SetErr(&canonOut)
+	root.SetArgs([]string{"cleanup", "approval", "canonicalize", "--approval", approvalPath})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("canonicalize error = %v", err)
+	}
+	if !strings.Contains(canonOut.String(), `"approval_id":"approval-test-1"`) {
+		t.Fatalf("unexpected canonicalize output: %s", canonOut.String())
+	}
+
+	// 2. Prepare command
+	root = newRootCmd()
+	var prepOut bytes.Buffer
+	root.SetOut(&prepOut)
+	root.SetErr(&prepOut)
+	root.SetArgs([]string{"cleanup", "approval", "prepare", "--approval", approvalPath, "--store", storePath, "--format", "json"})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("prepare error = %v", err)
+	}
+	if !strings.Contains(prepOut.String(), `"draft_digest"`) {
+		t.Fatalf("unexpected prepare output: %s", prepOut.String())
+	}
+
+	// 3. Sign offline and Activate command
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sig, err := cleanup.SignApproval(approval, priv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	trustRoot, err := cleanup.NewTrustRoot("root-1", approval.Issuer, cleanup.CleanupTrustPurpose, pub, time.Now().UTC().Add(-time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootData, err := json.MarshalIndent(trustRoot, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootPath := filepath.Join(dir, "trust-root.json")
+	if err := os.WriteFile(rootPath, rootData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root = newRootCmd()
+	var actOut bytes.Buffer
+	root.SetOut(&actOut)
+	root.SetErr(&actOut)
+	root.SetArgs([]string{
+		"cleanup", "approval", "activate",
+		"--approval", approvalPath,
+		"--signature", hex.EncodeToString(sig),
+		"--root", rootPath,
+		"--store", storePath,
+		"--format", "json",
+	})
+	if _, err := root.ExecuteC(); err != nil {
+		t.Fatalf("activate error = %v", err)
+	}
+	if !strings.Contains(actOut.String(), `"state": "approved"`) {
+		t.Fatalf("unexpected activate output: %s", actOut.String())
+	}
 }
 
 func TestCleanupInventoryWritesCompleteAggregateAndState(t *testing.T) {

@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/n24q02m/better-drive/internal/driveapi"
 	"github.com/n24q02m/better-drive/internal/r2api"
 )
 
@@ -281,23 +282,24 @@ type DriveQuarantineIntent struct {
 }
 
 type Action struct {
-	ID               string                  `json:"id"`
-	RequestID        string                  `json:"request_id"`
-	PlanID           string                  `json:"plan_id"`
-	PolicyDigest     string                  `json:"policy_digest"`
-	QuarantineTarget string                  `json:"quarantine_target"`
-	Kind             ActionKind              `json:"kind"`
-	Provider         Provider                `json:"provider"`
-	Object           Object                  `json:"object"`
-	Target           Object                  `json:"target,omitempty"`
-	Optional         bool                    `json:"optional"`
-	DriveIntent      *DriveQuarantineIntent  `json:"drive_quarantine_intent,omitempty"`
-	R2Copy           r2api.CopyRequest       `json:"r2_copy,omitempty"`
-	R2CopyCapability r2api.CopyCapability   `json:"r2_copy_capability,omitempty"`
-	R2Delete         r2api.DeleteRequest     `json:"r2_delete,omitempty"`
-	R2DeleteCapability r2api.DeleteCapability `json:"r2_delete_capability,omitempty"`
-	R2Purge          r2api.PurgeRequest      `json:"r2_purge,omitempty"`
-	R2PurgeCapability r2api.PurgeCapability  `json:"r2_purge_capability,omitempty"`
+	ID               string                     `json:"id"`
+	RequestID        string                     `json:"request_id"`
+	PlanID           string                     `json:"plan_id"`
+	PolicyDigest     string                     `json:"policy_digest"`
+	QuarantineTarget string                     `json:"quarantine_target"`
+	Kind             ActionKind                 `json:"kind"`
+	Provider         Provider                   `json:"provider"`
+	Object           Object                     `json:"object"`
+	Target           Object                     `json:"target,omitempty"`
+	Optional         bool                       `json:"optional"`
+	DriveIntent      *DriveQuarantineIntent     `json:"drive_quarantine_intent,omitempty"`
+	DriveCapability  driveapi.MutationCapability `json:"drive_capability,omitempty"`
+	R2Copy           r2api.CopyRequest          `json:"r2_copy,omitempty"`
+	R2CopyCapability r2api.CopyCapability      `json:"r2_copy_capability,omitempty"`
+	R2Delete         r2api.DeleteRequest        `json:"r2_delete,omitempty"`
+	R2DeleteCapability r2api.DeleteCapability    `json:"r2_delete_capability,omitempty"`
+	R2Purge          r2api.PurgeRequest         `json:"r2_purge,omitempty"`
+	R2PurgeCapability r2api.PurgeCapability     `json:"r2_purge_capability,omitempty"`
 }
 
 type Plan struct {
@@ -443,6 +445,9 @@ func quarantineTarget(policy Policy, object Object) string {
 	}
 }
 
+type DriveProvider interface {
+	Quarantine(context.Context, driveapi.QuarantineRequest, driveapi.MutationCapability) (driveapi.MutationReceipt, error)
+}
 
 type R2Provider interface {
 	Head(context.Context, r2api.ObjectIdentity) (r2api.Object, error)
@@ -554,20 +559,22 @@ type Report struct {
 }
 
 type Engine struct {
-	R2      R2Provider
-	Journal *Journal
-	Lease   Lease
-	Now     func() time.Time
-	blocked map[string]struct{}
+	Drive        DriveProvider
+	R2           R2Provider
+	Journal      *Journal
+	Lease        Lease
+	TrustChecker func(now time.Time) (string, error)
+	LeaseChecker func(ctx context.Context, lease Lease) error
+	Now          func() time.Time
+	blocked      map[string]struct{}
 }
+
 func NewEngine(r2 R2Provider, journal *Journal) *Engine {
 	if journal == nil {
 		journal = NewJournal()
 	}
 	return &Engine{R2: r2, Journal: journal, Now: time.Now, blocked: make(map[string]struct{})}
 }
-
-
 
 func (engine *Engine) Apply(ctx context.Context, plan Plan, currentPolicy Policy) (Report, error) {
 	if engine == nil || engine.Journal == nil {
@@ -599,7 +606,32 @@ func (engine *Engine) Apply(ctx context.Context, plan Plan, currentPolicy Policy
 		engine.blocked = make(map[string]struct{})
 	}
 	report := Report{Lease: engine.Lease}
+
+	// Recheck signed active trust head and destination lease before each batch
+	if engine.TrustChecker != nil {
+		if _, err := engine.TrustChecker(now); err != nil {
+			return report, fmt.Errorf("active trust head recheck failed: %w", err)
+		}
+	}
+	if engine.LeaseChecker != nil {
+		if err := engine.LeaseChecker(ctx, engine.Lease); err != nil {
+			return report, fmt.Errorf("destination lease recheck failed: %w", err)
+		}
+	}
+
 	for _, action := range plan.Actions {
+		// Recheck before each action in batch
+		if engine.TrustChecker != nil {
+			if _, err := engine.TrustChecker(now); err != nil {
+				return report, fmt.Errorf("active trust head recheck failed: %w", err)
+			}
+		}
+		if engine.LeaseChecker != nil {
+			if err := engine.LeaseChecker(ctx, engine.Lease); err != nil {
+				return report, fmt.Errorf("destination lease recheck failed: %w", err)
+			}
+		}
+
 		if _, blocked := engine.blocked[actionJournalKey(plan, action)]; blocked {
 			return report, ErrUnknownSettlement
 		}
@@ -654,7 +686,34 @@ func (engine *Engine) applyAction(ctx context.Context, action Action) error {
 	case ActionNoop:
 		return nil
 	case ActionDriveQuarantineIntent:
-		return errors.New("Drive quarantine execution is unavailable without a protected provider broker")
+		if engine.Drive == nil || action.DriveCapability.Signature == "" {
+			return errors.New("Drive quarantine execution is unavailable without a protected provider broker")
+		}
+		if action.DriveIntent == nil {
+			return errors.New("Drive quarantine requires exact intent")
+		}
+		receipt, err := engine.Drive.Quarantine(ctx, driveapi.QuarantineRequest{
+			AccountID:          action.DriveIntent.AccountID,
+			RootID:             action.DriveIntent.RootID,
+			Namespace:          action.DriveIntent.Namespace,
+			ObjectID:           action.DriveIntent.ObjectID,
+			ParentID:           action.DriveIntent.ParentID,
+			QuarantineParentID: action.QuarantineTarget,
+			ExpectedETag:       action.DriveIntent.ExpectedETag,
+			Version:            action.DriveIntent.Version,
+			Generation:         action.DriveIntent.Generation,
+			Size:               action.DriveIntent.Size,
+			Hash:               action.DriveIntent.Hash,
+			RequestID:          action.RequestID,
+		}, action.DriveCapability)
+		if err != nil {
+			return err
+		}
+		if !receipt.ReadbackVerified || receipt.RequestID != action.RequestID || receipt.ObjectID != action.DriveIntent.ObjectID ||
+			receipt.State != "quarantined" {
+			return unknownRetentionError(errors.New("Drive quarantine readback does not match request"))
+		}
+		return nil
 	case ActionQuarantineCopy:
 		if engine.R2 == nil || action.R2CopyCapability.Signature == "" {
 			return errors.New("R2 quarantine copy requires exact capability")
@@ -710,7 +769,7 @@ func unknownRetentionError(cause error) error {
 }
 
 func isUnknownSettlement(err error) bool {
-	return errors.Is(err, ErrUnknownSettlement) || errors.Is(err, r2api.ErrUnknownSettlement)
+	return errors.Is(err, ErrUnknownSettlement) || errors.Is(err, r2api.ErrUnknownSettlement) || errors.Is(err, driveapi.ErrUnknownSettlement)
 }
 
 func (engine *Engine) outcomeRecord(plan Plan, action Action, after, outcome string, now time.Time) JournalRecord {
