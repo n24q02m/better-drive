@@ -18,7 +18,7 @@ import (
 var magic = []byte("BDART1\x00")
 
 const (
-	chunkSize   = 64 * 1024
+	chunkSize    = 64 * 1024
 	spoolPattern = "better-drive-artifact-*"
 )
 

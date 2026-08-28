@@ -12,9 +12,9 @@ import (
 )
 
 var (
-	_ Resolver = ResolverFunc(nil)
+	_ Resolver                                                           = ResolverFunc(nil)
 	_ func(io.Writer, io.Reader, Resolver, Metadata) (SealResult, error) = Seal
-	_ func(io.Writer, io.Reader, Resolver, Metadata) error = Open
+	_ func(io.Writer, io.Reader, Resolver, Metadata) error               = Open
 )
 
 func testKey() []byte {

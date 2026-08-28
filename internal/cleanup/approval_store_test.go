@@ -46,7 +46,6 @@ func TestApprovalStoreRejectsPathTraversalApprovalIDs(t *testing.T) {
 	}
 }
 
-
 func TestApprovalStoreActivateAndReadState(t *testing.T) {
 	store := NewApprovalStore(t.TempDir())
 	approval := validApproval()

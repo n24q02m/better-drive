@@ -34,7 +34,7 @@ func manifestCapture(t *testing.T) (Manifest, RootSet, InventoryAggregate) {
 		Roots: []Root{{
 			Provider: "drive", AccountID: manifest.AccountID, RootID: manifest.RootID, Namespace: manifest.Namespace,
 			ExpectedPages: 1,
-			Pages: []Page{{Number: 1, ParentID: manifest.RootID, Cursor: "root-page-1", Status: PageComplete, Objects: objects}},
+			Pages:         []Page{{Number: 1, ParentID: manifest.RootID, Cursor: "root-page-1", Status: PageComplete, Objects: objects}},
 		}},
 	}
 	var err error

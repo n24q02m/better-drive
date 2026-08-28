@@ -114,7 +114,6 @@ func TestValidateManifestRejectsTrashMode(t *testing.T) {
 	}
 }
 
-
 func TestValidateManifestRejectsUnsafeClassesAndDuplicateIDs(t *testing.T) {
 	m := validManifest()
 	m.Objects[0].Class = ClassActive

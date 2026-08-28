@@ -330,7 +330,6 @@ func folderIsAncestor(parents map[string]string, start, target string) bool {
 	return false
 }
 
-
 func finalizeInventoryRoot(root *cleanup.Root, locations map[string]objectLocation, maxDepth, maxObjects int) error {
 	objects := make(map[string]cleanup.Object)
 	children := make(map[string][]string)

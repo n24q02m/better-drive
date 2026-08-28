@@ -32,7 +32,6 @@ func TestCanonicalApprovalRejectsTrashMode(t *testing.T) {
 	}
 }
 
-
 func TestApprovalSignVerifyAndTamperRejects(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {

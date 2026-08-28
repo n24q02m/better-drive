@@ -267,37 +267,37 @@ const (
 )
 
 type DriveQuarantineIntent struct {
-	ObjectID    string `json:"object_id"`
-	AccountID   string `json:"account_id"`
-	RootID      string `json:"root_id"`
-	Namespace   string `json:"namespace"`
-	ParentID    string `json:"parent_id"`
+	ObjectID     string `json:"object_id"`
+	AccountID    string `json:"account_id"`
+	RootID       string `json:"root_id"`
+	Namespace    string `json:"namespace"`
+	ParentID     string `json:"parent_id"`
 	ExpectedETag string `json:"expected_etag"`
-	Version     string `json:"version"`
-	Generation  string `json:"generation"`
-	Size        int64  `json:"size"`
-	Hash        string `json:"hash"`
-	RequestID   string `json:"request_id"`
+	Version      string `json:"version"`
+	Generation   string `json:"generation"`
+	Size         int64  `json:"size"`
+	Hash         string `json:"hash"`
+	RequestID    string `json:"request_id"`
 }
 
 type Action struct {
-	ID               string                  `json:"id"`
-	RequestID        string                  `json:"request_id"`
-	PlanID           string                  `json:"plan_id"`
-	PolicyDigest     string                  `json:"policy_digest"`
-	QuarantineTarget string                  `json:"quarantine_target"`
-	Kind             ActionKind              `json:"kind"`
-	Provider         Provider                `json:"provider"`
-	Object           Object                  `json:"object"`
-	Target           Object                  `json:"target,omitempty"`
-	Optional         bool                    `json:"optional"`
-	DriveIntent      *DriveQuarantineIntent  `json:"drive_quarantine_intent,omitempty"`
-	R2Copy           r2api.CopyRequest       `json:"r2_copy,omitempty"`
-	R2CopyCapability r2api.CopyCapability   `json:"r2_copy_capability,omitempty"`
-	R2Delete         r2api.DeleteRequest     `json:"r2_delete,omitempty"`
+	ID                 string                 `json:"id"`
+	RequestID          string                 `json:"request_id"`
+	PlanID             string                 `json:"plan_id"`
+	PolicyDigest       string                 `json:"policy_digest"`
+	QuarantineTarget   string                 `json:"quarantine_target"`
+	Kind               ActionKind             `json:"kind"`
+	Provider           Provider               `json:"provider"`
+	Object             Object                 `json:"object"`
+	Target             Object                 `json:"target,omitempty"`
+	Optional           bool                   `json:"optional"`
+	DriveIntent        *DriveQuarantineIntent `json:"drive_quarantine_intent,omitempty"`
+	R2Copy             r2api.CopyRequest      `json:"r2_copy,omitempty"`
+	R2CopyCapability   r2api.CopyCapability   `json:"r2_copy_capability,omitempty"`
+	R2Delete           r2api.DeleteRequest    `json:"r2_delete,omitempty"`
 	R2DeleteCapability r2api.DeleteCapability `json:"r2_delete_capability,omitempty"`
-	R2Purge          r2api.PurgeRequest      `json:"r2_purge,omitempty"`
-	R2PurgeCapability r2api.PurgeCapability  `json:"r2_purge_capability,omitempty"`
+	R2Purge            r2api.PurgeRequest     `json:"r2_purge,omitempty"`
+	R2PurgeCapability  r2api.PurgeCapability  `json:"r2_purge_capability,omitempty"`
 }
 
 type Plan struct {
@@ -443,7 +443,6 @@ func quarantineTarget(policy Policy, object Object) string {
 	}
 }
 
-
 type R2Provider interface {
 	Head(context.Context, r2api.ObjectIdentity) (r2api.Object, error)
 	Copy(context.Context, r2api.CopyRequest, r2api.CopyCapability) (r2api.CopyReceipt, error)
@@ -560,14 +559,13 @@ type Engine struct {
 	Now     func() time.Time
 	blocked map[string]struct{}
 }
+
 func NewEngine(r2 R2Provider, journal *Journal) *Engine {
 	if journal == nil {
 		journal = NewJournal()
 	}
 	return &Engine{R2: r2, Journal: journal, Now: time.Now, blocked: make(map[string]struct{})}
 }
-
-
 
 func (engine *Engine) Apply(ctx context.Context, plan Plan, currentPolicy Policy) (Report, error) {
 	if engine == nil || engine.Journal == nil {

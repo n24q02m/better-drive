@@ -122,7 +122,6 @@ func TestBuildStateRejectsSelfAssertedCompleteAggregate(t *testing.T) {
 	}
 }
 
-
 func TestBuildAggregateRejectsByteCountOverflow(t *testing.T) {
 	roots := validRootSet()
 	roots.Roots[0].Pages[0].Objects[0].Size = maxInt64
@@ -176,7 +175,6 @@ func TestDecodeRootSetRejectsPreviousCurrentSchema(t *testing.T) {
 		t.Fatalf("DecodeRootSet previous current schema = %v, want explicit rejection", err)
 	}
 }
-
 
 func TestDecodeRootSetRejectsLegacySchema(t *testing.T) {
 	rootSet := validRootSet()

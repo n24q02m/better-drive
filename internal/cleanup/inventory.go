@@ -17,7 +17,7 @@ const (
 const maxInt64 = int64(1<<63 - 1)
 
 const (
-	maxCurrentInventoryDepth  = 1024
+	maxCurrentInventoryDepth   = 1024
 	maxCurrentInventoryObjects = 1_000_000
 )
 
@@ -530,7 +530,6 @@ func rootPhysicalKey(root Root) string {
 func physicalObjectKey(object Object) string {
 	return strings.Join([]string{object.Provider, object.AccountID, object.ID}, "\x00")
 }
-
 
 func rootSetDigest(rootSet RootSet) (string, error) {
 	copySet := rootSet

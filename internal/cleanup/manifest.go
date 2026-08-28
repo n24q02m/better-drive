@@ -26,7 +26,6 @@ const (
 	ObjectTypeFolder ObjectType = "folder"
 )
 
-
 type ObjectClass string
 
 const (
@@ -47,33 +46,33 @@ type Budget struct {
 }
 
 type Object struct {
-	ID                  string      `json:"id"`
-	ParentID            string      `json:"parent_id"`
-	Name                string      `json:"name"`
-	Path                string      `json:"path"`
-	ObjectType          ObjectType  `json:"object_type"`
-	ContentHash         string      `json:"content_hash"`
-	Size                int64       `json:"size"`
-	Provider            string      `json:"provider"`
-	AccountID           string      `json:"account_id"`
-	RootID              string      `json:"root_id"`
-	Namespace           string      `json:"namespace"`
-	Version             string      `json:"version"`
-	Generation          string      `json:"generation"`
-	ETag                string      `json:"etag"`
-	ModifiedAt          time.Time   `json:"modified_at"`
-	Trashed             bool        `json:"trashed"`
-	Depth               int         `json:"depth"`
-	ChildrenComplete    bool        `json:"children_complete"`
-	ChildCount          int         `json:"child_count"`
-	SubtreeComplete     bool        `json:"subtree_complete"`
-	SubtreeObjectCount  int         `json:"subtree_object_count"`
-	Class               ObjectClass `json:"class"`
-	SubtreeWriterFence  string      `json:"subtree_writer_fence,omitempty"`
-	EmptyCheckIDs       []string    `json:"empty_check_ids,omitempty"`
-	RetainedPeerID      string      `json:"retained_peer_id,omitempty"`
-	OwnershipMarker     string      `json:"ownership_marker,omitempty"`
-	RestoreEvidence     string      `json:"restore_evidence,omitempty"`
+	ID                 string      `json:"id"`
+	ParentID           string      `json:"parent_id"`
+	Name               string      `json:"name"`
+	Path               string      `json:"path"`
+	ObjectType         ObjectType  `json:"object_type"`
+	ContentHash        string      `json:"content_hash"`
+	Size               int64       `json:"size"`
+	Provider           string      `json:"provider"`
+	AccountID          string      `json:"account_id"`
+	RootID             string      `json:"root_id"`
+	Namespace          string      `json:"namespace"`
+	Version            string      `json:"version"`
+	Generation         string      `json:"generation"`
+	ETag               string      `json:"etag"`
+	ModifiedAt         time.Time   `json:"modified_at"`
+	Trashed            bool        `json:"trashed"`
+	Depth              int         `json:"depth"`
+	ChildrenComplete   bool        `json:"children_complete"`
+	ChildCount         int         `json:"child_count"`
+	SubtreeComplete    bool        `json:"subtree_complete"`
+	SubtreeObjectCount int         `json:"subtree_object_count"`
+	Class              ObjectClass `json:"class"`
+	SubtreeWriterFence string      `json:"subtree_writer_fence,omitempty"`
+	EmptyCheckIDs      []string    `json:"empty_check_ids,omitempty"`
+	RetainedPeerID     string      `json:"retained_peer_id,omitempty"`
+	OwnershipMarker    string      `json:"ownership_marker,omitempty"`
+	RestoreEvidence    string      `json:"restore_evidence,omitempty"`
 }
 
 type Manifest struct {
