@@ -45,7 +45,7 @@ func createSecureSpool() (*os.File, error) {
 		handle, err := windows.CreateFile(
 			pathPtr,
 			windows.GENERIC_READ|windows.GENERIC_WRITE|windows.READ_CONTROL|windows.DELETE,
-			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			0,
 			&securityAttributes,
 			windows.CREATE_NEW,
 			windows.FILE_ATTRIBUTE_TEMPORARY|windows.FILE_FLAG_DELETE_ON_CLOSE,
@@ -62,7 +62,7 @@ func createSecureSpool() (*os.File, error) {
 			_ = windows.CloseHandle(handle)
 			return nil, errors.New("create artifact spool handle failed")
 		}
-		if err := verifyWindowsSpool(file, path, sidText); err != nil {
+		if err := verifyWindowsSpool(file, sidText); err != nil {
 			_ = file.Close()
 			_ = os.Remove(path)
 			return nil, err
@@ -91,7 +91,7 @@ func randomSpoolPath() (string, error) {
 	return filepath.Join(os.TempDir(), "better-drive-artifact-"+hex.EncodeToString(randomBytes[:])+".tmp"), nil
 }
 
-func verifyWindowsSpool(file *os.File, path, sidText string) error {
+func verifyWindowsSpool(file *os.File, sidText string) error {
 	var fileInfo windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &fileInfo); err != nil {
 		return err
@@ -99,8 +99,8 @@ func verifyWindowsSpool(file *os.File, path, sidText string) error {
 	if fileInfo.FileAttributes&(windows.FILE_ATTRIBUTE_DIRECTORY|windows.FILE_ATTRIBUTE_REPARSE_POINT) != 0 {
 		return errors.New("artifact spool is not a private regular file")
 	}
-	securityDescriptor, err := windows.GetNamedSecurityInfo(
-		path,
+	securityDescriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
 		windows.SE_FILE_OBJECT,
 		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
 	)
