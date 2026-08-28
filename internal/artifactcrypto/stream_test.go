@@ -5,16 +5,38 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"io"
+	"os"
 	"strings"
 	"testing"
 )
 
+var (
+	_ Resolver = ResolverFunc(nil)
+	_ func(io.Writer, io.Reader, Resolver, Metadata) (SealResult, error) = Seal
+	_ func(io.Writer, io.Reader, Resolver, Metadata) error = Open
+)
+
+func testKey() []byte {
+	return []byte("0123456789abcdef0123456789abcdef")
+}
+
+func testMetadata() Metadata {
+	return Metadata{
+		RestoreSetID: "set-1",
+		Component:    "state",
+		KeyRef:       "key:v1",
+		KeyVersion:   1,
+	}
+}
+
 func TestSealOpenRoundTripBindsMetadataAndDigest(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
+	key := testKey()
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): key}
 	plaintext := bytes.Repeat([]byte("restore-data-"), 10000)
-	metadata := Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "key:v1"}
 	var sealed bytes.Buffer
-	result, err := Seal(&sealed, bytes.NewReader(plaintext), key, metadata)
+	result, err := Seal(&sealed, bytes.NewReader(plaintext), resolver, metadata)
 	if err != nil {
 		t.Fatalf("Seal: %v", err)
 	}
@@ -22,7 +44,7 @@ func TestSealOpenRoundTripBindsMetadataAndDigest(t *testing.T) {
 		t.Fatalf("Seal result = %#v, want both digests", result)
 	}
 	var opened bytes.Buffer
-	if err := Open(&opened, bytes.NewReader(sealed.Bytes()), key, metadata); err != nil {
+	if err := Open(&opened, bytes.NewReader(sealed.Bytes()), resolver, metadata); err != nil {
 		t.Fatalf("Open: %v", err)
 	}
 	if !bytes.Equal(opened.Bytes(), plaintext) {
@@ -31,37 +53,59 @@ func TestSealOpenRoundTripBindsMetadataAndDigest(t *testing.T) {
 }
 
 func TestOpenRejectsTamperTruncationWrongKeyAndMetadataDrift(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
-	metadata := Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "key:v1"}
+	key := testKey()
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): key}
 	var sealed bytes.Buffer
-	if _, err := Seal(&sealed, strings.NewReader("secret payload"), key, metadata); err != nil {
+	if _, err := Seal(&sealed, strings.NewReader("secret payload"), resolver, metadata); err != nil {
 		t.Fatal(err)
 	}
 	cases := []struct {
-		name string
-		data []byte
-		key  []byte
-		meta Metadata
+		name     string
+		data     []byte
+		resolver Resolver
+		meta     Metadata
 	}{
-		{name: "tamper", data: append([]byte(nil), sealed.Bytes()[:len(sealed.Bytes())-1]...), key: key, meta: metadata},
-		{name: "wrong key", data: sealed.Bytes(), key: []byte("abcdef0123456789abcdef0123456789"), meta: metadata},
-		{name: "metadata drift", data: sealed.Bytes(), key: key, meta: Metadata{RestoreSetID: "other", Component: "state", KeyRef: "key:v1"}},
+		{
+			name:     "tamper",
+			data:     append([]byte(nil), sealed.Bytes()[:len(sealed.Bytes())-1]...),
+			resolver: resolver,
+			meta:     metadata,
+		},
+		{
+			name: "wrong key",
+			data: sealed.Bytes(),
+			resolver: testResolver{
+				metadata.Reference(): []byte("abcdef0123456789abcdef0123456789"),
+			},
+			meta: metadata,
+		},
+		{
+			name:     "metadata drift",
+			data:     sealed.Bytes(),
+			resolver: resolver,
+			meta:     Metadata{RestoreSetID: "other", Component: "state", KeyRef: "key:v1", KeyVersion: 1},
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			var out bytes.Buffer
-			if err := Open(&out, bytes.NewReader(tc.data), tc.key, tc.meta); err == nil {
+			if err := Open(&out, bytes.NewReader(tc.data), tc.resolver, tc.meta); err == nil {
 				t.Fatal("Open succeeded, want fail-closed rejection")
+			}
+			if out.Len() != 0 {
+				t.Fatalf("destination changed after rejection: %q", out.String())
 			}
 		})
 	}
 }
 
 func TestOpenRejectsOversizedFrameBeforeReadingCiphertext(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
-	metadata := Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "key:v1"}
+	key := testKey()
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): key}
 	var sealed bytes.Buffer
-	if _, err := Seal(&sealed, strings.NewReader("secret payload"), key, metadata); err != nil {
+	if _, err := Seal(&sealed, strings.NewReader("secret payload"), resolver, metadata); err != nil {
 		t.Fatal(err)
 	}
 	data := append([]byte(nil), sealed.Bytes()...)
@@ -73,9 +117,12 @@ func TestOpenRejectsOversizedFrameBeforeReadingCiphertext(t *testing.T) {
 	binary.BigEndian.PutUint32(data[cipherLenOffset:cipherLenOffset+4], chunkSize+1+16)
 
 	var out bytes.Buffer
-	err := Open(&out, bytes.NewReader(data), key, metadata)
+	err := Open(&out, bytes.NewReader(data), resolver, metadata)
 	if err == nil || !strings.Contains(err.Error(), "frame header") {
 		t.Fatalf("Open error = %v, want oversized-frame header rejection", err)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("destination changed after oversized-frame rejection: %q", out.String())
 	}
 }
 
@@ -90,7 +137,7 @@ func (r testResolver) Resolve(reference KeyReference) ([]byte, error) {
 }
 
 func TestSealOpenResolvesTypedReferenceAndNeverSerializesKey(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
+	key := testKey()
 	metadata := Metadata{RestoreSetID: "set-typed", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
 	resolver := testResolver{metadata.Reference(): key}
 	var sealed bytes.Buffer
@@ -110,7 +157,7 @@ func TestSealOpenResolvesTypedReferenceAndNeverSerializesKey(t *testing.T) {
 }
 
 func TestOpenRejectsWrongReferenceVersionAndLeavesDestinationUnchanged(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
+	key := testKey()
 	metadata := Metadata{RestoreSetID: "set-typed", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
 	resolver := testResolver{metadata.Reference(): key}
 	var sealed bytes.Buffer
@@ -145,14 +192,9 @@ func (r *interruptedReader) Read(p []byte) (int, error) {
 	return len("partial"), nil
 }
 
-func TestSealAndOpenFailuresLeaveDestinationUnchanged(t *testing.T) {
-	key := []byte("0123456789abcdef0123456789abcdef")
-	metadata := Metadata{RestoreSetID: "set-typed", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
-	resolver := testResolver{metadata.Reference(): key}
-	var sealed bytes.Buffer
-	if _, err := Seal(&sealed, strings.NewReader("secret payload"), resolver, metadata); err != nil {
-		t.Fatal(err)
-	}
+func TestSealSourceFailureLeavesDestinationUntouched(t *testing.T) {
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
 	var sealOut bytes.Buffer
 	sealOut.WriteString("unchanged")
 	if _, err := Seal(&sealOut, &interruptedReader{}, resolver, metadata); err == nil {
@@ -161,14 +203,245 @@ func TestSealAndOpenFailuresLeaveDestinationUnchanged(t *testing.T) {
 	if sealOut.String() != "unchanged" {
 		t.Fatalf("Seal wrote residue after source interruption: %q", sealOut.String())
 	}
-	data := append([]byte(nil), sealed.Bytes()...)
-	data[len(data)-1] ^= 0x01
-	var openOut bytes.Buffer
-	openOut.WriteString("unchanged")
-	if err := Open(&openOut, bytes.NewReader(data), resolver, metadata); err == nil {
-		t.Fatal("Open accepted tampered footer")
+}
+
+func TestOpenAuthenticationAndTruncationFailuresLeaveDestinationUntouched(t *testing.T) {
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader("secret payload"), resolver, metadata); err != nil {
+		t.Fatal(err)
 	}
-	if openOut.String() != "unchanged" {
-		t.Fatalf("Open wrote residue after footer tamper: %q", openOut.String())
+	cases := []struct {
+		name string
+		data []byte
+	}{
+		{name: "authentication", data: tamperLastByte(sealed.Bytes())},
+		{name: "truncation", data: append([]byte(nil), sealed.Bytes()[:len(sealed.Bytes())-1]...)},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var out bytes.Buffer
+			out.WriteString("unchanged")
+			if err := Open(&out, bytes.NewReader(tc.data), resolver, metadata); err == nil {
+				t.Fatal("Open accepted invalid artifact")
+			}
+			if out.String() != "unchanged" {
+				t.Fatalf("Open wrote residue after %s failure: %q", tc.name, out.String())
+			}
+		})
+	}
+}
+
+func tamperLastByte(data []byte) []byte {
+	tampered := append([]byte(nil), data...)
+	tampered[len(tampered)-1] ^= 0x01
+	return tampered
+}
+
+type trackingReader struct {
+	reader  io.Reader
+	maxRead int
+}
+
+func (r *trackingReader) Read(p []byte) (int, error) {
+	if len(p) > r.maxRead {
+		r.maxRead = len(p)
+	}
+	return r.reader.Read(p)
+}
+
+type trackingWriter struct {
+	bytes.Buffer
+	maxWrite int
+}
+
+func (w *trackingWriter) Write(p []byte) (int, error) {
+	if len(p) > w.maxWrite {
+		w.maxWrite = len(p)
+	}
+	return w.Buffer.Write(p)
+}
+
+func artifactFrameCount(data []byte) int {
+	headerLen := binary.BigEndian.Uint32(data[len(magic) : len(magic)+4])
+	offset := len(magic) + 4 + int(headerLen)
+	count := 0
+	for offset+17 <= len(data) {
+		kind := data[offset]
+		cipherLen := binary.BigEndian.Uint32(data[offset+13 : offset+17])
+		offset += 17 + int(cipherLen)
+		count++
+		if kind == 2 {
+			break
+		}
+	}
+	return count
+}
+
+func TestLargeArtifactsUseBoundedReadAndWriteChunks(t *testing.T) {
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
+	plaintext := bytes.Repeat([]byte("large-restore-data-"), 4*chunkSize)
+	sealSource := &trackingReader{reader: bytes.NewReader(plaintext)}
+	var sealed trackingWriter
+	if _, err := Seal(&sealed, sealSource, resolver, metadata); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	if artifactFrameCount(sealed.Bytes()) < 5 {
+		t.Fatalf("sealed artifact frame count = %d, want multiple payload frames and footer", artifactFrameCount(sealed.Bytes()))
+	}
+	if sealSource.maxRead > chunkSize {
+		t.Fatalf("Seal source read size = %d, want <= %d", sealSource.maxRead, chunkSize)
+	}
+	if sealed.maxWrite > chunkSize {
+		t.Fatalf("Seal destination write size = %d, want <= %d", sealed.maxWrite, chunkSize)
+	}
+
+	openSource := &trackingReader{reader: bytes.NewReader(sealed.Bytes())}
+	var opened trackingWriter
+	if err := Open(&opened, openSource, resolver, metadata); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	if !bytes.Equal(opened.Bytes(), plaintext) {
+		t.Fatal("opened plaintext differs from large sealed input")
+	}
+	if openSource.maxRead > chunkSize {
+		t.Fatalf("Open source read size = %d, want <= %d", openSource.maxRead, chunkSize)
+	}
+	if opened.maxWrite > chunkSize {
+		t.Fatalf("Open destination write size = %d, want <= %d", opened.maxWrite, chunkSize)
+	}
+}
+
+func TestSpoolsArePrivateAndRemovedOnSuccessAndFailure(t *testing.T) {
+	tempDir := os.TempDir()
+	before := artifactSpoolEntries(t, tempDir)
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader("payload"), resolver, metadata); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	var opened bytes.Buffer
+	if err := Open(&opened, bytes.NewReader(sealed.Bytes()), resolver, metadata); err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	var untouched bytes.Buffer
+	untouched.WriteString("unchanged")
+	if _, err := Seal(&untouched, &interruptedReader{}, resolver, metadata); err == nil {
+		t.Fatal("Seal accepted interrupted source")
+	}
+	if err := Open(&untouched, bytes.NewReader(tamperLastByte(sealed.Bytes())), resolver, metadata); err == nil {
+		t.Fatal("Open accepted tampered artifact")
+	}
+	if _, err := Seal(&errorWriter{err: errors.New("destination failed")}, strings.NewReader("payload"), resolver, metadata); err == nil {
+		t.Fatal("Seal accepted destination failure")
+	}
+	if err := Open(&errorWriter{err: errors.New("destination failed")}, bytes.NewReader(sealed.Bytes()), resolver, metadata); err == nil {
+		t.Fatal("Open accepted destination failure")
+	}
+	after := artifactSpoolEntries(t, tempDir)
+	for name := range after {
+		if _, ok := before[name]; !ok {
+			t.Fatalf("temporary spool file remains: %q", name)
+		}
+	}
+}
+
+func artifactSpoolEntries(t *testing.T, tempDir string) map[string]struct{} {
+	t.Helper()
+	entries, err := os.ReadDir(tempDir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	prefix := strings.TrimSuffix(spoolPattern, "*")
+	files := make(map[string]struct{})
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), prefix) {
+			files[entry.Name()] = struct{}{}
+		}
+	}
+	return files
+}
+
+type shortWriter struct {
+	bytes.Buffer
+}
+
+func (w *shortWriter) Write(p []byte) (int, error) {
+	if len(p) == 0 {
+		return 0, nil
+	}
+	n := len(p) - 1
+	_, _ = w.Buffer.Write(p[:n])
+	return n, nil
+}
+
+type errorWriter struct {
+	err error
+}
+
+func (w *errorWriter) Write([]byte) (int, error) {
+	return 0, w.err
+}
+
+func TestDestinationShortAndErrorWritesAreReported(t *testing.T) {
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader(strings.Repeat("payload", chunkSize)), resolver, metadata); err != nil {
+		t.Fatal(err)
+	}
+	operations := []struct {
+		name string
+		run  func(io.Writer) error
+	}{
+		{
+			name: "seal",
+			run: func(dst io.Writer) error {
+				_, err := Seal(dst, strings.NewReader("payload"), resolver, metadata)
+				return err
+			},
+		},
+		{
+			name: "open",
+			run: func(dst io.Writer) error {
+				return Open(dst, bytes.NewReader(sealed.Bytes()), resolver, metadata)
+			},
+		},
+	}
+	for _, operation := range operations {
+		t.Run(operation.name, func(t *testing.T) {
+			t.Run("short write", func(t *testing.T) {
+				err := operation.run(&shortWriter{})
+				if !errors.Is(err, io.ErrShortWrite) {
+					t.Fatalf("error = %v, want io.ErrShortWrite", err)
+				}
+			})
+			t.Run("destination error", func(t *testing.T) {
+				want := errors.New("destination sink failed")
+				err := operation.run(&errorWriter{err: want})
+				if !errors.Is(err, want) {
+					t.Fatalf("error = %v, want destination error", err)
+				}
+			})
+		})
+	}
+}
+
+func TestResolverErrorsDoNotExposeKeyOrPathValues(t *testing.T) {
+	metadata := testMetadata()
+	secret := "0123456789abcdef0123456789abcdef"
+	path := `C:\private\artifact.bin`
+	resolver := ResolverFunc(func(KeyReference) ([]byte, error) {
+		return nil, fmt.Errorf("key=%s path=%s", secret, path)
+	})
+	_, err := Seal(io.Discard, strings.NewReader("payload"), resolver, metadata)
+	if err == nil {
+		t.Fatal("Seal succeeded with failing resolver")
+	}
+	if strings.Contains(err.Error(), secret) || strings.Contains(err.Error(), path) {
+		t.Fatalf("resolver error exposed sensitive values: %v", err)
 	}
 }

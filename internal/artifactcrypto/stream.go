@@ -2,7 +2,6 @@ package artifactcrypto
 
 import (
 	"bytes"
-	"context"
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
@@ -10,38 +9,34 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"os"
 )
 
 var magic = []byte("BDART1\x00")
 
-const chunkSize = 64 * 1024
+const (
+	chunkSize   = 64 * 1024
+	spoolPattern = "better-drive-artifact-*"
+)
 
 type KeyReference struct {
 	ID      string `json:"id"`
 	Version uint64 `json:"version"`
 }
 
-// KeyRef is kept as a descriptive alias for callers that prefer the shorter name.
-type KeyRef = KeyReference
-type Reference = KeyReference
-
 type Resolver interface {
 	Resolve(KeyReference) ([]byte, error)
-}
-
-type KeyResolver interface {
-	ResolveKey(KeyReference) ([]byte, error)
-}
-
-type ContextKeyResolver interface {
-	Resolve(context.Context, KeyReference) ([]byte, error)
 }
 
 type ResolverFunc func(KeyReference) ([]byte, error)
 
 func (f ResolverFunc) Resolve(reference KeyReference) ([]byte, error) {
+	if f == nil {
+		return nil, errors.New("artifact key resolver is required")
+	}
 	return f(reference)
 }
 
@@ -72,60 +67,85 @@ func (m Metadata) Reference() KeyReference {
 	return KeyReference{ID: m.KeyRef, Version: version}
 }
 
-// Seal resolves the requested key in memory and commits the complete artifact
-// to dst only after the plaintext source and authenticated footer are ready.
-// The source parameter accepts a Resolver (preferred) or a raw key for
-// compatibility with older callers; raw keys are never encoded in the artifact.
-func Seal(dst io.Writer, src io.Reader, source any, metadata Metadata) (SealResult, error) {
-	metadata, key, err := resolveSealKey(source, metadata)
+// Seal resolves the requested key and commits the complete artifact to dst
+// only after the plaintext source and authenticated footer are ready.
+func Seal(dst io.Writer, src io.Reader, resolver Resolver, metadata Metadata) (result SealResult, err error) {
+	key, err := resolveSealKey(resolver, metadata)
 	if err != nil {
-		return SealResult{}, err
+		return result, err
 	}
+	defer zeroBytes(key)
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return SealResult{}, err
+		return result, wrapError("create artifact cipher", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return SealResult{}, err
+		return result, wrapError("create artifact authenticator", err)
 	}
 	nonce := make([]byte, gcm.NonceSize())
 	if _, err := io.ReadFull(rand.Reader, nonce); err != nil {
-		return SealResult{}, fmt.Errorf("generate artifact nonce: %w", err)
+		return result, wrapError("generate artifact nonce", err)
 	}
+	defer zeroBytes(nonce)
+
 	h := header{Version: 1, Metadata: metadata, Nonce: nonce, ChunkSize: chunkSize}
 	headerBytes, err := json.Marshal(h)
 	if err != nil {
-		return SealResult{}, err
+		return result, wrapError("marshal artifact metadata", err)
 	}
-	var artifact bytes.Buffer
+	if len(headerBytes) == 0 || len(headerBytes) > chunkSize {
+		return result, errors.New("artifact metadata invalid")
+	}
+
+	spool, err := createSpool()
+	if err != nil {
+		return result, err
+	}
+	defer func() {
+		if cleanupErr := cleanupSpool(spool); err == nil {
+			err = cleanupErr
+		}
+	}()
+
 	cipherHash := sha256.New()
 	write := func(data []byte) error {
-		if _, err := artifact.Write(data); err != nil {
-			return err
+		if err := writeAll(spool, data); err != nil {
+			return wrapError("write artifact spool", err)
 		}
 		_, _ = cipherHash.Write(data)
 		return nil
 	}
 	if err := write(magic); err != nil {
-		return SealResult{}, err
+		return result, err
 	}
 	if err := writeUint32(write, uint32(len(headerBytes))); err != nil {
-		return SealResult{}, err
+		return result, err
 	}
 	if err := write(headerBytes); err != nil {
-		return SealResult{}, err
+		return result, err
 	}
 
 	plainHash := sha256.New()
-	buf := make([]byte, chunkSize)
+	plainBuffer := make([]byte, chunkSize)
+	defer zeroBytes(plainBuffer)
+	cipherBuffer := make([]byte, 0, chunkSize+gcm.Overhead())
+	defer func() {
+		zeroBytes(cipherBuffer)
+	}()
+
 	var counter uint64
 	for {
-		n, readErr := src.Read(buf)
+		n, readErr := src.Read(plainBuffer)
+		if n < 0 || n > len(plainBuffer) {
+			return result, errors.New("artifact source returned invalid read length")
+		}
 		if n > 0 {
-			_, _ = plainHash.Write(buf[:n])
-			if err := writeFrame(write, gcm, nonce, headerBytes, 1, counter, buf[:n]); err != nil {
-				return SealResult{}, err
+			_, _ = plainHash.Write(plainBuffer[:n])
+			cipherBuffer, err = writeFrameBuffered(write, gcm, nonce, headerBytes, 1, counter, plainBuffer[:n], cipherBuffer)
+			if err != nil {
+				return result, err
 			}
 			counter++
 		}
@@ -133,178 +153,258 @@ func Seal(dst io.Writer, src io.Reader, source any, metadata Metadata) (SealResu
 			break
 		}
 		if readErr != nil {
-			return SealResult{}, fmt.Errorf("read artifact plaintext: %w", readErr)
+			return result, wrapError("read artifact plaintext", readErr)
 		}
 		if n == 0 {
-			return SealResult{}, fmt.Errorf("artifact source returned no data without EOF")
+			return result, errors.New("artifact source returned no data without EOF")
 		}
 	}
+
 	plainDigest := "sha256:" + hex.EncodeToString(plainHash.Sum(nil))
-	if err := writeFrame(write, gcm, nonce, headerBytes, 2, counter, []byte(plainDigest)); err != nil {
-		return SealResult{}, err
+	cipherBuffer, err = writeFrameBuffered(write, gcm, nonce, headerBytes, 2, counter, []byte(plainDigest), cipherBuffer)
+	if err != nil {
+		return result, err
 	}
-	if err := writeAll(dst, artifact.Bytes()); err != nil {
-		return SealResult{}, fmt.Errorf("write sealed artifact: %w", err)
+	if err := spool.Sync(); err != nil {
+		return result, wrapError("sync artifact spool", err)
 	}
-	return SealResult{PlaintextDigest: plainDigest, CiphertextDigest: "sha256:" + hex.EncodeToString(cipherHash.Sum(nil))}, nil
+	if _, err := spool.Seek(0, io.SeekStart); err != nil {
+		return result, wrapError("rewind artifact spool", err)
+	}
+	if err := copySpool(dst, spool, plainBuffer); err != nil {
+		return result, wrapError("write sealed artifact", err)
+	}
+	return SealResult{
+		PlaintextDigest:  plainDigest,
+		CiphertextDigest: "sha256:" + hex.EncodeToString(cipherHash.Sum(nil)),
+	}, nil
 }
 
 // Open authenticates every frame and the final plaintext digest before it
 // commits any plaintext to dst. Resolver failures, wrong references, key
 // mismatches, truncation, and footer tampering therefore leave dst untouched.
-func Open(dst io.Writer, src io.Reader, source any, expected Metadata) error {
+func Open(dst io.Writer, src io.Reader, resolver Resolver, expected Metadata) (err error) {
 	gotMagic := make([]byte, len(magic))
-	if _, err := io.ReadFull(src, gotMagic); err != nil {
-		return fmt.Errorf("read artifact header: %w", err)
+	if _, readErr := io.ReadFull(src, gotMagic); readErr != nil {
+		return wrapError("read artifact header", readErr)
 	}
 	if !bytes.Equal(gotMagic, magic) {
-		return fmt.Errorf("artifact magic mismatch")
+		return errors.New("artifact magic mismatch")
 	}
+
 	var headerLen uint32
-	if err := binary.Read(src, binary.BigEndian, &headerLen); err != nil || headerLen == 0 || headerLen > 64*1024 {
-		return fmt.Errorf("artifact header length invalid")
+	if readErr := binary.Read(src, binary.BigEndian, &headerLen); readErr != nil || headerLen == 0 || headerLen > chunkSize {
+		return errors.New("artifact header length invalid")
 	}
 	headerBytes := make([]byte, headerLen)
-	if _, err := io.ReadFull(src, headerBytes); err != nil {
-		return fmt.Errorf("read artifact metadata: %w", err)
+	if _, readErr := io.ReadFull(src, headerBytes); readErr != nil {
+		return wrapError("read artifact metadata", readErr)
 	}
 	var h header
-	if err := json.Unmarshal(headerBytes, &h); err != nil || h.Version != 1 || h.ChunkSize != chunkSize {
-		return fmt.Errorf("artifact metadata invalid")
+	if unmarshalErr := json.Unmarshal(headerBytes, &h); unmarshalErr != nil || h.Version != 1 || h.ChunkSize != chunkSize {
+		return errors.New("artifact metadata invalid")
 	}
 	if err := compareMetadata(h.Metadata, expected); err != nil {
 		return err
 	}
-	key, err := resolveOpenKey(source, h.Metadata)
+	key, err := resolveOpenKey(resolver, h.Metadata)
 	if err != nil {
 		return err
 	}
+	defer zeroBytes(key)
+
 	block, err := aes.NewCipher(key)
 	if err != nil {
-		return err
+		return wrapError("create artifact cipher", err)
 	}
 	gcm, err := cipher.NewGCM(block)
 	if err != nil {
-		return err
+		return wrapError("create artifact authenticator", err)
 	}
 	if len(h.Nonce) != gcm.NonceSize() {
-		return fmt.Errorf("artifact metadata invalid")
+		return errors.New("artifact metadata invalid")
 	}
-	var plaintext bytes.Buffer
+
+	spool, err := createSpool()
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if cleanupErr := cleanupSpool(spool); err == nil {
+			err = cleanupErr
+		}
+	}()
+
+	plainBuffer := make([]byte, chunkSize)
+	defer zeroBytes(plainBuffer)
+	cipherBuffer := make([]byte, chunkSize+gcm.Overhead())
+	defer zeroBytes(cipherBuffer)
 	plainHash := sha256.New()
 	var expectedCounter uint64
 	for {
-		kind, err := readByte(src)
-		if err != nil {
-			return fmt.Errorf("artifact truncated before footer: %w", err)
+		kind, readErr := readByte(src)
+		if readErr != nil {
+			return wrapError("artifact truncated before footer", readErr)
 		}
-		counter, plainLen, cipherLen, err := readFrameHeader(src)
-		if err != nil {
-			return err
+		counter, plainLen, cipherLen, readErr := readFrameHeader(src)
+		if readErr != nil {
+			return readErr
 		}
 		if kind != 1 && kind != 2 {
-			return fmt.Errorf("artifact frame header invalid: unknown kind %d", kind)
+			return errors.New("artifact frame header invalid")
 		}
 		if counter != expectedCounter || plainLen > uint32(h.ChunkSize) || uint64(cipherLen) != uint64(plainLen)+uint64(gcm.Overhead()) {
-			return fmt.Errorf("artifact frame header invalid")
+			return errors.New("artifact frame header invalid")
 		}
-		ciphertext := make([]byte, cipherLen)
-		if _, err := io.ReadFull(src, ciphertext); err != nil {
-			return fmt.Errorf("artifact truncated frame: %w", err)
+		if _, readErr := readBoundedFull(src, cipherBuffer[:int(cipherLen)]); readErr != nil {
+			return wrapError("artifact truncated frame", readErr)
 		}
-		decrypted, err := gcm.Open(nil, deriveNonce(h.Nonce, counter), ciphertext, frameAAD(headerBytes, kind, counter, plainLen))
-		if err != nil {
-			return fmt.Errorf("artifact authentication failed: %w", err)
+		decrypted, authErr := gcm.Open(plainBuffer[:0], deriveNonce(h.Nonce, counter), cipherBuffer[:int(cipherLen)], frameAAD(headerBytes, kind, counter, plainLen))
+		if authErr != nil {
+			return wrapError("artifact authentication failed", authErr)
+		}
+		if uint32(len(decrypted)) != plainLen {
+			return errors.New("artifact frame plaintext length invalid")
 		}
 		if kind == 1 {
-			if _, err := plaintext.Write(decrypted); err != nil {
-				return err
+			if writeErr := writeAll(spool, decrypted); writeErr != nil {
+				return wrapError("write artifact spool", writeErr)
 			}
 			_, _ = plainHash.Write(decrypted)
 			expectedCounter++
 			continue
 		}
 		if counter != expectedCounter {
-			return fmt.Errorf("artifact footer invalid")
+			return errors.New("artifact footer invalid")
 		}
 		wantDigest := string(decrypted)
 		gotDigest := "sha256:" + hex.EncodeToString(plainHash.Sum(nil))
 		if wantDigest != gotDigest {
-			return fmt.Errorf("artifact plaintext digest mismatch")
+			return errors.New("artifact plaintext digest mismatch")
 		}
 		var trailing [1]byte
 		if n, trailingErr := src.Read(trailing[:]); n != 0 || trailingErr != io.EOF {
-			return fmt.Errorf("artifact has trailing data")
+			return errors.New("artifact has trailing data")
 		}
-		if err := writeAll(dst, plaintext.Bytes()); err != nil {
-			return fmt.Errorf("write opened artifact: %w", err)
+		if err := spool.Sync(); err != nil {
+			return wrapError("sync artifact spool", err)
+		}
+		if _, err := spool.Seek(0, io.SeekStart); err != nil {
+			return wrapError("rewind artifact spool", err)
+		}
+		if err := copySpool(dst, spool, plainBuffer); err != nil {
+			return wrapError("write opened artifact", err)
 		}
 		return nil
 	}
 }
 
-func SealWithResolver(dst io.Writer, src io.Reader, resolver Resolver, metadata Metadata) (SealResult, error) {
-	return Seal(dst, src, resolver, metadata)
-}
-
-func OpenWithResolver(dst io.Writer, src io.Reader, resolver Resolver, expected Metadata) error {
-	return Open(dst, src, resolver, expected)
-}
-
-func resolveSealKey(source any, metadata Metadata) (Metadata, []byte, error) {
-	if _, raw := source.([]byte); raw && metadata.KeyVersion == 0 {
-		metadata.KeyVersion = 1
-	}
-	if err := validateMetadata(metadata); err != nil {
-		return Metadata{}, nil, err
-	}
-	key, err := resolveKey(source, metadata.Reference())
-	if err != nil {
-		return Metadata{}, nil, fmt.Errorf("resolve artifact key %s@%d: %w", metadata.KeyRef, metadata.KeyVersion, err)
-	}
-	if err := validateKey(key); err != nil {
-		return Metadata{}, nil, err
-	}
-	return metadata, key, nil
-}
-
-func resolveOpenKey(source any, metadata Metadata) ([]byte, error) {
-	if _, raw := source.([]byte); raw && metadata.KeyVersion == 0 {
-		metadata.KeyVersion = 1
-	}
+func resolveSealKey(resolver Resolver, metadata Metadata) ([]byte, error) {
 	if err := validateMetadata(metadata); err != nil {
 		return nil, err
 	}
-	key, err := resolveKey(source, metadata.Reference())
-	if err != nil {
-		return nil, fmt.Errorf("resolve artifact key %s@%d: %w", metadata.KeyRef, metadata.KeyVersion, err)
+	return resolveKey(resolver, metadata.Reference())
+}
+
+func resolveOpenKey(resolver Resolver, metadata Metadata) ([]byte, error) {
+	if err := validateMetadata(metadata); err != nil {
+		return nil, err
 	}
+	return resolveKey(resolver, metadata.Reference())
+}
+
+func resolveKey(resolver Resolver, reference KeyReference) ([]byte, error) {
+	if resolver == nil {
+		return nil, errors.New("artifact key resolver is required")
+	}
+	resolved, err := resolver.Resolve(reference)
+	if err != nil {
+		return nil, wrapError("resolve artifact key", err)
+	}
+	key := append([]byte(nil), resolved...)
 	if err := validateKey(key); err != nil {
+		zeroBytes(key)
 		return nil, err
 	}
 	return key, nil
 }
 
-func resolveKey(source any, reference KeyReference) ([]byte, error) {
-	switch resolver := source.(type) {
-	case []byte:
-		return append([]byte(nil), resolver...), nil
-	case Resolver:
-		return resolver.Resolve(reference)
-	case KeyResolver:
-		return resolver.ResolveKey(reference)
-	case ContextKeyResolver:
-		return resolver.Resolve(context.Background(), reference)
-	case func(KeyReference) ([]byte, error):
-		return resolver(reference)
-	default:
-		return nil, fmt.Errorf("unsupported artifact key source %T", source)
+func createSpool() (*os.File, error) {
+	spool, err := os.CreateTemp("", spoolPattern)
+	if err != nil {
+		return nil, wrapError("create artifact spool", err)
 	}
+	info, err := spool.Stat()
+	if err != nil {
+		_ = cleanupSpool(spool)
+		return nil, wrapError("inspect artifact spool", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		_ = cleanupSpool(spool)
+		return nil, errors.New("artifact spool is not a private regular file")
+	}
+	return spool, nil
+}
+
+func cleanupSpool(spool *os.File) error {
+	if spool == nil {
+		return nil
+	}
+	var cleanupErrs []error
+	if err := spool.Close(); err != nil {
+		cleanupErrs = append(cleanupErrs, wrapError("close artifact spool", err))
+	}
+	if err := os.Remove(spool.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		cleanupErrs = append(cleanupErrs, wrapError("remove artifact spool", err))
+	}
+	return errors.Join(cleanupErrs...)
+}
+
+func copySpool(dst io.Writer, spool *os.File, buffer []byte) error {
+	reader := readerOnly{reader: spool}
+	writer := writerOnly{writer: dst}
+	_, err := io.CopyBuffer(writer, reader, buffer)
+	return err
+}
+
+func readBoundedFull(src io.Reader, data []byte) (int, error) {
+	total := 0
+	for total < len(data) {
+		readLen := len(data) - total
+		if readLen > chunkSize {
+			readLen = chunkSize
+		}
+		n, err := io.ReadFull(src, data[total:total+readLen])
+		total += n
+		if err != nil {
+			return total, err
+		}
+	}
+	return total, nil
+}
+
+type readerOnly struct {
+	reader io.Reader
+}
+
+func (r readerOnly) Read(p []byte) (int, error) {
+	return r.reader.Read(p)
+}
+
+type writerOnly struct {
+	writer io.Writer
+}
+
+func (w writerOnly) Write(p []byte) (int, error) {
+	return w.writer.Write(p)
 }
 
 func writeAll(dst io.Writer, data []byte) error {
 	for len(data) > 0 {
 		n, err := dst.Write(data)
+		if n < 0 || n > len(data) {
+			return io.ErrShortWrite
+		}
 		if n > 0 {
 			data = data[n:]
 		}
@@ -320,16 +420,17 @@ func writeAll(dst io.Writer, data []byte) error {
 
 func validateKey(key []byte) error {
 	if len(key) != 16 && len(key) != 24 && len(key) != 32 {
-		return fmt.Errorf("artifact key must be 16, 24, or 32 bytes")
+		return errors.New("artifact key must be 16, 24, or 32 bytes")
 	}
 	return nil
 }
+
 func validateMetadata(metadata Metadata) error {
 	if metadata.RestoreSetID == "" || metadata.Component == "" || metadata.KeyRef == "" {
-		return fmt.Errorf("artifact metadata requires restore_set_id, component, and key_ref")
+		return errors.New("artifact metadata requires restore_set_id, component, and key_ref")
 	}
 	if metadata.KeyVersion == 0 {
-		return fmt.Errorf("artifact metadata requires key_version")
+		return errors.New("artifact metadata requires key_version")
 	}
 	return nil
 }
@@ -339,7 +440,7 @@ func compareMetadata(got, expected Metadata) error {
 		expected.Component != "" && got.Component != expected.Component ||
 		expected.KeyRef != "" && got.KeyRef != expected.KeyRef ||
 		expected.KeyVersion != 0 && got.KeyVersion != expected.KeyVersion {
-		return fmt.Errorf("artifact metadata mismatch")
+		return errors.New("artifact metadata mismatch")
 	}
 	return nil
 }
@@ -367,20 +468,39 @@ func writeUint32(write func([]byte) error, value uint32) error {
 }
 
 func writeFrame(write func([]byte) error, gcm cipher.AEAD, nonce, header []byte, kind byte, counter uint64, plaintext []byte) error {
-	ciphertext := gcm.Seal(nil, deriveNonce(nonce, counter), plaintext, frameAAD(header, kind, counter, uint32(len(plaintext))))
+	ciphertext, err := writeFrameBuffered(write, gcm, nonce, header, kind, counter, plaintext, nil)
+	zeroBytes(ciphertext)
+	return err
+}
+
+func writeFrameBuffered(write func([]byte) error, gcm cipher.AEAD, nonce, header []byte, kind byte, counter uint64, plaintext, ciphertext []byte) ([]byte, error) {
+	if cap(ciphertext) < len(plaintext)+gcm.Overhead() {
+		ciphertext = make([]byte, 0, len(plaintext)+gcm.Overhead())
+	}
+	ciphertext = gcm.Seal(ciphertext[:0], deriveNonce(nonce, counter), plaintext, frameAAD(header, kind, counter, uint32(len(plaintext))))
 	if err := write([]byte{kind}); err != nil {
-		return err
+		return ciphertext, err
 	}
 	var frame [12]byte
 	binary.BigEndian.PutUint64(frame[0:8], counter)
 	binary.BigEndian.PutUint32(frame[8:12], uint32(len(plaintext)))
 	if err := write(frame[:]); err != nil {
-		return err
+		return ciphertext, err
 	}
 	if err := writeUint32(write, uint32(len(ciphertext))); err != nil {
-		return err
+		return ciphertext, err
 	}
-	return write(ciphertext)
+	for remaining := ciphertext; len(remaining) > 0; {
+		writeLen := len(remaining)
+		if writeLen > chunkSize {
+			writeLen = chunkSize
+		}
+		if err := write(remaining[:writeLen]); err != nil {
+			return ciphertext, err
+		}
+		remaining = remaining[writeLen:]
+	}
+	return ciphertext, nil
 }
 
 func readByte(src io.Reader) (byte, error) {
@@ -392,11 +512,46 @@ func readByte(src io.Reader) (byte, error) {
 func readFrameHeader(src io.Reader) (uint64, uint32, uint32, error) {
 	var frame [12]byte
 	if _, err := io.ReadFull(src, frame[:]); err != nil {
-		return 0, 0, 0, fmt.Errorf("read artifact frame header: %w", err)
+		return 0, 0, 0, wrapError("read artifact frame header", err)
 	}
 	var cipherLen uint32
 	if err := binary.Read(src, binary.BigEndian, &cipherLen); err != nil {
-		return 0, 0, 0, fmt.Errorf("read artifact frame length: %w", err)
+		return 0, 0, 0, wrapError("read artifact frame length", err)
 	}
 	return binary.BigEndian.Uint64(frame[0:8]), binary.BigEndian.Uint32(frame[8:12]), cipherLen, nil
+}
+
+func zeroBytes(data []byte) {
+	for i := range data[:cap(data)] {
+		data[i] = 0
+	}
+}
+
+type safeError struct {
+	message string
+	cause   error
+}
+
+func (e *safeError) Error() string {
+	return e.message
+}
+
+func (e *safeError) Format(state fmt.State, verb rune) {
+	switch verb {
+	case 'q':
+		_, _ = fmt.Fprintf(state, "%q", e.message)
+	default:
+		_, _ = io.WriteString(state, e.message)
+	}
+}
+
+func (e *safeError) Unwrap() error {
+	return e.cause
+}
+
+func wrapError(message string, cause error) error {
+	if cause == nil {
+		return errors.New(message)
+	}
+	return &safeError{message: message, cause: cause}
 }
