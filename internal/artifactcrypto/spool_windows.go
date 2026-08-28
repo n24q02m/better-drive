@@ -8,7 +8,6 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
-	"strings"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -62,14 +61,23 @@ func createSecureSpool() (*os.File, error) {
 			_ = windows.CloseHandle(handle)
 			return nil, errors.New("create artifact spool handle failed")
 		}
-		if err := verifyWindowsSpool(file, sidText); err != nil {
+		if err := verifyWindowsSpool(file, sid); err != nil {
 			_ = file.Close()
-			_ = os.Remove(path)
 			return nil, err
 		}
 		return file, nil
 	}
 	return nil, errors.New("create artifact spool name collision")
+}
+
+func cleanupSecureSpool(spool *os.File) error {
+	if spool == nil {
+		return nil
+	}
+	if err := spool.Close(); err != nil {
+		return wrapError("close artifact spool", err)
+	}
+	return nil
 }
 
 func currentProcessSID() (*windows.SID, error) {
@@ -91,7 +99,10 @@ func randomSpoolPath() (string, error) {
 	return filepath.Join(os.TempDir(), "better-drive-artifact-"+hex.EncodeToString(randomBytes[:])+".tmp"), nil
 }
 
-func verifyWindowsSpool(file *os.File, sidText string) error {
+func verifyWindowsSpool(file *os.File, expectedSID *windows.SID) error {
+	if expectedSID == nil || !expectedSID.IsValid() {
+		return errors.New("expected process SID is invalid")
+	}
 	var fileInfo windows.ByHandleFileInformation
 	if err := windows.GetFileInformationByHandle(windows.Handle(file.Fd()), &fileInfo); err != nil {
 		return err
@@ -111,7 +122,7 @@ func verifyWindowsSpool(file *os.File, sidText string) error {
 		return errors.New("artifact spool security descriptor is invalid")
 	}
 	owner, _, err := securityDescriptor.Owner()
-	if err != nil || owner == nil || owner.String() != sidText {
+	if err != nil || owner == nil || !owner.IsValid() || !owner.Equals(expectedSID) {
 		return errors.New("artifact spool owner is invalid")
 	}
 	control, _, err := securityDescriptor.Control()
@@ -122,9 +133,19 @@ func verifyWindowsSpool(file *os.File, sidText string) error {
 	if err != nil || dacl == nil || dacl.AceCount != 1 {
 		return errors.New("artifact spool DACL is invalid")
 	}
-	securityText := securityDescriptor.String()
-	if securityText == "" || !strings.Contains(securityText, "D:P") || !strings.Contains(securityText, "(A;;FA;;;"+sidText+")") {
-		return errors.New("artifact spool DACL is invalid")
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil || ace == nil {
+		return errors.New("artifact spool DACL entry is invalid")
+	}
+	if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+		return errors.New("artifact spool DACL ACE type is invalid")
+	}
+	aceSID := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+	if !aceSID.IsValid() || !aceSID.Equals(expectedSID) {
+		return errors.New("artifact spool DACL trustee is invalid")
+	}
+	if ace.Mask&windows.ACCESS_MASK(windows.STANDARD_RIGHTS_ALL|windows.SPECIFIC_RIGHTS_ALL|windows.GENERIC_ALL|windows.FILE_GENERIC_READ|windows.FILE_GENERIC_WRITE) == 0 {
+		return errors.New("artifact spool DACL permissions are invalid")
 	}
 	return nil
 }

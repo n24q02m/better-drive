@@ -104,8 +104,10 @@ func Seal(dst io.Writer, src io.Reader, resolver Resolver, metadata Metadata) (r
 		return result, err
 	}
 	defer func() {
-		if cleanupErr := cleanupSpool(spool); err == nil {
-			err = cleanupErr
+		cleanupErr := cleanupSpool(spool)
+		if cleanupErr != nil {
+			result = SealResult{}
+			err = errors.Join(err, cleanupErr)
 		}
 	}()
 
@@ -230,11 +232,11 @@ func Open(dst io.Writer, src io.Reader, resolver Resolver, expected Metadata) (e
 		return err
 	}
 	defer func() {
-		if cleanupErr := cleanupSpool(spool); err == nil {
-			err = cleanupErr
+		cleanupErr := cleanupSpool(spool)
+		if cleanupErr != nil {
+			err = errors.Join(err, cleanupErr)
 		}
 	}()
-
 	plainBuffer := make([]byte, chunkSize)
 	defer zeroBytes(plainBuffer)
 	cipherBuffer := make([]byte, chunkSize+gcm.Overhead())
@@ -321,11 +323,12 @@ func resolveKey(resolver Resolver, reference KeyReference) ([]byte, error) {
 	if err != nil {
 		return nil, wrapError("resolve artifact key", err)
 	}
-	key := append([]byte(nil), resolved...)
-	if err := validateKey(key); err != nil {
-		zeroBytes(key)
+	if err := validateKey(resolved); err != nil {
+		zeroBytes(resolved)
 		return nil, err
 	}
+	key := append([]byte(nil), resolved...)
+	zeroBytes(resolved)
 	return key, nil
 }
 
@@ -341,14 +344,7 @@ func cleanupSpool(spool *os.File) error {
 	if spool == nil {
 		return nil
 	}
-	var cleanupErrs []error
-	if err := spool.Close(); err != nil {
-		cleanupErrs = append(cleanupErrs, wrapError("close artifact spool", err))
-	}
-	if err := os.Remove(spool.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
-		cleanupErrs = append(cleanupErrs, wrapError("remove artifact spool", err))
-	}
-	return errors.Join(cleanupErrs...)
+	return cleanupSecureSpool(spool)
 }
 
 func copySpool(dst io.Writer, spool *os.File, buffer []byte) error {
@@ -365,10 +361,19 @@ func readBoundedFull(src io.Reader, data []byte) (int, error) {
 		if readLen > chunkSize {
 			readLen = chunkSize
 		}
-		n, err := io.ReadFull(src, data[total:total+readLen])
+		n, err := src.Read(data[total : total+readLen])
+		if n < 0 || n > readLen {
+			return total, errors.New("artifact reader returned invalid length")
+		}
 		total += n
 		if err != nil {
+			if err == io.EOF && total == len(data) {
+				return total, nil
+			}
 			return total, err
+		}
+		if n == 0 {
+			return total, io.ErrUnexpectedEOF
 		}
 	}
 	return total, nil

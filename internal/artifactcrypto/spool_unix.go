@@ -29,3 +29,17 @@ func createSecureSpool() (*os.File, error) {
 	}
 	return spool, nil
 }
+
+func cleanupSecureSpool(spool *os.File) error {
+	if spool == nil {
+		return nil
+	}
+	var cleanupErrs []error
+	if err := spool.Close(); err != nil {
+		cleanupErrs = append(cleanupErrs, wrapError("close artifact spool", err))
+	}
+	if err := os.Remove(spool.Name()); err != nil && !errors.Is(err, os.ErrNotExist) {
+		cleanupErrs = append(cleanupErrs, wrapError("remove artifact spool", err))
+	}
+	return errors.Join(cleanupErrs...)
+}

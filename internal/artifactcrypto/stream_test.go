@@ -445,3 +445,74 @@ func TestResolverErrorsDoNotExposeKeyOrPathValues(t *testing.T) {
 		t.Fatalf("resolver error exposed sensitive values: %v", err)
 	}
 }
+
+type frameBoundarySentinelReader struct {
+	reader io.Reader
+	offset int
+	limit  int
+	err    error
+}
+
+func (r *frameBoundarySentinelReader) Read(p []byte) (int, error) {
+	n, err := r.reader.Read(p)
+	r.offset += n
+	if r.offset >= r.limit && r.err != nil {
+		return n, r.err
+	}
+	return n, err
+}
+
+func TestOpenPropagatesBoundarySentinelErrorWithoutSwallowing(t *testing.T) {
+	metadata := testMetadata()
+	resolver := testResolver{metadata.Reference(): testKey()}
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader("payload"), resolver, metadata); err != nil {
+		t.Fatal(err)
+	}
+	headerLen := binary.BigEndian.Uint32(sealed.Bytes()[len(magic) : len(magic)+4])
+	framePayloadOffset := len(magic) + 4 + int(headerLen) + 1 + 8 + 4 + 4
+	sentinel := errors.New("boundary sentinel read failure")
+	src := &frameBoundarySentinelReader{
+		reader: bytes.NewReader(sealed.Bytes()),
+		limit:  framePayloadOffset,
+		err:    sentinel,
+	}
+	var out bytes.Buffer
+	err := Open(&out, src, resolver, metadata)
+	if err == nil || !errors.Is(err, sentinel) {
+		t.Fatalf("Open error = %v, want sentinel error %v", err, sentinel)
+	}
+	if out.Len() != 0 {
+		t.Fatalf("Open wrote output on boundary error: %q", out.String())
+	}
+}
+
+func TestResolverBuffersAreZeroedAndValidatedEarly(t *testing.T) {
+	metadata := testMetadata()
+	originalKey := append([]byte(nil), testKey()...)
+	resolverKey := append([]byte(nil), originalKey...)
+	resolver := ResolverFunc(func(KeyReference) ([]byte, error) {
+		return resolverKey, nil
+	})
+	var sealed bytes.Buffer
+	if _, err := Seal(&sealed, strings.NewReader("payload"), resolver, metadata); err != nil {
+		t.Fatalf("Seal: %v", err)
+	}
+	allZero := true
+	for _, b := range resolverKey {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if !allZero {
+		t.Fatal("Seal did not zero original resolver key buffer")
+	}
+
+	invalidResolver := ResolverFunc(func(KeyReference) ([]byte, error) {
+		return []byte("short-key"), nil
+	})
+	if _, err := Seal(io.Discard, strings.NewReader("payload"), invalidResolver, metadata); err == nil {
+		t.Fatal("Seal accepted invalid key length")
+	}
+}
