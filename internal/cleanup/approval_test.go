@@ -24,6 +24,14 @@ func validApproval() Approval {
 		FixtureDigest:  strings.Repeat("b", 64),
 	}
 }
+func TestCanonicalApprovalRejectsTrashMode(t *testing.T) {
+	approval := validApproval()
+	approval.Mode = Mode("trash")
+	if _, err := CanonicalApproval(approval); err == nil || !strings.Contains(err.Error(), "quarantine") {
+		t.Fatalf("expected quarantine-only approval rejection, got %v", err)
+	}
+}
+
 
 func TestApprovalSignVerifyAndTamperRejects(t *testing.T) {
 	publicKey, privateKey, err := ed25519.GenerateKey(rand.Reader)

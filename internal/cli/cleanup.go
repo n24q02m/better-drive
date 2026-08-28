@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,16 +15,11 @@ import (
 	"github.com/spf13/cobra"
 )
 
-const (
-	cleanupDraftCapability    = "BD-CLEANUP-DRAFT-RW"
-	cleanupApprovalCapability = "BD-CLEANUP-APPROVAL-RW"
-)
-
 func cleanupCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:     "cleanup",
 		Short:   "Inventory and validate exact-ID cleanup manifests",
-		Long:    "Cleanup inventory and validation are read-only. Apply defaults to preview and refuses live mutation without the named owner-risk capability.",
+		Long:    "Cleanup inventory and validation are read-only. Apply is preview-only and never performs live mutation.",
 		Example: "  better-drive cleanup validate --manifest cleanup.json --format json",
 	}
 	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd())
@@ -35,48 +29,10 @@ func cleanupCmd() *cobra.Command {
 func cleanupApprovalCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:   "approval",
-		Short: "Prepare and activate signed cleanup approvals",
-		Long:  "Approval prepare/canonicalize/activate keep private signing outside the cleanup client and require explicit capability labels.",
+		Short: "Canonicalize cleanup approvals",
+		Long:  "Canonicalize approvals for offline signing; protected approval preparation and activation are unavailable in this client.",
 	}
-	command.AddCommand(cleanupApprovalPrepareCmd(), cleanupApprovalCanonicalizeCmd(), cleanupApprovalActivateCmd())
-	return command
-}
-
-func cleanupApprovalPrepareCmd() *cobra.Command {
-	var approvalPath string
-	var storePath string
-	var capability string
-	var format string
-	command := &cobra.Command{
-		Use:   "prepare",
-		Short: "Create a create-only cleanup approval draft",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := output.Validate(format); err != nil {
-				return badFormatErr(err)
-			}
-			if capability != cleanupDraftCapability {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup approval prepare requires BD-CLEANUP-DRAFT-RW")), "provide the named draft capability from the protected control plane")
-			}
-			approval, err := readApproval(approvalPath)
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a canonical approval JSON record")
-			}
-			record, err := cleanup.NewApprovalStore(storePath).Prepare(approval)
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "use a private create-only approval store and reject foreign drafts")
-			}
-			if format == output.FormatJSON {
-				return output.RenderJSON(cmd.OutOrStdout(), record)
-			}
-			canonical, _ := cleanup.CanonicalApproval(approval)
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "draft prepared: approval=%s digest=%s\n", approval.ApprovalID, cleanup.Digest(canonical))
-			return err
-		},
-	}
-	output.AddFormatFlag(command, &format)
-	command.Flags().StringVar(&approvalPath, "approval", "", "canonical approval JSON")
-	command.Flags().StringVar(&storePath, "store", "", "private create-only approval store root")
-	command.Flags().StringVar(&capability, "capability", "", "exact protected capability")
+	command.AddCommand(cleanupApprovalCanonicalizeCmd())
 	return command
 }
 
@@ -99,66 +55,6 @@ func cleanupApprovalCanonicalizeCmd() *cobra.Command {
 		},
 	}
 	command.Flags().StringVar(&approvalPath, "approval", "", "approval JSON to canonicalize")
-	return command
-}
-
-func cleanupApprovalActivateCmd() *cobra.Command {
-	var approvalPath string
-	var signaturePath string
-	var trustRootPath string
-	var storePath string
-	var capability string
-	var format string
-	command := &cobra.Command{
-		Use:   "activate",
-		Short: "Activate a signed approval against an enrolled trust root",
-		RunE: func(cmd *cobra.Command, _ []string) error {
-			if err := output.Validate(format); err != nil {
-				return badFormatErr(err)
-			}
-			if capability != cleanupApprovalCapability {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup approval activate requires BD-CLEANUP-APPROVAL-RW")), "provide the named protected approval capability")
-			}
-			approval, err := readApproval(approvalPath)
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide a canonical approval JSON record")
-			}
-			trustRootData, err := os.ReadFile(trustRootPath)
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide the enrolled public trust-root record")
-			}
-			var trustRoot cleanup.TrustRoot
-			if err := json.Unmarshal(trustRootData, &trustRoot); err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide valid trust-root JSON without private key material")
-			}
-			signatureHex, err := os.ReadFile(signaturePath)
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide the detached signature from the protected signer")
-			}
-			signature, err := hex.DecodeString(strings.TrimSpace(string(signatureHex)))
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "signature input must be lowercase or uppercase hexadecimal")
-			}
-			intent, err := cleanup.ActivateApproval(approval, signature, trustRoot, time.Now().UTC())
-			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "reject unknown issuer, trust-root drift, expiry, or signature mismatch")
-			}
-			if err := cleanup.NewApprovalStore(storePath).Activate(intent); err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "keep split/foreign intent state in reconciliation and do not overwrite it")
-			}
-			if format == output.FormatJSON {
-				return output.RenderJSON(cmd.OutOrStdout(), intent)
-			}
-			_, err = fmt.Fprintf(cmd.OutOrStdout(), "approval activated: approval=%s state=%s digest=%s\n", approval.ApprovalID, intent.State, intent.IntentDigest)
-			return err
-		},
-	}
-	output.AddFormatFlag(command, &format)
-	command.Flags().StringVar(&approvalPath, "approval", "", "canonical approval JSON")
-	command.Flags().StringVar(&signaturePath, "signature", "", "detached signature hex file")
-	command.Flags().StringVar(&trustRootPath, "trust-root", "", "enrolled public trust-root JSON")
-	command.Flags().StringVar(&storePath, "store", "", "private create-only approval store root")
-	command.Flags().StringVar(&capability, "capability", "", "exact protected capability")
 	return command
 }
 
@@ -186,7 +82,7 @@ func cleanupInventoryCmd() *cobra.Command {
 			}
 			rootSet, err := cleanup.DecodeRootSet(data)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "regenerate the all-roots capture with schema_version 1")
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "regenerate the all-roots capture with current schema_version 3")
 			}
 			aggregate, aggregateErr := cleanup.BuildAggregate(rootSet, account)
 			state := cleanup.BuildState(rootSet, aggregate, aggregateErr)
@@ -217,12 +113,13 @@ func cleanupInventoryCmd() *cobra.Command {
 func cleanupValidateCmd() *cobra.Command {
 	var manifestPath string
 	var inventoryPath string
+	var allRootsPath string
 	var format string
 	command := &cobra.Command{
 		Use:     "validate",
 		Short:   "Validate an exact-ID cleanup manifest without mutation",
-		Long:    "Validate safe classes, canonical provider scope, restore evidence, ownership markers, expiry, and object/byte budgets.",
-		Example: "  better-drive cleanup validate --manifest cleanup.json --inventory inventory-aggregate.json --format json",
+		Long:    "Validate safe classes, canonical provider scope, restore evidence, expiry, and object/byte budgets.",
+		Example: "  better-drive cleanup validate --manifest cleanup.json --inventory inventory-aggregate.json --all-roots all-roots.json --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
@@ -236,13 +133,28 @@ func cleanupValidateCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "regenerate the manifest from complete provider metadata and restore evidence")
 			}
 			if inventoryPath != "" {
-				inventory, inventoryErr := readInventoryAggregate(inventoryPath)
-				if inventoryErr != nil {
-					return exitcode.WithRemediation(exitcode.ConfigError(inventoryErr), "provide a complete current-schema inventory aggregate")
+				if strings.TrimSpace(allRootsPath) == "" {
+					return exitcode.WithRemediation(exitcode.ConfigError(errors.New("--all-roots is required with --inventory")), "provide the exact current-schema all-roots capture used to build the aggregate")
 				}
-				validation, err = cleanup.ValidateManifestAgainstInventory(manifest, inventory, time.Now().UTC())
+				rootData, rootErr := os.ReadFile(allRootsPath)
+				if rootErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(rootErr), "provide the exact all-roots capture used for this aggregate")
+				}
+				rootSet, rootErr := cleanup.DecodeRootSet(rootData)
+				if rootErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(rootErr), "provide a complete current-schema all-roots capture")
+				}
+				inventoryData, inventoryErr := os.ReadFile(inventoryPath)
+				if inventoryErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(inventoryErr), "provide the inventory aggregate produced from the exact root capture")
+				}
+				inventory, inventoryErr := cleanup.DecodeAggregate(inventoryData, rootSet, manifest.AccountID)
+				if inventoryErr != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(inventoryErr), "rebuild the aggregate from the exact all-roots capture before manifest binding")
+				}
+				validation, err = cleanup.ValidateManifestAgainstInventory(manifest, rootSet, inventory, time.Now().UTC())
 				if err != nil {
-					return exitcode.WithRemediation(exitcode.ConfigError(err), "refresh the live inventory and regenerate the manifest before any owner-risk request")
+					return exitcode.WithRemediation(exitcode.ConfigError(err), "refresh the exact inventory capture and regenerate the manifest before any owner-risk request")
 				}
 			}
 			if format == output.FormatJSON {
@@ -255,6 +167,7 @@ func cleanupValidateCmd() *cobra.Command {
 	output.AddFormatFlag(command, &format)
 	command.Flags().StringVar(&manifestPath, "manifest", "", "exact-ID cleanup manifest")
 	command.Flags().StringVar(&inventoryPath, "inventory", "", "complete provider inventory aggregate for exact metadata binding")
+	command.Flags().StringVar(&allRootsPath, "all-roots", "", "exact current-schema root/page capture used to build --inventory")
 	return command
 }
 
@@ -266,7 +179,7 @@ func cleanupApplyCmd() *cobra.Command {
 	command := &cobra.Command{
 		Use:     "apply",
 		Short:   "Preview an approved cleanup manifest",
-		Long:    "Apply defaults to preview. Live mutation requires the separate BD-DRIVE-MUTATION-RW owner-risk capability and is fail-closed here until a provider broker is bound.",
+		Long:    "Apply is preview-only. Live mutation is unavailable until a protected provider broker is bound.",
 		Example: "  better-drive cleanup apply --manifest cleanup.json --journal cleanup.jsonl --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
@@ -278,10 +191,10 @@ func cleanupApplyCmd() *cobra.Command {
 			}
 			validation, err := cleanup.ValidateManifest(manifest, time.Now().UTC())
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix validation failures before requesting an owner-risk capability")
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix validation failures before requesting protected execution")
 			}
 			if execute {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup apply --execute is disabled without BD-DRIVE-MUTATION-RW and a provider broker")), "use preview only until the exact signed owner-risk capability and broker readback are present")
+				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup apply execution is unavailable until a protected provider broker is bound")), "use preview only; no local capability can authorize Drive mutation")
 			}
 			if journalPath != "" {
 				journal, journalErr := cleanup.OpenFileJournal(journalPath)
@@ -307,7 +220,7 @@ func cleanupApplyCmd() *cobra.Command {
 	}
 	output.AddFormatFlag(command, &format)
 	command.Flags().StringVar(&manifestPath, "manifest", "", "exact-ID cleanup manifest")
-	command.Flags().BoolVar(&execute, "execute", false, "request live mutation (requires separate capability; currently fail-closed)")
+	command.Flags().BoolVar(&execute, "execute", false, "request unavailable live mutation (always fail-closed)")
 	command.Flags().StringVar(&journalPath, "journal", "", "append-only preview/apply journal path")
 	return command
 }
@@ -339,17 +252,6 @@ func readManifest(path string) (cleanup.Manifest, error) {
 		return cleanup.Manifest{}, err
 	}
 	return cleanup.DecodeManifest(data)
-}
-
-func readInventoryAggregate(path string) (cleanup.InventoryAggregate, error) {
-	if strings.TrimSpace(path) == "" {
-		return cleanup.InventoryAggregate{}, errors.New("--inventory is empty")
-	}
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return cleanup.InventoryAggregate{}, err
-	}
-	return cleanup.DecodeAggregate(data)
 }
 
 func writeJSONAtomically(path string, value any) error {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode"
 )
 
 const CurrentApprovalSchemaVersion = 1
@@ -48,8 +49,11 @@ func CanonicalApproval(approval Approval) ([]byte, error) {
 	if approval.ApprovalID == "" || approval.ManifestDigest == "" || approval.AccountID == "" || approval.RootID == "" || approval.Nonce == "" || approval.Issuer == "" || approval.FixtureDigest == "" {
 		return nil, errors.New("approval identity, scope, nonce, issuer, and fixture are required")
 	}
-	if approval.Mode != ModeQuarantine && approval.Mode != ModeTrash {
-		return nil, fmt.Errorf("unsupported approval mode %q", approval.Mode)
+	if err := validateOpaqueApprovalID(approval.ApprovalID); err != nil {
+		return nil, err
+	}
+	if approval.Mode != ModeQuarantine {
+		return nil, fmt.Errorf("unsupported approval mode %q; only quarantine is supported", approval.Mode)
 	}
 	if approval.MaxObjects <= 0 || approval.MaxBytes <= 0 {
 		return nil, errors.New("approval budgets must be positive")
@@ -58,6 +62,18 @@ func CanonicalApproval(approval Approval) ([]byte, error) {
 		return nil, errors.New("approval expiry is required")
 	}
 	return marshalCanonical(approval)
+}
+
+func validateOpaqueApprovalID(id string) error {
+	if len(id) == 0 || len(id) > 128 {
+		return errors.New("approval ID must be 1-128 ASCII opaque characters")
+	}
+	for _, r := range id {
+		if r > 127 || unicode.IsControl(r) || (r != '-' && r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r)) {
+			return errors.New("approval ID must contain only ASCII letters, digits, '-' or '_'")
+		}
+	}
+	return nil
 }
 
 func SignApproval(approval Approval, privateKey ed25519.PrivateKey) ([]byte, error) {

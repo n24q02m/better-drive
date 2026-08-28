@@ -22,8 +22,10 @@ func validManifest() Manifest {
 		Objects: []Object{
 			{
 				ID:              "object-b",
-				ParentID:        "parent-1",
+				ParentID:        "root-1",
 				Name:            "b.bin",
+				Path:            "b.bin",
+				ObjectType:      ObjectTypeFile,
 				ContentHash:     strings.Repeat("b", 64),
 				Size:            10,
 				Provider:        "drive",
@@ -31,16 +33,21 @@ func validManifest() Manifest {
 				RootID:          "root-1",
 				Namespace:       "backup/home",
 				Version:         "v2",
+				Generation:      "generation-b",
 				ETag:            "etag-b",
+				ModifiedAt:      time.Unix(90, 0).UTC(),
+				Depth:           1,
 				Class:           ClassDuplicateSameHash,
-				RetainedPeerID:  "object-a",
+				RetainedPeerID:  "retained-a",
 				OwnershipMarker: "marker-1",
 				RestoreEvidence: "restore-1",
 			},
 			{
 				ID:              "object-a",
-				ParentID:        "parent-1",
+				ParentID:        "root-1",
 				Name:            "a.bin",
+				Path:            "a.bin",
+				ObjectType:      ObjectTypeFile,
 				ContentHash:     strings.Repeat("b", 64),
 				Size:            10,
 				Provider:        "drive",
@@ -48,9 +55,12 @@ func validManifest() Manifest {
 				RootID:          "root-1",
 				Namespace:       "backup/home",
 				Version:         "v1",
+				Generation:      "generation-a",
 				ETag:            "etag-a",
+				ModifiedAt:      time.Unix(91, 0).UTC(),
+				Depth:           1,
 				Class:           ClassDuplicateSameHash,
-				RetainedPeerID:  "object-b",
+				RetainedPeerID:  "retained-b",
 				OwnershipMarker: "marker-1",
 				RestoreEvidence: "restore-1",
 			},
@@ -71,6 +81,39 @@ func TestValidateManifestAcceptsBoundSafeManifest(t *testing.T) {
 		t.Fatal("expected manifest digest")
 	}
 }
+func TestValidateManifestRequiresCompleteEmptyFolderProof(t *testing.T) {
+	m := validManifest()
+	m.Budget = Budget{MaxObjects: 1, MaxBytes: 1}
+	folder := m.Objects[0]
+	folder.ObjectType = ObjectTypeFolder
+	folder.Class = ClassOrphan
+	folder.ContentHash = ""
+	folder.Size = 0
+	m.Objects = []Object{folder}
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "empty") {
+		t.Fatalf("unproven empty-folder error = %v, want fail-closed rejection", err)
+	}
+
+	folder.ChildrenComplete = true
+	folder.ChildCount = 0
+	folder.SubtreeComplete = true
+	folder.SubtreeObjectCount = 0
+	folder.SubtreeWriterFence = "fence-1"
+	folder.EmptyCheckIDs = []string{"check-1", "check-2"}
+	m.Objects[0] = folder
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err != nil {
+		t.Fatalf("complete empty-folder proof rejected: %v", err)
+	}
+}
+
+func TestValidateManifestRejectsTrashMode(t *testing.T) {
+	m := validManifest()
+	m.Mode = Mode("trash")
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "quarantine") {
+		t.Fatalf("expected quarantine-only mode rejection, got %v", err)
+	}
+}
+
 
 func TestValidateManifestRejectsUnsafeClassesAndDuplicateIDs(t *testing.T) {
 	m := validManifest()

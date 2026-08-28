@@ -11,14 +11,21 @@ import (
 	"time"
 )
 
-const CurrentSchemaVersion = 1
+const CurrentSchemaVersion = 2
 
 const (
 	ModeQuarantine Mode = "quarantine"
-	ModeTrash      Mode = "trash"
 )
 
 type Mode string
+
+type ObjectType string
+
+const (
+	ObjectTypeFile   ObjectType = "file"
+	ObjectTypeFolder ObjectType = "folder"
+)
+
 
 type ObjectClass string
 
@@ -40,21 +47,33 @@ type Budget struct {
 }
 
 type Object struct {
-	ID              string      `json:"id"`
-	ParentID        string      `json:"parent_id"`
-	Name            string      `json:"name"`
-	ContentHash     string      `json:"content_hash"`
-	Size            int64       `json:"size"`
-	Provider        string      `json:"provider"`
-	AccountID       string      `json:"account_id"`
-	RootID          string      `json:"root_id"`
-	Namespace       string      `json:"namespace"`
-	Version         string      `json:"version"`
-	ETag            string      `json:"etag"`
-	Class           ObjectClass `json:"class"`
-	RetainedPeerID  string      `json:"retained_peer_id,omitempty"`
-	OwnershipMarker string      `json:"ownership_marker,omitempty"`
-	RestoreEvidence string      `json:"restore_evidence,omitempty"`
+	ID                  string      `json:"id"`
+	ParentID            string      `json:"parent_id"`
+	Name                string      `json:"name"`
+	Path                string      `json:"path"`
+	ObjectType          ObjectType  `json:"object_type"`
+	ContentHash         string      `json:"content_hash"`
+	Size                int64       `json:"size"`
+	Provider            string      `json:"provider"`
+	AccountID           string      `json:"account_id"`
+	RootID              string      `json:"root_id"`
+	Namespace           string      `json:"namespace"`
+	Version             string      `json:"version"`
+	Generation          string      `json:"generation"`
+	ETag                string      `json:"etag"`
+	ModifiedAt          time.Time   `json:"modified_at"`
+	Trashed             bool        `json:"trashed"`
+	Depth               int         `json:"depth"`
+	ChildrenComplete    bool        `json:"children_complete"`
+	ChildCount          int         `json:"child_count"`
+	SubtreeComplete     bool        `json:"subtree_complete"`
+	SubtreeObjectCount  int         `json:"subtree_object_count"`
+	Class               ObjectClass `json:"class"`
+	SubtreeWriterFence  string      `json:"subtree_writer_fence,omitempty"`
+	EmptyCheckIDs       []string    `json:"empty_check_ids,omitempty"`
+	RetainedPeerID      string      `json:"retained_peer_id,omitempty"`
+	OwnershipMarker     string      `json:"ownership_marker,omitempty"`
+	RestoreEvidence     string      `json:"restore_evidence,omitempty"`
 }
 
 type Manifest struct {
@@ -114,8 +133,8 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 			return Validation{}, fmt.Errorf("%s must not contain wildcard characters", name)
 		}
 	}
-	if manifest.Mode != ModeQuarantine && manifest.Mode != ModeTrash {
-		return Validation{}, fmt.Errorf("unsupported cleanup mode %q", manifest.Mode)
+	if manifest.Mode != ModeQuarantine {
+		return Validation{}, fmt.Errorf("unsupported cleanup mode %q; only quarantine is supported", manifest.Mode)
 	}
 	if manifest.CreatedAt.IsZero() || manifest.ExpiresAt.IsZero() || !manifest.ExpiresAt.After(manifest.CreatedAt) {
 		return Validation{}, errors.New("manifest created_at and expires_at must form a positive interval")
@@ -149,13 +168,9 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 		if object.Class != ClassDuplicateSameHash {
 			continue
 		}
-		peerKey := strings.Join([]string{object.Provider, object.AccountID, object.RootID, object.Namespace, object.RetainedPeerID}, "\x00")
-		peer, exists := seen[peerKey]
-		if !exists {
-			return Validation{}, fmt.Errorf("retained peer %q is not present in manifest", object.RetainedPeerID)
-		}
-		if peer.ContentHash != object.ContentHash {
-			return Validation{}, fmt.Errorf("retained peer %q content hash does not match duplicate %q", object.RetainedPeerID, object.ID)
+		peerKey := strings.Join([]string{object.Provider, object.AccountID, object.RetainedPeerID}, "\x00")
+		if _, selected := seen[peerKey]; selected {
+			return Validation{}, fmt.Errorf("retained peer %q must be absent from selected objects", object.RetainedPeerID)
 		}
 	}
 	if len(manifest.Objects) > manifest.Budget.MaxObjects {
@@ -177,31 +192,86 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 	}, nil
 }
 
-func ValidateManifestAgainstInventory(manifest Manifest, inventory InventoryAggregate, now time.Time) (Validation, error) {
+func ValidateManifestAgainstInventory(manifest Manifest, rootSet RootSet, inventory InventoryAggregate, now time.Time) (Validation, error) {
 	validation, err := ValidateManifest(manifest, now)
 	if err != nil {
 		return Validation{}, err
 	}
-	if inventory.SchemaVersion != CurrentInventorySchemaVersion || inventory.Status != InventoryComplete {
-		return Validation{}, errors.New("inventory is not a complete current-schema aggregate")
+	verified, err := validateAggregateCapture(rootSet, inventory, manifest.AccountID)
+	if err != nil {
+		return Validation{}, err
 	}
-	if inventory.AccountID != manifest.AccountID {
+	if verified.AccountID != manifest.AccountID {
 		return Validation{}, errors.New("inventory account does not match manifest account")
 	}
-	if inventory.InventoryHash != manifest.SourceInventoryHash {
+	if verified.InventoryHash != manifest.SourceInventoryHash {
 		return Validation{}, errors.New("inventory hash does not match manifest source_inventory_hash")
 	}
-	objects := make(map[string]Object, len(inventory.Objects))
-	for _, object := range inventory.Objects {
-		objects[objectKey(object)] = object
-	}
-	for _, selected := range manifest.Objects {
-		observed, exists := objects[objectKey(selected)]
-		if !exists {
-			return Validation{}, fmt.Errorf("manifest object %q is absent from inventory", selected.ID)
+	objects := make(map[string]Object, len(verified.Objects))
+	for _, object := range verified.Objects {
+		key := objectKey(object)
+		if _, exists := objects[key]; exists {
+			return Validation{}, fmt.Errorf("duplicate inventory object %q", key)
 		}
-		if observed.Name != selected.Name || observed.ContentHash != selected.ContentHash || observed.Size != selected.Size || observed.Version != selected.Version || observed.ETag != selected.ETag || observed.ParentID != selected.ParentID {
-			return Validation{}, fmt.Errorf("object %q metadata drifted from inventory", selected.ID)
+		objects[key] = object
+	}
+	selected := make(map[string]struct{}, len(manifest.Objects))
+	for _, object := range manifest.Objects {
+		selected[objectKey(object)] = struct{}{}
+	}
+	for _, selectedObject := range manifest.Objects {
+		observed, exists := objects[objectKey(selectedObject)]
+		if !exists {
+			return Validation{}, fmt.Errorf("manifest object %q is absent from inventory", selectedObject.ID)
+		}
+		if observed.Provider != selectedObject.Provider ||
+			observed.AccountID != selectedObject.AccountID ||
+			observed.RootID != selectedObject.RootID ||
+			observed.Namespace != selectedObject.Namespace ||
+			observed.Name != selectedObject.Name ||
+			observed.Path != selectedObject.Path ||
+			observed.ObjectType != selectedObject.ObjectType ||
+			observed.ContentHash != selectedObject.ContentHash ||
+			observed.Size != selectedObject.Size ||
+			observed.Version != selectedObject.Version ||
+			observed.Generation != selectedObject.Generation ||
+			observed.ETag != selectedObject.ETag ||
+			!observed.ModifiedAt.Equal(selectedObject.ModifiedAt) ||
+			observed.Trashed != selectedObject.Trashed ||
+			observed.Depth != selectedObject.Depth ||
+			observed.ParentID != selectedObject.ParentID ||
+			observed.ChildrenComplete != selectedObject.ChildrenComplete ||
+			observed.ChildCount != selectedObject.ChildCount ||
+			observed.SubtreeComplete != selectedObject.SubtreeComplete ||
+			observed.SubtreeObjectCount != selectedObject.SubtreeObjectCount {
+			return Validation{}, fmt.Errorf("object %q metadata drifted from inventory", selectedObject.ID)
+		}
+	}
+	for _, selectedObject := range manifest.Objects {
+		if selectedObject.Class != ClassDuplicateSameHash {
+			continue
+		}
+		peerKey := strings.Join([]string{selectedObject.Provider, selectedObject.AccountID, selectedObject.RetainedPeerID}, "\x00")
+		if _, selectedPeer := selected[peerKey]; selectedPeer {
+			return Validation{}, fmt.Errorf("retained peer %q must be absent from selected objects", selectedObject.RetainedPeerID)
+		}
+		peer, exists := objects[peerKey]
+		if !exists {
+			return Validation{}, fmt.Errorf("retained peer %q is absent from verified inventory", selectedObject.RetainedPeerID)
+		}
+		if peer.Trashed || peer.Class == ClassQuarantined {
+			return Validation{}, fmt.Errorf("retained peer %q is trashed or quarantined", peer.ID)
+		}
+		if peer.Class != ClassActive && peer.Class != ClassExpectedFixture && peer.Class != ClassLegacyRetained {
+			return Validation{}, fmt.Errorf("retained peer %q has unsafe class %q", peer.ID, peer.Class)
+		}
+		if peer.ContentHash != selectedObject.ContentHash || peer.Size != selectedObject.Size ||
+			peer.Provider != selectedObject.Provider || peer.AccountID != selectedObject.AccountID ||
+			peer.RootID != selectedObject.RootID || peer.Namespace != selectedObject.Namespace {
+			return Validation{}, fmt.Errorf("retained peer %q metadata does not match duplicate %q", peer.ID, selectedObject.ID)
+		}
+		if strings.TrimSpace(peer.OwnershipMarker) == "" || strings.TrimSpace(peer.RestoreEvidence) == "" {
+			return Validation{}, fmt.Errorf("retained peer %q lacks ownership and restore evidence", peer.ID)
 		}
 	}
 	return validation, nil
@@ -209,9 +279,10 @@ func ValidateManifestAgainstInventory(manifest Manifest, inventory InventoryAggr
 
 func validateObject(manifest Manifest, object Object) error {
 	for name, value := range map[string]string{
-		"id": object.ID, "name": object.Name, "provider": object.Provider,
-		"account_id": object.AccountID, "root_id": object.RootID, "namespace": object.Namespace,
-		"content_hash": object.ContentHash, "version": object.Version, "etag": object.ETag,
+		"id": object.ID, "parent_id": object.ParentID, "name": object.Name, "path": object.Path,
+		"provider": object.Provider, "account_id": object.AccountID, "root_id": object.RootID,
+		"namespace": object.Namespace, "version": object.Version, "generation": object.Generation,
+		"etag": object.ETag,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
@@ -220,11 +291,23 @@ func validateObject(manifest Manifest, object Object) error {
 			return fmt.Errorf("%s must not contain wildcard characters", name)
 		}
 	}
+	if object.ModifiedAt.IsZero() {
+		return errors.New("modified_at is required")
+	}
 	if object.Size < 0 {
 		return errors.New("size must not be negative")
 	}
+	if object.Depth < 0 {
+		return errors.New("depth must not be negative")
+	}
+	if object.ChildCount < 0 || object.SubtreeObjectCount < 0 {
+		return errors.New("folder child counts must not be negative")
+	}
 	if object.AccountID != manifest.AccountID || object.RootID != manifest.RootID || object.Namespace != manifest.Namespace {
 		return errors.New("provider/account/root/namespace does not match manifest scope")
+	}
+	if object.Trashed {
+		return errors.New("trashed objects are not mutation-eligible")
 	}
 	if object.Class != ClassDuplicateSameHash && object.Class != ClassOrphan && object.Class != ClassLegacyUnmarked {
 		return fmt.Errorf("class %q is not mutation-eligible", object.Class)
@@ -238,11 +321,38 @@ func validateObject(manifest Manifest, object Object) error {
 	if object.RestoreEvidence == "" {
 		return errors.New("restore evidence is required")
 	}
+	switch object.ObjectType {
+	case ObjectTypeFile:
+		if strings.TrimSpace(object.ContentHash) == "" {
+			return errors.New("content_hash is required for files")
+		}
+		if object.ChildrenComplete || object.ChildCount != 0 || object.SubtreeComplete || object.SubtreeObjectCount != 0 {
+			return errors.New("file contains folder subtree metadata")
+		}
+	case ObjectTypeFolder:
+		if object.Size != 0 {
+			return errors.New("folder size must be zero")
+		}
+		if !object.ChildrenComplete || object.ChildCount != 0 || !object.SubtreeComplete || object.SubtreeObjectCount != 0 {
+			return errors.New("folder is not proven empty by complete traversal")
+		}
+		if strings.TrimSpace(object.SubtreeWriterFence) == "" {
+			return errors.New("empty folder requires subtree writer fence")
+		}
+		if len(object.EmptyCheckIDs) != 2 ||
+			strings.TrimSpace(object.EmptyCheckIDs[0]) == "" ||
+			strings.TrimSpace(object.EmptyCheckIDs[1]) == "" ||
+			object.EmptyCheckIDs[0] >= object.EmptyCheckIDs[1] {
+			return errors.New("empty folder requires two sorted unique empty checks")
+		}
+	default:
+		return fmt.Errorf("object_type %q is unsupported", object.ObjectType)
+	}
 	return nil
 }
 
 func objectKey(object Object) string {
-	return strings.Join([]string{object.Provider, object.AccountID, object.RootID, object.Namespace, object.ID}, "\x00")
+	return physicalObjectKey(object)
 }
 
 func DecodeManifest(data []byte) (Manifest, error) {

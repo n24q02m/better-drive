@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type ApprovalStore struct {
@@ -16,6 +17,33 @@ type ApprovalStore struct {
 }
 
 func NewApprovalStore(root string) *ApprovalStore { return &ApprovalStore{Root: root} }
+func (store *ApprovalStore) path(subdir, filename string) (string, error) {
+	if store == nil || strings.TrimSpace(store.Root) == "" {
+		return "", errors.New("approval store root is required")
+	}
+	if strings.TrimSpace(subdir) == "" || filepath.Base(subdir) != subdir {
+		return "", errors.New("approval store subdirectory is invalid")
+	}
+	if strings.TrimSpace(filename) == "" || filepath.Base(filename) != filename {
+		return "", errors.New("approval store filename is invalid")
+	}
+	base, err := filepath.Abs(filepath.Join(store.Root, subdir))
+	if err != nil {
+		return "", err
+	}
+	candidate, err := filepath.Abs(filepath.Join(base, filename))
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(base, candidate)
+	if err != nil {
+		return "", err
+	}
+	if relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
+		return "", errors.New("approval store path escapes fixed subdirectory")
+	}
+	return candidate, nil
+}
 
 type draftRecord struct {
 	SchemaVersion int      `json:"schema_version"`
@@ -32,7 +60,10 @@ func (store *ApprovalStore) Prepare(approval Approval) (draftRecord, error) {
 		return draftRecord{}, err
 	}
 	record := draftRecord{SchemaVersion: CurrentApprovalSchemaVersion, DraftDigest: Digest(canonical), Approval: approval}
-	path := filepath.Join(store.Root, "cleanup-drafts", approval.ApprovalID+".json")
+	path, err := store.path("cleanup-drafts", approval.ApprovalID+".json")
+	if err != nil {
+		return draftRecord{}, err
+	}
 	data, err := json.MarshalIndent(record, "", "  ")
 	if err != nil {
 		return draftRecord{}, err
@@ -77,12 +108,31 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 	if err != nil || len(signature) != ed25519.SignatureSize {
 		return errors.New("sealed intent signature is not valid Ed25519 hex")
 	}
-	draftPath := filepath.Join(store.Root, "cleanup-drafts", intent.Approval.ApprovalID+".json")
-	if _, err := os.Stat(draftPath); err != nil {
+	draftPath, err := store.path("cleanup-drafts", intent.Approval.ApprovalID+".json")
+	if err != nil {
+		return err
+	}
+	draftData, err := os.ReadFile(draftPath)
+	if err != nil {
 		return fmt.Errorf("draft must exist before activation: %w", err)
 	}
-	intentPath := filepath.Join(store.Root, "cleanup-intents", intent.Approval.ApprovalID+".json")
-	statePath := filepath.Join(store.Root, "cleanup-states", intent.Approval.ApprovalID+".json")
+	var draft draftRecord
+	if err := json.Unmarshal(draftData, &draft); err != nil {
+		return fmt.Errorf("decode existing draft: %w", err)
+	}
+	draftCanonical, err := CanonicalApproval(draft.Approval)
+	if err != nil || draft.SchemaVersion != CurrentApprovalSchemaVersion ||
+		draft.DraftDigest != Digest(draftCanonical) || !bytes.Equal(draftCanonical, canonical) {
+		return errors.New("draft approval does not match sealed intent")
+	}
+	intentPath, err := store.path("cleanup-intents", intent.Approval.ApprovalID+".json")
+	if err != nil {
+		return err
+	}
+	statePath, err := store.path("cleanup-states", intent.Approval.ApprovalID+".json")
+	if err != nil {
+		return err
+	}
 	intentData, err := json.MarshalIndent(intent, "", "  ")
 	if err != nil {
 		return err
@@ -110,7 +160,14 @@ func (store *ApprovalStore) ReadState(approvalID string) (Intent, error) {
 	if store == nil || store.Root == "" || approvalID == "" {
 		return Intent{}, errors.New("approval store root and approval ID are required")
 	}
-	data, err := os.ReadFile(filepath.Join(store.Root, "cleanup-states", approvalID+".json"))
+	if err := validateOpaqueApprovalID(approvalID); err != nil {
+		return Intent{}, err
+	}
+	path, err := store.path("cleanup-states", approvalID+".json")
+	if err != nil {
+		return Intent{}, err
+	}
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return Intent{}, err
 	}

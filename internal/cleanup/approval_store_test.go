@@ -30,6 +30,22 @@ func TestApprovalStoreIsCreateOnlyAndRejectsForeignDraft(t *testing.T) {
 		t.Fatalf("expected draft file: %v", err)
 	}
 }
+func TestApprovalStoreRejectsPathTraversalApprovalIDs(t *testing.T) {
+	store := NewApprovalStore(t.TempDir())
+	for _, approvalID := range []string{"../escape", `..\escape`, "..", `C:\escape`, "C:escape", "approval.json", "approval/child", "approval\\child", "approval\x00child", "approval\nchild"} {
+		t.Run(strings.ReplaceAll(approvalID, "\x00", "nul"), func(t *testing.T) {
+			approval := validApproval()
+			approval.ApprovalID = approvalID
+			if _, err := store.Prepare(approval); err == nil {
+				t.Fatalf("Prepare(%q) unexpectedly succeeded", approvalID)
+			}
+			if _, err := store.ReadState(approvalID); err == nil {
+				t.Fatalf("ReadState(%q) unexpectedly succeeded", approvalID)
+			}
+		})
+	}
+}
+
 
 func TestApprovalStoreActivateAndReadState(t *testing.T) {
 	store := NewApprovalStore(t.TempDir())
