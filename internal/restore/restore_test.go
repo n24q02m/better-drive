@@ -5,13 +5,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -570,7 +568,7 @@ func TestWorkstationAndOCIArtifactFixtures(t *testing.T) {
 			KeyRef:       c.keyRef,
 			KeyVersion:   uint64(i + 1),
 		}
-		key := []byte(fmt.Sprintf("secret-key-for-%-16s", c.component))
+		key := []byte(fmt.Sprintf("%-32.32s", "key-"+c.component))
 		resolver[meta.Reference()] = key
 		ref := SourceReference{
 			Provider:  "r2",

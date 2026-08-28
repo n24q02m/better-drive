@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -227,15 +228,17 @@ func TestHistoryStoreRejectsEmptyPathAndPreservesPermissions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if info.Mode().Perm() != 0o600 {
-		t.Fatalf("history file perm = %o, want 0600", info.Mode().Perm())
-	}
-	dirInfo, err := os.Stat(filepath.Dir(path))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if dirInfo.Mode().Perm()&0o077 != 0 {
-		t.Fatalf("history dir perm = %o, want 0700", dirInfo.Mode().Perm())
+	if runtime.GOOS != "windows" {
+		if info.Mode().Perm() != 0o600 {
+			t.Fatalf("history file perm = %o, want 0600", info.Mode().Perm())
+		}
+		dirInfo, err := os.Stat(filepath.Dir(path))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dirInfo.Mode().Perm()&0o077 != 0 {
+			t.Fatalf("history dir perm = %o, want 0700", dirInfo.Mode().Perm())
+		}
 	}
 	// constructor with nil clock uses time.Now and still works
 	storeNilClock := NewHistoryStore(filepath.Join(t.TempDir(), "history2.jsonl"), nil)

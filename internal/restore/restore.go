@@ -2,7 +2,6 @@ package restore
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -176,7 +175,6 @@ func entryIsExecutable(entry Entry) bool {
 		entry.SourceReference != nil ||
 		strings.TrimSpace(entry.PlaintextDigest) != "" ||
 		strings.TrimSpace(entry.CiphertextDigest) != "" ||
-		entry.PlaintextSize != 0 ||
 		entry.ArtifactMetadata != (artifactcrypto.Metadata{})
 }
 
@@ -661,7 +659,10 @@ func safeParent(root, relative string) (string, error) {
 		if err != nil {
 			return "", err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !isSafeDirectoryPath(parent) {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("restore ancestor is a symlink and not a safe directory")
+		}
+		if !info.IsDir() || !isSafeDirectoryPath(parent) {
 			return "", fmt.Errorf("restore ancestor is not a safe directory")
 		}
 	}
@@ -924,7 +925,10 @@ func safeExistingParent(root, relative string) (string, bool, error) {
 		if err != nil {
 			return "", false, err
 		}
-		if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() || !isSafeDirectoryPath(parent) {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", false, fmt.Errorf("restore ancestor is a symlink and not a safe directory")
+		}
+		if !info.IsDir() || !isSafeDirectoryPath(parent) {
 			return "", false, fmt.Errorf("restore ancestor is not a safe directory")
 		}
 	}
@@ -1031,14 +1035,18 @@ func RecoverWithIdentity(root string, identity RootIdentity, records []JournalRe
 				return fmt.Errorf("remove recovered destination %q: %w", clean, err)
 			}
 		} else if record.Action == "replace" {
-			// For replace: restore rollback snapshot.
+			if record.After == "staged" && record.RollbackPath == "" {
+				continue
+			}
 			if record.RollbackPath == "" {
 				return fmt.Errorf("replace recovery requires rollback snapshot path")
 			}
-			if err := copyFileNoFollow(record.RollbackPath, destination); err != nil {
-				return fmt.Errorf("restore from rollback snapshot: %w", err)
+			if _, err := os.Lstat(record.RollbackPath); err == nil {
+				if err := copyFileNoFollow(record.RollbackPath, destination); err != nil {
+					return fmt.Errorf("restore from rollback snapshot: %w", err)
+				}
+				_ = os.Remove(record.RollbackPath)
 			}
-			_ = os.Remove(record.RollbackPath)
 		}
 	}
 	return identity.Validate(root)

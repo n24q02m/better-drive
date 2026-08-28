@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func TestApprovalStoreIsCreateOnlyAndRejectsForeignDraft(t *testing.T) {

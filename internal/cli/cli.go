@@ -87,7 +87,7 @@ func newRootCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), artifactCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }

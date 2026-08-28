@@ -142,15 +142,29 @@ func artifactOpenCmd(resolver artifactcrypto.Resolver) *cobra.Command {
 			}
 			var out io.Writer = cmd.OutOrStdout()
 			if outputPath != "" && outputPath != "-" {
-				f, err := os.OpenFile(outputPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
+				tmpPath := outputPath + fmt.Sprintf(".tmp.%d", os.Getpid())
+				f, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 				if err != nil {
 					return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("open output: %w", err)), "provide a writable output path")
 				}
-				defer f.Close()
-				out = f
-			}
-			if err := artifactcrypto.Open(out, in, resolver, expected); err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("artifact open failed: %w", err)), "tampered artifact or wrong key/metadata")
+				openErr := artifactcrypto.Open(f, in, resolver, expected)
+				closeErr := f.Close()
+				if openErr != nil {
+					_ = os.Remove(tmpPath)
+					return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("artifact open failed: %w", openErr)), "tampered artifact or wrong key/metadata")
+				}
+				if closeErr != nil {
+					_ = os.Remove(tmpPath)
+					return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("close output: %w", closeErr)), "failed to flush plaintext output")
+				}
+				if err := os.Rename(tmpPath, outputPath); err != nil {
+					_ = os.Remove(tmpPath)
+					return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("commit output: %w", err)), "failed to commit plaintext output")
+				}
+			} else {
+				if err := artifactcrypto.Open(out, in, resolver, expected); err != nil {
+					return exitcode.WithRemediation(exitcode.ConfigError(fmt.Errorf("artifact open failed: %w", err)), "tampered artifact or wrong key/metadata")
+				}
 			}
 			if format == output.FormatJSON {
 				return output.RenderJSON(cmd.OutOrStdout(), map[string]string{
