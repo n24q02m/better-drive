@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2026-08-29 - Zero-allocation iterative path splitting in hot paths
+**Learning:** Using `strings.Split` for path processing in hot paths like restore allocates slices unnecessarily and puts pressure on the garbage collector. `strings.HasPrefix` for single character checks also adds unnecessary overhead.
+**Action:** Use iterative `strings.Cut` loops instead of `strings.Split` when processing paths element-by-element in hot paths, and use zero-allocation byte indexing (e.g., `value[0] == '/'`) after ensuring the string is not empty. Pre-allocate slices using `strings.Count`.
