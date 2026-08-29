@@ -74,10 +74,15 @@ func cleanupSecureSpool(spool *os.File) error {
 	if spool == nil {
 		return nil
 	}
+	var cleanupErrs []error
+	name := spool.Name()
 	if err := spool.Close(); err != nil {
-		return wrapError("close artifact spool", err)
+		cleanupErrs = append(cleanupErrs, wrapError("close artifact spool", err))
 	}
-	return nil
+	if err := os.Remove(name); err != nil && !errors.Is(err, os.ErrNotExist) {
+		cleanupErrs = append(cleanupErrs, wrapError("remove artifact spool", err))
+	}
+	return errors.Join(cleanupErrs...)
 }
 
 func currentProcessSID() (*windows.SID, error) {
