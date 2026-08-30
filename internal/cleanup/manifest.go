@@ -1,20 +1,23 @@
 package cleanup
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"sort"
 	"strings"
 	"time"
 )
 
-const CurrentSchemaVersion = 2
+const CurrentSchemaVersion = 3
 
 const (
-	ModeQuarantine Mode = "quarantine"
+	ModeQuarantine                  Mode = "quarantine"
+	MutationSemanticsDriveOwnerRisk      = "drive_owner_risk_single_attempt_no_cas"
 )
 
 type Mode string
@@ -43,6 +46,13 @@ const (
 type Budget struct {
 	MaxObjects int   `json:"max_objects"`
 	MaxBytes   int64 `json:"max_bytes"`
+}
+
+type QuarantineTarget struct {
+	Provider         string `json:"provider"`
+	AccountID        string `json:"account_id"`
+	ParentID         string `json:"parent_id"`
+	EnrollmentDigest string `json:"enrollment_digest"`
 }
 
 type Object struct {
@@ -76,19 +86,21 @@ type Object struct {
 }
 
 type Manifest struct {
-	SchemaVersion       int       `json:"schema_version"`
-	ManifestID          string    `json:"manifest_id"`
-	AccountID           string    `json:"account_id"`
-	RootID              string    `json:"root_id"`
-	Namespace           string    `json:"namespace"`
-	Mode                Mode      `json:"mode"`
-	CreatedAt           time.Time `json:"created_at"`
-	ExpiresAt           time.Time `json:"expires_at"`
-	Nonce               string    `json:"nonce"`
-	Budget              Budget    `json:"budget"`
-	SourceInventoryHash string    `json:"source_inventory_hash"`
-	FixtureDigest       string    `json:"fixture_digest,omitempty"`
-	Objects             []Object  `json:"objects"`
+	SchemaVersion       int              `json:"schema_version"`
+	ManifestID          string           `json:"manifest_id"`
+	AccountID           string           `json:"account_id"`
+	RootID              string           `json:"root_id"`
+	Namespace           string           `json:"namespace"`
+	Mode                Mode             `json:"mode"`
+	MutationSemantics   string           `json:"mutation_semantics"`
+	QuarantineTarget    QuarantineTarget `json:"quarantine_target"`
+	CreatedAt           time.Time        `json:"created_at"`
+	ExpiresAt           time.Time        `json:"expires_at"`
+	Nonce               string           `json:"nonce"`
+	Budget              Budget           `json:"budget"`
+	SourceInventoryHash string           `json:"source_inventory_hash"`
+	FixtureDigest       string           `json:"fixture_digest"`
+	Objects             []Object         `json:"objects"`
 }
 
 type Validation struct {
@@ -124,6 +136,7 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 		"namespace":             manifest.Namespace,
 		"nonce":                 manifest.Nonce,
 		"source_inventory_hash": manifest.SourceInventoryHash,
+		"fixture_digest":        manifest.FixtureDigest,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return Validation{}, fmt.Errorf("%s is required", name)
@@ -131,6 +144,21 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 		if strings.ContainsAny(value, "*?[]") {
 			return Validation{}, fmt.Errorf("%s must not contain wildcard characters", name)
 		}
+	}
+	if manifest.MutationSemantics != MutationSemanticsDriveOwnerRisk {
+		return Validation{}, errors.New("manifest must explicitly bind Drive owner-risk single-attempt no-CAS semantics")
+	}
+	if err := validateSHA256Hex(manifest.SourceInventoryHash, "source_inventory_hash"); err != nil {
+		return Validation{}, err
+	}
+	if err := validateSHA256Hex(manifest.FixtureDigest, "fixture_digest"); err != nil {
+		return Validation{}, err
+	}
+	if err := validateQuarantineTarget(manifest.QuarantineTarget, manifest.AccountID); err != nil {
+		return Validation{}, err
+	}
+	if manifest.QuarantineTarget.ParentID == manifest.RootID {
+		return Validation{}, errors.New("quarantine target must be outside the source root")
 	}
 	if manifest.Mode != ModeQuarantine {
 		return Validation{}, fmt.Errorf("unsupported cleanup mode %q; only quarantine is supported", manifest.Mode)
@@ -158,6 +186,9 @@ func ValidateManifest(manifest Manifest, now time.Time) (Validation, error) {
 			return Validation{}, fmt.Errorf("duplicate object ID %q in canonical provider context", object.ID)
 		}
 		seen[key] = object
+		if object.ID == manifest.QuarantineTarget.ParentID {
+			return Validation{}, errors.New("quarantine target must not be a selected object")
+		}
 		if totalBytes > maxInt64-object.Size {
 			return Validation{}, fmt.Errorf("object byte count overflow")
 		}
@@ -276,6 +307,36 @@ func ValidateManifestAgainstInventory(manifest Manifest, rootSet RootSet, invent
 	return validation, nil
 }
 
+func validateSHA256Hex(value, name string) error {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return fmt.Errorf("%s must be a lowercase SHA-256 digest", name)
+	}
+	decoded, err := hex.DecodeString(value)
+	if err != nil || len(decoded) != sha256.Size {
+		return fmt.Errorf("%s must be a lowercase SHA-256 digest", name)
+	}
+	return nil
+}
+
+func validateQuarantineTarget(target QuarantineTarget, accountID string) error {
+	for name, value := range map[string]string{
+		"quarantine provider":   target.Provider,
+		"quarantine account_id": target.AccountID,
+		"quarantine parent_id":  target.ParentID,
+	} {
+		if strings.TrimSpace(value) == "" || strings.ContainsAny(value, "*?[]") {
+			return fmt.Errorf("%s is required and must be an exact ID", name)
+		}
+	}
+	if target.Provider != "drive" {
+		return fmt.Errorf("quarantine provider %q is unsupported", target.Provider)
+	}
+	if target.AccountID != accountID {
+		return errors.New("quarantine account does not match manifest account")
+	}
+	return validateSHA256Hex(target.EnrollmentDigest, "quarantine enrollment_digest")
+}
+
 func validateObject(manifest Manifest, object Object) error {
 	for name, value := range map[string]string{
 		"id": object.ID, "parent_id": object.ParentID, "name": object.Name, "path": object.Path,
@@ -302,8 +363,12 @@ func validateObject(manifest Manifest, object Object) error {
 	if object.ChildCount < 0 || object.SubtreeObjectCount < 0 {
 		return errors.New("folder child counts must not be negative")
 	}
-	if object.AccountID != manifest.AccountID || object.RootID != manifest.RootID || object.Namespace != manifest.Namespace {
-		return errors.New("provider/account/root/namespace does not match manifest scope")
+	if object.Provider != manifest.QuarantineTarget.Provider ||
+		object.AccountID != manifest.AccountID ||
+		object.AccountID != manifest.QuarantineTarget.AccountID ||
+		object.RootID != manifest.RootID ||
+		object.Namespace != manifest.Namespace {
+		return errors.New("provider/account/root/namespace does not match manifest scope and quarantine target")
 	}
 	if object.Trashed {
 		return errors.New("trashed objects are not mutation-eligible")
@@ -355,9 +420,15 @@ func objectKey(object Object) string {
 }
 
 func DecodeManifest(data []byte) (Manifest, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
 	var manifest Manifest
-	if err := json.Unmarshal(data, &manifest); err != nil {
+	if err := decoder.Decode(&manifest); err != nil {
 		return Manifest{}, fmt.Errorf("decode cleanup manifest: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return Manifest{}, errors.New("decode cleanup manifest: trailing JSON is not allowed")
 	}
 	return manifest, nil
 }

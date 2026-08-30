@@ -9,28 +9,31 @@ import (
 	"unicode"
 )
 
-const CurrentApprovalSchemaVersion = 1
+const CurrentApprovalSchemaVersion = 2
 
 const (
-	ApprovalDraft    = "draft"
-	ApprovalApproved = "approved"
-	ApprovalClaimed  = "claimed"
-	ApprovalConsumed = "consumed"
+	ApprovalDraft               = "draft"
+	ApprovalApproved            = "approved"
+	ApprovalClaimed             = "claimed"
+	ApprovalConsumed            = "consumed"
+	ApprovalNeedsReconciliation = "needs_reconciliation"
 )
 
 type Approval struct {
-	SchemaVersion  int       `json:"schema_version"`
-	ApprovalID     string    `json:"approval_id"`
-	ManifestDigest string    `json:"manifest_digest"`
-	AccountID      string    `json:"account_id"`
-	RootID         string    `json:"root_id"`
-	Mode           Mode      `json:"mode"`
-	MaxObjects     int       `json:"max_objects"`
-	MaxBytes       int64     `json:"max_bytes"`
-	ExpiresAt      time.Time `json:"expires_at"`
-	Nonce          string    `json:"nonce"`
-	Issuer         string    `json:"issuer"`
-	FixtureDigest  string    `json:"fixture_digest"`
+	SchemaVersion     int              `json:"schema_version"`
+	ApprovalID        string           `json:"approval_id"`
+	ManifestDigest    string           `json:"manifest_digest"`
+	AccountID         string           `json:"account_id"`
+	RootID            string           `json:"root_id"`
+	Mode              Mode             `json:"mode"`
+	MutationSemantics string           `json:"mutation_semantics"`
+	QuarantineTarget  QuarantineTarget `json:"quarantine_target"`
+	MaxObjects        int              `json:"max_objects"`
+	MaxBytes          int64            `json:"max_bytes"`
+	ExpiresAt         time.Time        `json:"expires_at"`
+	Nonce             string           `json:"nonce"`
+	Issuer            string           `json:"issuer"`
+	FixtureDigest     string           `json:"fixture_digest"`
 }
 
 type Intent struct {
@@ -54,6 +57,18 @@ func CanonicalApproval(approval Approval) ([]byte, error) {
 	}
 	if approval.Mode != ModeQuarantine {
 		return nil, fmt.Errorf("unsupported approval mode %q; only quarantine is supported", approval.Mode)
+	}
+	if approval.MutationSemantics != MutationSemanticsDriveOwnerRisk {
+		return nil, errors.New("approval must explicitly bind Drive owner-risk single-attempt no-CAS semantics")
+	}
+	if err := validateSHA256Hex(approval.ManifestDigest, "approval manifest_digest"); err != nil {
+		return nil, err
+	}
+	if err := validateSHA256Hex(approval.FixtureDigest, "approval fixture_digest"); err != nil {
+		return nil, err
+	}
+	if err := validateQuarantineTarget(approval.QuarantineTarget, approval.AccountID); err != nil {
+		return nil, err
 	}
 	if approval.MaxObjects <= 0 || approval.MaxBytes <= 0 {
 		return nil, errors.New("approval budgets must be positive")
@@ -120,6 +135,34 @@ func ActivateApproval(approval Approval, signature []byte, root TrustRoot, now t
 		State:         ApprovalApproved,
 		CreatedAt:     now.UTC(),
 	}, nil
+}
+
+func ValidateApprovalForManifest(approval Approval, manifest Manifest, now time.Time) error {
+	if _, err := CanonicalApproval(approval); err != nil {
+		return err
+	}
+	validation, err := ValidateManifest(manifest, now)
+	if err != nil {
+		return err
+	}
+	if approval.ManifestDigest != validation.ManifestDigest {
+		return errors.New("approval manifest_digest does not match canonical manifest")
+	}
+	if approval.AccountID != manifest.AccountID ||
+		approval.RootID != manifest.RootID ||
+		approval.Mode != manifest.Mode ||
+		approval.MutationSemantics != manifest.MutationSemantics ||
+		approval.MaxObjects != manifest.Budget.MaxObjects ||
+		approval.MaxBytes != manifest.Budget.MaxBytes ||
+		approval.Nonce != manifest.Nonce ||
+		approval.FixtureDigest != manifest.FixtureDigest ||
+		!approval.ExpiresAt.Equal(manifest.ExpiresAt) {
+		return errors.New("approval scope, budget, expiry, nonce, or fixture does not match manifest")
+	}
+	if approval.QuarantineTarget != manifest.QuarantineTarget {
+		return errors.New("approval quarantine target does not match manifest")
+	}
+	return nil
 }
 
 func marshalCanonical(value any) ([]byte, error) {

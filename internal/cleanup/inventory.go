@@ -74,7 +74,7 @@ type InventoryState struct {
 
 func DecodeRootSet(data []byte) (RootSet, error) {
 	var rootSet RootSet
-	if err := json.Unmarshal(data, &rootSet); err != nil {
+	if err := decodeStrictJSONRecord(data, &rootSet); err != nil {
 		return RootSet{}, fmt.Errorf("decode all-roots set: %w", err)
 	}
 	if rootSet.SchemaVersion != CurrentRootSetSchemaVersion {

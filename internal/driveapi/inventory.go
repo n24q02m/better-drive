@@ -1,416 +1,556 @@
 package driveapi
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/n24q02m/better-drive/internal/cleanup"
 )
 
 const (
-	maxInventoryPages   = 1_000_000
-	maxInventoryObjects = 1_000_000
-	maxInventoryDepth   = 1024
+	CurrentInventoryPlanSchemaVersion = 1
+	driveFolderMIMEType               = "application/vnd.google-apps.folder"
+	maxDriveInventoryPages            = 10_000
+	maxDriveInventoryObjects          = 1_000_000
 )
 
-type RootRequest struct {
-	Provider  string
-	AccountID string
-	RootID    string
-	Namespace string
+type InventoryRoot struct {
+	Provider  string `json:"provider"`
+	AccountID string `json:"account_id"`
+	RootID    string `json:"root_id"`
+	DriveID   string `json:"drive_id,omitempty"`
+	Namespace string `json:"namespace"`
 }
 
-type InventoryLimits struct {
-	MaxPages   int
-	MaxObjects int
-	MaxDepth   int
+type InventoryBinding struct {
+	Provider        string              `json:"provider"`
+	AccountID       string              `json:"account_id"`
+	RootID          string              `json:"root_id"`
+	Namespace       string              `json:"namespace"`
+	ObjectID        string              `json:"object_id"`
+	Class           cleanup.ObjectClass `json:"class"`
+	RetainedPeerID  string              `json:"retained_peer_id,omitempty"`
+	OwnershipMarker string              `json:"ownership_marker,omitempty"`
+	RestoreEvidence string              `json:"restore_evidence,omitempty"`
 }
 
-func (limits InventoryLimits) validate() error {
-	if limits.MaxPages <= 0 || limits.MaxPages > maxInventoryPages {
-		return fmt.Errorf("max page limit must be between 1 and %d", maxInventoryPages)
-	}
-	if limits.MaxObjects <= 0 || limits.MaxObjects > maxInventoryObjects {
-		return fmt.Errorf("max object limit must be between 1 and %d", maxInventoryObjects)
-	}
-	if limits.MaxDepth <= 0 || limits.MaxDepth > maxInventoryDepth {
-		return fmt.Errorf("max depth limit must be between 1 and %d", maxInventoryDepth)
-	}
-	return nil
+type InventoryPlan struct {
+	SchemaVersion int                `json:"schema_version"`
+	ExpectedHash  string             `json:"expected_hash"`
+	AccountID     string             `json:"account_id"`
+	Roots         []InventoryRoot    `json:"roots"`
+	Bindings      []InventoryBinding `json:"bindings"`
 }
 
-func (client *Client) CollectAllRoots(ctx context.Context, accountID string, requests []RootRequest, limits InventoryLimits) (cleanup.RootSet, error) {
-	if client == nil || client.provider == nil {
-		return cleanup.RootSet{}, errors.New("Drive provider is not configured")
-	}
-	if strings.TrimSpace(accountID) == "" {
-		return cleanup.RootSet{}, errors.New("account is required")
-	}
-	if len(requests) == 0 {
-		return cleanup.RootSet{}, errors.New("all-roots request set must not be empty")
-	}
-	if err := limits.validate(); err != nil {
-		return cleanup.RootSet{}, err
-	}
-	requestedRootIDs := make(map[string]struct{}, len(requests))
-	for index, request := range requests {
-		if strings.TrimSpace(request.Provider) == "" || strings.TrimSpace(request.RootID) == "" || strings.TrimSpace(request.Namespace) == "" {
-			return cleanup.RootSet{}, fmt.Errorf("root request %d provider, root, and namespace are required", index)
-		}
-		if request.AccountID != accountID {
-			return cleanup.RootSet{}, fmt.Errorf("root request %d account %q does not match requested account %q", index, request.AccountID, accountID)
-		}
-		rootKey := strings.Join([]string{request.Provider, request.AccountID, request.RootID}, "\x00")
-		if _, exists := requestedRootIDs[rootKey]; exists {
-			return cleanup.RootSet{}, fmt.Errorf("overlapping physical root %q across namespaces", rootKey)
-		}
-		requestedRootIDs[rootKey] = struct{}{}
-	}
-	seenRoots := make(map[string]struct{}, len(requests))
-	seenObjects := make(map[string]struct{})
-	roots := make([]cleanup.Root, 0, len(requests))
-	remaining := limits
-	for index, request := range requests {
-		if request.AccountID != accountID {
-			return cleanup.RootSet{}, fmt.Errorf("root request %d account %q does not match requested account %q", index, request.AccountID, accountID)
-		}
-		rootKey := strings.Join([]string{request.Provider, request.AccountID, request.RootID}, "\x00")
-		if _, exists := seenRoots[rootKey]; exists {
-			return cleanup.RootSet{}, fmt.Errorf("overlapping physical root %q across namespaces", rootKey)
-		}
-		seenRoots[rootKey] = struct{}{}
-		if remaining.MaxPages <= 0 {
-			return cleanup.RootSet{}, fmt.Errorf("all-roots page limit %d exceeded", limits.MaxPages)
-		}
-		if remaining.MaxObjects <= 0 {
-			return cleanup.RootSet{}, fmt.Errorf("all-roots object limit %d exceeded", limits.MaxObjects)
-		}
-		root, err := client.CollectRoot(ctx, request, remaining)
-		if err != nil {
-			return cleanup.RootSet{}, fmt.Errorf("collect root %q: %w", rootKey, err)
-		}
-		remaining.MaxPages -= len(root.Pages)
-		objectCount := 0
-		for _, page := range root.Pages {
-			objectCount += len(page.Objects)
-			for _, object := range page.Objects {
-				physicalKey := strings.Join([]string{object.Provider, object.AccountID, object.ID}, "\x00")
-				if _, requestedRoot := requestedRootIDs[physicalKey]; requestedRoot {
-					return cleanup.RootSet{}, fmt.Errorf("overlapping nested root object %q", physicalKey)
-				}
-				if _, exists := seenObjects[physicalKey]; exists {
-					return cleanup.RootSet{}, fmt.Errorf("overlapping physical object %q across roots", physicalKey)
-				}
-				seenObjects[physicalKey] = struct{}{}
-			}
-		}
-		remaining.MaxObjects -= objectCount
-		roots = append(roots, root)
-	}
-	sort.Slice(roots, func(i, j int) bool {
-		left := strings.Join([]string{roots[i].Provider, roots[i].AccountID, roots[i].RootID, roots[i].Namespace}, "\x00")
-		right := strings.Join([]string{roots[j].Provider, roots[j].AccountID, roots[j].RootID, roots[j].Namespace}, "\x00")
-		return left < right
-	})
-	rootSet, err := cleanup.FreezeRootSet(cleanup.RootSet{SchemaVersion: cleanup.CurrentRootSetSchemaVersion, Roots: roots})
-	if err != nil {
-		return cleanup.RootSet{}, fmt.Errorf("freeze all-roots set: %w", err)
-	}
-	return rootSet, nil
+type InventoryClient struct {
+	provider *quarantineHTTPClient
 }
 
-type folderVisit struct {
+type inventoryParent struct {
 	id    string
 	path  string
 	depth int
 }
 
-type objectLocation struct {
-	pageIndex   int
-	objectIndex int
+type driveListResponse struct {
+	NextPageToken string      `json:"nextPageToken"`
+	Files         []driveFile `json:"files"`
 }
 
-func (client *Client) CollectRoot(ctx context.Context, request RootRequest, limits InventoryLimits) (cleanup.Root, error) {
-	if client == nil || client.provider == nil {
-		return cleanup.Root{}, errors.New("Drive provider is not configured")
-	}
-	for name, value := range map[string]string{"provider": request.Provider, "account": request.AccountID, "root": request.RootID, "namespace": request.Namespace} {
-		if strings.TrimSpace(value) == "" {
-			return cleanup.Root{}, fmt.Errorf("%s is required", name)
-		}
-	}
-	if err := limits.validate(); err != nil {
-		return cleanup.Root{}, err
-	}
-	root := cleanup.Root{
-		Provider: request.Provider, AccountID: request.AccountID, RootID: request.RootID,
-		Namespace: request.Namespace, ExpectedPages: limits.MaxPages,
-	}
-	queue := []folderVisit{{id: request.RootID, depth: 0}}
-	folderParents := map[string]string{request.RootID: ""}
-	nextPageNumber := 0
-	objectCount := 0
-	locations := make(map[string]objectLocation)
-	seenObjects := make(map[string]struct{})
-	seenPages := make(map[string]struct{})
+func NewInventoryClient(client *http.Client, accessToken string) (*InventoryClient, error) {
+	return newInventoryClient(client, googleDriveAPIBaseURL, accessToken)
+}
 
+func newInventoryClient(client *http.Client, endpoint, accessToken string) (*InventoryClient, error) {
+	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return &InventoryClient{provider: provider}, nil
+}
+
+func DecodeInventoryPlan(data []byte) (InventoryPlan, error) {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	var plan InventoryPlan
+	if err := decoder.Decode(&plan); err != nil {
+		return InventoryPlan{}, fmt.Errorf("decode Drive inventory plan: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return InventoryPlan{}, errors.New("decode Drive inventory plan: trailing JSON is not allowed")
+	}
+	if err := validateInventoryPlan(plan, true); err != nil {
+		return InventoryPlan{}, err
+	}
+	return plan, nil
+}
+
+func FreezeInventoryPlan(plan InventoryPlan) (InventoryPlan, error) {
+	if err := validateInventoryPlan(plan, false); err != nil {
+		return InventoryPlan{}, err
+	}
+	plan.Roots = append([]InventoryRoot(nil), plan.Roots...)
+	plan.Bindings = append([]InventoryBinding(nil), plan.Bindings...)
+	sortInventoryPlan(&plan)
+	plan.ExpectedHash = inventoryPlanDigest(plan)
+	return plan, nil
+}
+
+func (client *InventoryClient) Capture(ctx context.Context, plan InventoryPlan) (cleanup.RootSet, cleanup.InventoryAggregate, error) {
+	if client == nil || client.provider == nil {
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, errors.New("Drive inventory client is not configured")
+	}
+	if ctx == nil {
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, errors.New("context is nil")
+	}
+	if err := validateInventoryPlan(plan, true); err != nil {
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, err
+	}
+	bindings := make(map[string]InventoryBinding, len(plan.Bindings))
+	for _, binding := range plan.Bindings {
+		bindings[inventoryBindingKey(binding.Provider, binding.AccountID, binding.RootID, binding.Namespace, binding.ObjectID)] = binding
+	}
+	usedBindings := make(map[string]struct{}, len(bindings))
+	rootSet := cleanup.RootSet{SchemaVersion: cleanup.CurrentRootSetSchemaVersion, Roots: make([]cleanup.Root, 0, len(plan.Roots))}
+	for _, declaration := range plan.Roots {
+		root, err := client.captureRoot(ctx, declaration, bindings, usedBindings)
+		if err != nil {
+			return cleanup.RootSet{}, cleanup.InventoryAggregate{}, fmt.Errorf("capture Drive root %q: %w", declaration.RootID, err)
+		}
+		rootSet.Roots = append(rootSet.Roots, root)
+	}
+	if len(usedBindings) != len(bindings) {
+		unused := make([]string, 0, len(bindings)-len(usedBindings))
+		for key := range bindings {
+			if _, used := usedBindings[key]; !used {
+				unused = append(unused, key)
+			}
+		}
+		sort.Strings(unused)
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, fmt.Errorf("Drive inventory binding did not resolve to a provider object: %s", strings.Join(unused, ", "))
+	}
+	frozen, err := cleanup.FreezeRootSet(rootSet)
+	if err != nil {
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, err
+	}
+	aggregate, err := cleanup.BuildAggregate(frozen, plan.AccountID)
+	if err != nil {
+		return cleanup.RootSet{}, cleanup.InventoryAggregate{}, err
+	}
+	return frozen, aggregate, nil
+}
+
+func (client *InventoryClient) captureRoot(
+	ctx context.Context,
+	declaration InventoryRoot,
+	bindings map[string]InventoryBinding,
+	usedBindings map[string]struct{},
+) (cleanup.Root, error) {
+	root := cleanup.Root{
+		Provider:  declaration.Provider,
+		AccountID: declaration.AccountID,
+		RootID:    declaration.RootID,
+		Namespace: declaration.Namespace,
+		Pages:     make([]cleanup.Page, 0),
+	}
+	queue := []inventoryParent{{id: declaration.RootID, path: "/" + url.PathEscape(declaration.Namespace), depth: 0}}
+	seenObjects := make(map[string]struct{})
+	seenFolders := map[string]struct{}{declaration.RootID: {}}
 	for len(queue) > 0 {
-		visit := queue[0]
+		parent := queue[0]
 		queue = queue[1:]
-		cursor := ""
-		discoveredFolders := make([]folderVisit, 0)
+		pageToken := ""
+		seenTokens := make(map[string]struct{})
 		for {
-			if nextPageNumber >= limits.MaxPages {
-				return cleanup.Root{}, fmt.Errorf("root page limit %d reached before provider completion", limits.MaxPages)
+			if len(root.Pages) >= maxDriveInventoryPages {
+				return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded page limit")
 			}
-			page, err := client.List(ctx, request.AccountID, visit.id, cursor)
+			if _, duplicate := seenTokens[pageToken]; duplicate {
+				return cleanup.Root{}, errors.New("Drive inventory pagination token repeated")
+			}
+			seenTokens[pageToken] = struct{}{}
+			files, nextPageToken, err := client.listChildren(ctx, declaration, parent.id, pageToken)
 			if err != nil {
-				return cleanup.Root{}, fmt.Errorf("list parent %q page %d: %w", visit.id, nextPageNumber+1, err)
+				return cleanup.Root{}, err
 			}
-			nextPageNumber++
-			if strings.TrimSpace(page.Cursor) == "" {
-				return cleanup.Root{}, fmt.Errorf("parent %q page %d has no provider cursor", visit.id, nextPageNumber)
+			page := cleanup.Page{
+				Number:   len(root.Pages) + 1,
+				ParentID: parent.id,
+				Cursor:   inventoryCursor(pageToken),
+				Status:   cleanup.PageComplete,
+				Objects:  make([]cleanup.Object, 0, len(files)),
 			}
-			if page.ParentID != "" && page.ParentID != visit.id {
-				return cleanup.Root{}, fmt.Errorf("parent %q page %d parent readback %q is inconsistent", visit.id, nextPageNumber, page.ParentID)
-			}
-			pageKey := visit.id + "\x00" + page.Cursor
-			if _, exists := seenPages[pageKey]; exists {
-				return cleanup.Root{}, fmt.Errorf("duplicate page cursor %q for parent %q", page.Cursor, visit.id)
-			}
-			seenPages[pageKey] = struct{}{}
-			if page.Complete && page.Next != "" {
-				return cleanup.Root{}, fmt.Errorf("parent %q page %d is complete but has next cursor", visit.id, nextPageNumber)
-			}
-			if !page.Complete && strings.TrimSpace(page.Next) == "" {
-				return cleanup.Root{}, fmt.Errorf("parent %q page %d is incomplete and has no next cursor", visit.id, nextPageNumber)
-			}
-			if page.Next == page.Cursor {
-				return cleanup.Root{}, fmt.Errorf("parent %q page %d next cursor did not advance", visit.id, nextPageNumber)
-			}
-			objects := append([]cleanup.Object(nil), page.Objects...)
-			sort.Slice(objects, func(i, j int) bool {
-				return inventoryObjectSortKey(objects[i]) < inventoryObjectSortKey(objects[j])
-			})
-			for objectIndex := range objects {
-				object, err := normalizeInventoryObject(request, visit, objects[objectIndex])
+			for _, listed := range files {
+				if len(seenObjects) >= maxDriveInventoryObjects {
+					return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded object limit")
+				}
+				if _, duplicate := seenObjects[listed.ID]; duplicate {
+					return cleanup.Root{}, fmt.Errorf("Drive object %q appeared more than once", listed.ID)
+				}
+				bindingKey := inventoryBindingKey(declaration.Provider, declaration.AccountID, declaration.RootID, declaration.Namespace, listed.ID)
+				binding, bound := bindings[bindingKey]
+				if !bound {
+					binding = InventoryBinding{
+						Provider:  declaration.Provider,
+						AccountID: declaration.AccountID,
+						RootID:    declaration.RootID,
+						Namespace: declaration.Namespace,
+						ObjectID:  listed.ID,
+						Class:     cleanup.ClassUnknown,
+					}
+				}
+				observed, etag, err := client.readInventoryFile(ctx, listed.ID)
 				if err != nil {
-					return cleanup.Root{}, fmt.Errorf("parent %q page %d object %q: %w", visit.id, nextPageNumber, objects[objectIndex].ID, err)
+					return cleanup.Root{}, err
 				}
-				if object.Depth > limits.MaxDepth {
-					return cleanup.Root{}, fmt.Errorf("inventory depth limit %d exceeded by object %q", limits.MaxDepth, object.ID)
+				if err := compareListedDriveFile(listed, observed, parent.id); err != nil {
+					return cleanup.Root{}, fmt.Errorf("Drive object %q changed during inventory: %w", listed.ID, err)
 				}
-				if _, exists := seenObjects[object.ID]; exists {
-					if object.ObjectType == cleanup.ObjectTypeFolder && folderIsAncestor(folderParents, visit.id, object.ID) {
-						return cleanup.Root{}, fmt.Errorf("folder ancestry cycle through %q", object.ID)
-					}
-					return cleanup.Root{}, fmt.Errorf("duplicate object ID %q", object.ID)
+				object, err := inventoryObject(declaration, binding, observed, etag, parent)
+				if err != nil {
+					return cleanup.Root{}, err
 				}
-				if objectCount >= limits.MaxObjects {
-					return cleanup.Root{}, fmt.Errorf("inventory object limit %d exceeded", limits.MaxObjects)
-				}
-				objectCount++
-				if object.ObjectType == cleanup.ObjectTypeFolder {
-					if object.ID == request.RootID || folderIsAncestor(folderParents, visit.id, object.ID) {
-						return cleanup.Root{}, fmt.Errorf("folder ancestry cycle through %q", object.ID)
-					}
-					folderParents[object.ID] = visit.id
-					discoveredFolders = append(discoveredFolders, folderVisit{id: object.ID, path: object.Path, depth: object.Depth})
-				}
+				page.Objects = append(page.Objects, object)
 				seenObjects[object.ID] = struct{}{}
-				objects[objectIndex] = object
+				if bound {
+					usedBindings[bindingKey] = struct{}{}
+				}
+				if object.ObjectType == cleanup.ObjectTypeFolder {
+					if _, duplicate := seenFolders[object.ID]; duplicate {
+						return cleanup.Root{}, fmt.Errorf("Drive folder %q forms a duplicate or cycle", object.ID)
+					}
+					seenFolders[object.ID] = struct{}{}
+					queue = append(queue, inventoryParent{id: object.ID, path: object.Path, depth: object.Depth})
+				}
 			}
-			pageIndex := len(root.Pages)
-			root.Pages = append(root.Pages, cleanup.Page{
-				Number: nextPageNumber, ParentID: visit.id, Cursor: page.Cursor,
-				Status: cleanup.PageComplete, Objects: objects,
-			})
-			for objectIndex, object := range objects {
-				locations[object.ID] = objectLocation{pageIndex: pageIndex, objectIndex: objectIndex}
-			}
-			if page.Complete {
+			root.Pages = append(root.Pages, page)
+			if nextPageToken == "" {
 				break
 			}
-			cursor = page.Next
+			pageToken = nextPageToken
 		}
-		sort.Slice(discoveredFolders, func(i, j int) bool {
-			if discoveredFolders[i].id != discoveredFolders[j].id {
-				return discoveredFolders[i].id < discoveredFolders[j].id
-			}
-			return discoveredFolders[i].path < discoveredFolders[j].path
-		})
-		queue = append(queue, discoveredFolders...)
-		sort.Slice(queue, func(i, j int) bool {
-			if queue[i].id != queue[j].id {
-				return queue[i].id < queue[j].id
-			}
-			return queue[i].depth < queue[j].depth
-		})
 	}
-	root.ExpectedPages = nextPageNumber
-	if err := finalizeInventoryRoot(&root, locations, limits.MaxDepth, limits.MaxObjects); err != nil {
+	root.ExpectedPages = len(root.Pages)
+	if err := completeFolderInventory(&root); err != nil {
 		return cleanup.Root{}, err
 	}
 	return root, nil
 }
 
-func normalizeInventoryObject(request RootRequest, visit folderVisit, object cleanup.Object) (cleanup.Object, error) {
-	if object.Provider != request.Provider || object.AccountID != request.AccountID ||
-		object.RootID != request.RootID || object.Namespace != request.Namespace {
-		return cleanup.Object{}, errors.New("object is outside root scope")
+func (client *InventoryClient) listChildren(
+	ctx context.Context,
+	root InventoryRoot,
+	parentID string,
+	pageToken string,
+) ([]driveFile, string, error) {
+	if err := validateDriveID(parentID, "Drive inventory parent ID"); err != nil {
+		return nil, "", err
 	}
-	for name, value := range map[string]string{
-		"id": object.ID, "parent_id": object.ParentID, "name": object.Name,
-		"version": object.Version, "generation": object.Generation, "etag": object.ETag,
-	} {
-		if strings.TrimSpace(value) == "" {
-			return cleanup.Object{}, fmt.Errorf("%s is required", name)
-		}
+	query := url.Values{
+		"corpora":                   {"user"},
+		"fields":                    {"nextPageToken,files(id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId)"},
+		"includeItemsFromAllDrives": {"true"},
+		"pageSize":                  {"1000"},
+		"q":                         {fmt.Sprintf("'%s' in parents", parentID)},
+		"spaces":                    {"drive"},
+		"supportsAllDrives":         {"true"},
 	}
-	if object.ParentID != visit.id {
-		return cleanup.Object{}, fmt.Errorf("parent ID %q does not match listed parent %q", object.ParentID, visit.id)
+	if root.DriveID != "" {
+		query.Set("corpora", "drive")
+		query.Set("driveId", root.DriveID)
 	}
-	if object.ModifiedAt.IsZero() {
-		return cleanup.Object{}, errors.New("modified_at is required")
+	if pageToken != "" {
+		query.Set("pageToken", pageToken)
 	}
-	if object.Depth != visit.depth+1 {
-		return cleanup.Object{}, fmt.Errorf("depth %d does not match traversal depth %d", object.Depth, visit.depth+1)
+	endpoint := *client.provider.baseURL
+	endpoint.Path += "files"
+	endpoint.RawQuery = query.Encode()
+	data, _, status, err := client.provider.request(ctx, http.MethodGet, endpoint.String(), nil, false)
+	if err != nil {
+		return nil, "", err
 	}
-	if object.Depth <= 0 {
-		return cleanup.Object{}, errors.New("depth must be positive")
+	if status != http.StatusOK {
+		return nil, "", fmt.Errorf("Drive inventory list rejected with status %d", status)
 	}
-	if object.Size < 0 {
-		return cleanup.Object{}, errors.New("size must not be negative")
+	var response driveListResponse
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&response); err != nil {
+		return nil, "", errors.New("Drive inventory list response is invalid")
 	}
-	expectedPath := object.Name
-	if visit.path != "" {
-		expectedPath = strings.TrimSuffix(visit.path, "/") + "/" + object.Name
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, "", errors.New("Drive inventory list response has trailing data")
 	}
-	if strings.TrimSpace(object.Path) == "" {
-		object.Path = expectedPath
-	} else if object.Path != expectedPath {
-		return cleanup.Object{}, fmt.Errorf("path %q does not match traversal path %q", object.Path, expectedPath)
+	if len(response.Files) > 1000 {
+		return nil, "", errors.New("Drive inventory list exceeded the requested page size")
 	}
-	switch object.ObjectType {
-	case cleanup.ObjectTypeFile:
-		if strings.TrimSpace(object.ContentHash) == "" {
-			return cleanup.Object{}, errors.New("content_hash is required for files")
-		}
-		if object.ChildrenComplete || object.ChildCount != 0 || object.SubtreeComplete || object.SubtreeObjectCount != 0 {
-			return cleanup.Object{}, errors.New("file contains folder subtree metadata")
-		}
-	case cleanup.ObjectTypeFolder:
-		if object.Size != 0 {
-			return cleanup.Object{}, errors.New("folder size must be zero")
-		}
-		if object.ChildrenComplete || object.ChildCount != 0 || object.SubtreeComplete || object.SubtreeObjectCount != 0 {
-			return cleanup.Object{}, errors.New("folder subtree proof must be derived by complete traversal")
-		}
-	default:
-		return cleanup.Object{}, fmt.Errorf("object_type %q is unsupported", object.ObjectType)
-	}
-	object.ChildrenComplete = false
-	object.ChildCount = 0
-	object.SubtreeComplete = false
-	object.SubtreeWriterFence = ""
-	object.EmptyCheckIDs = nil
-	object.SubtreeObjectCount = 0
-	return object, nil
+	return response.Files, response.NextPageToken, nil
 }
 
-func folderIsAncestor(parents map[string]string, start, target string) bool {
-	for current := start; current != ""; current = parents[current] {
-		if current == target {
-			return true
-		}
+func (client *InventoryClient) readInventoryFile(ctx context.Context, fileID string) (driveFile, string, error) {
+	if err := validateDriveID(fileID, "Drive inventory file ID"); err != nil {
+		return driveFile{}, "", err
 	}
-	return false
+	query := url.Values{
+		"alt":               {"json"},
+		"fields":            {"id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId"},
+		"supportsAllDrives": {"true"},
+	}
+	data, headers, status, err := client.provider.request(ctx, http.MethodGet, client.provider.fileURL(fileID, query), nil, false)
+	if err != nil {
+		return driveFile{}, "", err
+	}
+	if status != http.StatusOK {
+		return driveFile{}, "", fmt.Errorf("Drive inventory metadata read rejected with status %d", status)
+	}
+	var file driveFile
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&file); err != nil {
+		return driveFile{}, "", errors.New("Drive inventory metadata response is invalid")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return driveFile{}, "", errors.New("Drive inventory metadata response has trailing data")
+	}
+	etag := headers.Get("ETag")
+	if strings.TrimSpace(etag) == "" {
+		return driveFile{}, "", errors.New("Drive inventory metadata ETag is missing")
+	}
+	return file, etag, nil
 }
 
-func finalizeInventoryRoot(root *cleanup.Root, locations map[string]objectLocation, maxDepth, maxObjects int) error {
-	objects := make(map[string]cleanup.Object)
-	children := make(map[string][]string)
-	folders := make(map[string]struct{})
-	folderPages := make(map[string]struct{})
-	for _, page := range root.Pages {
-		if page.ParentID != root.RootID {
-			folderPages[page.ParentID] = struct{}{}
-		}
-		for _, object := range page.Objects {
-			objects[object.ID] = object
-			children[object.ParentID] = append(children[object.ParentID], object.ID)
-			if object.ObjectType == cleanup.ObjectTypeFolder {
-				folders[object.ID] = struct{}{}
-			}
-		}
-	}
-	if len(objects) > maxObjects {
-		return fmt.Errorf("root has too many objects for bounded tree finalization")
-	}
-	for folderID := range folders {
-		if _, ok := folderPages[folderID]; !ok {
-			return fmt.Errorf("folder %q has no complete child enumeration", folderID)
-		}
-	}
-	visiting := make(map[string]bool)
-	subtreeMemo := make(map[string]int)
-	var subtreeCount func(string) (int, error)
-	subtreeCount = func(folderID string) (int, error) {
-		if count, ok := subtreeMemo[folderID]; ok {
-			return count, nil
-		}
-		if visiting[folderID] {
-			return 0, fmt.Errorf("folder subtree cycle through %q", folderID)
-		}
-		if len(visiting) >= maxDepth {
-			return 0, fmt.Errorf("inventory subtree depth exceeds bounded maximum %d", maxDepth)
-		}
-		visiting[folderID] = true
-		total := 0
-		for _, childID := range children[folderID] {
-			if total >= maxObjects {
-				return 0, fmt.Errorf("inventory subtree exceeds bounded object maximum %d", maxObjects)
-			}
-			total++
-			if objects[childID].ObjectType == cleanup.ObjectTypeFolder {
-				nested, err := subtreeCount(childID)
-				if err != nil {
-					return 0, err
-				}
-				if nested > maxObjects-total {
-					return 0, fmt.Errorf("inventory subtree exceeds bounded object maximum %d", maxObjects)
-				}
-				total += nested
-			}
-		}
-		delete(visiting, folderID)
-		subtreeMemo[folderID] = total
-		return total, nil
-	}
-	for folderID := range folders {
-		object := objects[folderID]
-		count, err := subtreeCount(folderID)
-		if err != nil {
-			return err
-		}
-		location, ok := locations[folderID]
-		if !ok {
-			return fmt.Errorf("folder %q has no descriptor location", folderID)
-		}
-		stored := &root.Pages[location.pageIndex].Objects[location.objectIndex]
-		stored.ChildrenComplete = true
-		stored.ChildCount = len(children[folderID])
-		stored.SubtreeComplete = true
-		stored.SubtreeObjectCount = count
-		object = *stored
-		objects[folderID] = object
+func compareListedDriveFile(listed, observed driveFile, expectedParent string) error {
+	if listed.ID != observed.ID || listed.Name != observed.Name || listed.MIMEType != observed.MIMEType ||
+		listed.Trashed != observed.Trashed || listed.MD5Checksum != observed.MD5Checksum || listed.Size != observed.Size ||
+		listed.ModifiedTime != observed.ModifiedTime || listed.Version != observed.Version || listed.HeadRevisionID != observed.HeadRevisionID ||
+		len(listed.Parents) != 1 || len(observed.Parents) != 1 || listed.Parents[0] != expectedParent || observed.Parents[0] != expectedParent {
+		return errors.New("list and exact metadata readback differ")
 	}
 	return nil
 }
 
-func inventoryObjectSortKey(object cleanup.Object) string {
-	return strings.Join([]string{object.Provider, object.AccountID, object.RootID, object.Namespace, object.ID}, "\x00")
+func inventoryObject(
+	root InventoryRoot,
+	binding InventoryBinding,
+	file driveFile,
+	etag string,
+	parent inventoryParent,
+) (cleanup.Object, error) {
+	if file.ID != binding.ObjectID || len(file.Parents) != 1 || file.Parents[0] != parent.id {
+		return cleanup.Object{}, errors.New("Drive inventory object identity or parent is invalid")
+	}
+	if strings.TrimSpace(file.Name) == "" || strings.TrimSpace(file.Version) == "" {
+		return cleanup.Object{}, errors.New("Drive inventory object name or version is missing")
+	}
+	modifiedAt, err := time.Parse(time.RFC3339Nano, file.ModifiedTime)
+	if err != nil {
+		return cleanup.Object{}, errors.New("Drive inventory object modified time is invalid")
+	}
+	objectType := cleanup.ObjectTypeFile
+	size := int64(0)
+	generation := file.HeadRevisionID
+	if file.MIMEType == driveFolderMIMEType {
+		objectType = cleanup.ObjectTypeFolder
+		if generation == "" {
+			generation = file.Version
+		}
+	} else {
+		size, err = strconv.ParseInt(file.Size, 10, 64)
+		if err != nil || size < 0 || strings.TrimSpace(file.MD5Checksum) == "" || strings.TrimSpace(generation) == "" {
+			return cleanup.Object{}, errors.New("Drive inventory file content identity is incomplete")
+		}
+	}
+	return cleanup.Object{
+		ID:              file.ID,
+		ParentID:        parent.id,
+		Name:            file.Name,
+		Path:            parent.path + "/" + url.PathEscape(file.Name),
+		ObjectType:      objectType,
+		ContentHash:     file.MD5Checksum,
+		Size:            size,
+		Provider:        root.Provider,
+		AccountID:       root.AccountID,
+		RootID:          root.RootID,
+		Namespace:       root.Namespace,
+		Version:         file.Version,
+		Generation:      generation,
+		ETag:            etag,
+		ModifiedAt:      modifiedAt.UTC(),
+		Trashed:         file.Trashed,
+		Depth:           parent.depth + 1,
+		Class:           binding.Class,
+		RetainedPeerID:  binding.RetainedPeerID,
+		OwnershipMarker: binding.OwnershipMarker,
+		RestoreEvidence: binding.RestoreEvidence,
+	}, nil
+}
+
+func completeFolderInventory(root *cleanup.Root) error {
+	objects := make(map[string]*cleanup.Object)
+	children := make(map[string][]string)
+	for pageIndex := range root.Pages {
+		for objectIndex := range root.Pages[pageIndex].Objects {
+			object := &root.Pages[pageIndex].Objects[objectIndex]
+			objects[object.ID] = object
+			children[object.ParentID] = append(children[object.ParentID], object.ID)
+		}
+	}
+	visiting := make(map[string]bool)
+	memo := make(map[string]int)
+	var descendants func(string) (int, error)
+	descendants = func(id string) (int, error) {
+		if count, ok := memo[id]; ok {
+			return count, nil
+		}
+		if visiting[id] {
+			return 0, fmt.Errorf("Drive inventory ancestry cycle through %q", id)
+		}
+		visiting[id] = true
+		total := 0
+		for _, childID := range children[id] {
+			total++
+			child := objects[childID]
+			if child != nil && child.ObjectType == cleanup.ObjectTypeFolder {
+				count, err := descendants(childID)
+				if err != nil {
+					return 0, err
+				}
+				total += count
+			}
+		}
+		delete(visiting, id)
+		memo[id] = total
+		return total, nil
+	}
+	for _, object := range objects {
+		if object.ObjectType != cleanup.ObjectTypeFolder {
+			continue
+		}
+		count, err := descendants(object.ID)
+		if err != nil {
+			return err
+		}
+		object.ChildrenComplete = true
+		object.ChildCount = len(children[object.ID])
+		object.SubtreeComplete = true
+		object.SubtreeObjectCount = count
+	}
+	return nil
+}
+
+func validateInventoryPlan(plan InventoryPlan, requireHash bool) error {
+	if plan.SchemaVersion != CurrentInventoryPlanSchemaVersion {
+		return fmt.Errorf("unsupported Drive inventory plan schema_version %d", plan.SchemaVersion)
+	}
+	if strings.TrimSpace(plan.AccountID) == "" || strings.ContainsAny(plan.AccountID, "*?[]/\\\x00\r\n\t") {
+		return errors.New("Drive inventory plan account ID is invalid")
+	}
+	if len(plan.Roots) == 0 {
+		return errors.New("Drive inventory plan must declare at least one root")
+	}
+	rootKeys := make(map[string]struct{}, len(plan.Roots))
+	for _, root := range plan.Roots {
+		if root.Provider != "drive" || root.AccountID != plan.AccountID || strings.TrimSpace(root.Namespace) == "" || strings.ContainsAny(root.Namespace, "*?[]\\\x00\r\n\t") {
+			return errors.New("Drive inventory root is invalid")
+		}
+		if err := validateDriveID(root.RootID, "Drive inventory root ID"); err != nil {
+			return err
+		}
+		if root.DriveID != "" {
+			if err := validateDriveID(root.DriveID, "Drive inventory shared drive ID"); err != nil {
+				return err
+			}
+		}
+		key := inventoryRootKey(root.Provider, root.AccountID, root.RootID, root.Namespace)
+		if _, duplicate := rootKeys[key]; duplicate {
+			return fmt.Errorf("duplicate Drive inventory root %q", key)
+		}
+		rootKeys[key] = struct{}{}
+	}
+	bindingKeys := make(map[string]struct{}, len(plan.Bindings))
+	for _, binding := range plan.Bindings {
+		rootKey := inventoryRootKey(binding.Provider, binding.AccountID, binding.RootID, binding.Namespace)
+		if _, exists := rootKeys[rootKey]; !exists {
+			return errors.New("Drive inventory binding is outside the declared roots")
+		}
+		if err := validateDriveID(binding.ObjectID, "Drive inventory binding object ID"); err != nil {
+			return err
+		}
+		if !validInventoryClass(binding.Class) {
+			return fmt.Errorf("Drive inventory binding class %q is invalid", binding.Class)
+		}
+		key := inventoryBindingKey(binding.Provider, binding.AccountID, binding.RootID, binding.Namespace, binding.ObjectID)
+		if _, duplicate := bindingKeys[key]; duplicate {
+			return fmt.Errorf("duplicate Drive inventory binding %q", key)
+		}
+		bindingKeys[key] = struct{}{}
+	}
+	if requireHash {
+		if plan.ExpectedHash == "" || plan.ExpectedHash != inventoryPlanDigest(plan) {
+			return errors.New("Drive inventory plan expected hash mismatch")
+		}
+	}
+	return nil
+}
+
+func validInventoryClass(class cleanup.ObjectClass) bool {
+	switch class {
+	case cleanup.ClassActive, cleanup.ClassDuplicateSameHash, cleanup.ClassOrphan,
+		cleanup.ClassLegacyUnmarked, cleanup.ClassQuarantined, cleanup.ClassExpectedFixture,
+		cleanup.ClassLegacyRetained, cleanup.ClassConflict, cleanup.ClassUnknown:
+		return true
+	default:
+		return false
+	}
+}
+
+func inventoryPlanDigest(plan InventoryPlan) string {
+	copyPlan := plan
+	copyPlan.ExpectedHash = ""
+	copyPlan.Roots = append([]InventoryRoot(nil), plan.Roots...)
+	copyPlan.Bindings = append([]InventoryBinding(nil), plan.Bindings...)
+	sortInventoryPlan(&copyPlan)
+	data, _ := json.Marshal(copyPlan)
+	return cleanup.Digest(data)
+}
+
+func sortInventoryPlan(plan *InventoryPlan) {
+	sort.Slice(plan.Roots, func(i, j int) bool {
+		return inventoryRootKey(plan.Roots[i].Provider, plan.Roots[i].AccountID, plan.Roots[i].RootID, plan.Roots[i].Namespace) <
+			inventoryRootKey(plan.Roots[j].Provider, plan.Roots[j].AccountID, plan.Roots[j].RootID, plan.Roots[j].Namespace)
+	})
+	sort.Slice(plan.Bindings, func(i, j int) bool {
+		left := plan.Bindings[i]
+		right := plan.Bindings[j]
+		return inventoryBindingKey(left.Provider, left.AccountID, left.RootID, left.Namespace, left.ObjectID) <
+			inventoryBindingKey(right.Provider, right.AccountID, right.RootID, right.Namespace, right.ObjectID)
+	})
+}
+
+func inventoryRootKey(provider, accountID, rootID, namespace string) string {
+	return strings.Join([]string{provider, accountID, rootID, namespace}, "\x00")
+}
+
+func inventoryBindingKey(provider, accountID, rootID, namespace, objectID string) string {
+	return inventoryRootKey(provider, accountID, rootID, namespace) + "\x00" + objectID
+}
+
+func inventoryCursor(pageToken string) string {
+	if pageToken == "" {
+		return "FIRST"
+	}
+	return pageToken
 }
