@@ -1,6 +1,7 @@
 package cleanup
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
@@ -8,17 +9,25 @@ import (
 
 func validManifest() Manifest {
 	return Manifest{
-		SchemaVersion:       CurrentSchemaVersion,
-		ManifestID:          "manifest-1",
-		AccountID:           "account-1",
-		RootID:              "root-1",
-		Namespace:           "backup/home",
-		Mode:                ModeQuarantine,
+		SchemaVersion:     CurrentSchemaVersion,
+		ManifestID:        "manifest-1",
+		AccountID:         "account-1",
+		RootID:            "root-1",
+		Namespace:         "backup/home",
+		Mode:              ModeQuarantine,
+		MutationSemantics: MutationSemanticsDriveOwnerRisk,
+		QuarantineTarget: QuarantineTarget{
+			Provider:         "drive",
+			AccountID:        "account-1",
+			ParentID:         "quarantine-1",
+			EnrollmentDigest: strings.Repeat("2", 64),
+		},
 		CreatedAt:           time.Unix(100, 0).UTC(),
 		ExpiresAt:           time.Unix(200, 0).UTC(),
 		Nonce:               "nonce-1",
 		Budget:              Budget{MaxObjects: 2, MaxBytes: 20},
-		SourceInventoryHash: strings.Repeat("i", 64),
+		SourceInventoryHash: strings.Repeat("1", 64),
+		FixtureDigest:       strings.Repeat("f", 64),
 		Objects: []Object{
 			{
 				ID:              "object-b",
@@ -114,6 +123,28 @@ func TestValidateManifestRejectsTrashMode(t *testing.T) {
 	}
 }
 
+func TestValidateManifestRequiresExplicitNoCASAcceptance(t *testing.T) {
+	m := validManifest()
+	m.MutationSemantics = ""
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "no-CAS") {
+		t.Fatalf("mutation semantics error = %v, want explicit no-CAS acceptance", err)
+	}
+}
+
+func TestValidateManifestRejectsUnboundQuarantineTarget(t *testing.T) {
+	m := validManifest()
+	m.QuarantineTarget.ParentID = ""
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "quarantine") {
+		t.Fatalf("missing quarantine target error = %v, want fail-closed rejection", err)
+	}
+
+	m = validManifest()
+	m.QuarantineTarget.Provider = "foreign"
+	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "provider") {
+		t.Fatalf("foreign quarantine provider error = %v, want scope rejection", err)
+	}
+}
+
 func TestValidateManifestRejectsUnsafeClassesAndDuplicateIDs(t *testing.T) {
 	m := validManifest()
 	m.Objects[0].Class = ClassActive
@@ -166,5 +197,29 @@ func TestCanonicalManifestSortsObjectsAndDigestsStableBytes(t *testing.T) {
 	}
 	if Digest(first) != Digest(second) {
 		t.Fatal("canonical digest changed after object reorder")
+	}
+
+	m.QuarantineTarget.ParentID = "quarantine-2"
+	third, err := CanonicalManifest(m)
+	if err != nil {
+		t.Fatalf("CanonicalManifest() changed target error = %v", err)
+	}
+	if Digest(second) == Digest(third) {
+		t.Fatal("canonical digest did not bind quarantine target")
+	}
+}
+
+func TestDecodeManifestRejectsUnknownAndTrailingFields(t *testing.T) {
+	data, err := json.Marshal(validManifest())
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknown := append(append([]byte(nil), data[:len(data)-1]...), []byte(`,"unknown":true}`)...)
+	if _, err := DecodeManifest(unknown); err == nil || !strings.Contains(err.Error(), "unknown") {
+		t.Fatalf("unknown field error = %v", err)
+	}
+	trailing := append(append([]byte(nil), data...), []byte(` {}`)...)
+	if _, err := DecodeManifest(trailing); err == nil || !strings.Contains(err.Error(), "trailing") {
+		t.Fatalf("trailing JSON error = %v", err)
 	}
 }

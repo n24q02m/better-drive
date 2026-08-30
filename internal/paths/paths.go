@@ -53,3 +53,15 @@ func StateFile() string {
 // (base()/better-drive.log), where `better-drive run` appends one line per
 // completed sync cycle per job.
 func LogFile() string { return filepath.Join(base(), "better-drive.log") }
+
+func CleanupSecurityDir() string {
+	return filepath.Join(base(), "cleanup")
+}
+
+func CleanupTrustBundleFile() string {
+	return filepath.Join(CleanupSecurityDir(), "trust-bundle.json")
+}
+
+func CleanupAuthorityStoreDir() string {
+	return filepath.Join(CleanupSecurityDir(), "authority.git")
+}

@@ -10,18 +10,25 @@ import (
 
 func validApproval() Approval {
 	return Approval{
-		SchemaVersion:  CurrentApprovalSchemaVersion,
-		ApprovalID:     "approval-1",
-		ManifestDigest: strings.Repeat("a", 64),
-		AccountID:      "account-1",
-		RootID:         "root-1",
-		Mode:           ModeQuarantine,
-		MaxObjects:     2,
-		MaxBytes:       20,
-		ExpiresAt:      time.Unix(200, 0).UTC(),
-		Nonce:          "nonce-1",
-		Issuer:         "issuer-1",
-		FixtureDigest:  strings.Repeat("b", 64),
+		SchemaVersion:     CurrentApprovalSchemaVersion,
+		ApprovalID:        "approval-1",
+		ManifestDigest:    strings.Repeat("a", 64),
+		AccountID:         "account-1",
+		RootID:            "root-1",
+		Mode:              ModeQuarantine,
+		MutationSemantics: MutationSemanticsDriveOwnerRisk,
+		QuarantineTarget: QuarantineTarget{
+			Provider:         "drive",
+			AccountID:        "account-1",
+			ParentID:         "quarantine-1",
+			EnrollmentDigest: strings.Repeat("2", 64),
+		},
+		MaxObjects:    2,
+		MaxBytes:      20,
+		ExpiresAt:     time.Unix(200, 0).UTC(),
+		Nonce:         "nonce-1",
+		Issuer:        "issuer-1",
+		FixtureDigest: strings.Repeat("f", 64),
 	}
 }
 func TestCanonicalApprovalRejectsTrashMode(t *testing.T) {
@@ -45,9 +52,27 @@ func TestApprovalSignVerifyAndTamperRejects(t *testing.T) {
 	if err := VerifyApproval(approval, signature, publicKey, time.Unix(150, 0).UTC()); err != nil {
 		t.Fatalf("VerifyApproval() error = %v", err)
 	}
-	approval.MaxBytes++
+	approval.QuarantineTarget.ParentID = "other-quarantine"
 	if err := VerifyApproval(approval, signature, publicKey, time.Unix(150, 0).UTC()); err == nil {
-		t.Fatal("tampered approval unexpectedly verified")
+		t.Fatal("approval with tampered quarantine target unexpectedly verified")
+	}
+}
+
+func TestValidateApprovalForManifestBindsExactQuarantineTarget(t *testing.T) {
+	manifest := validManifest()
+	canonical, err := CanonicalManifest(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	approval := validApproval()
+	approval.ManifestDigest = Digest(canonical)
+
+	if err := ValidateApprovalForManifest(approval, manifest, time.Unix(150, 0).UTC()); err != nil {
+		t.Fatalf("ValidateApprovalForManifest() error = %v", err)
+	}
+	approval.QuarantineTarget.ParentID = "other-quarantine"
+	if err := ValidateApprovalForManifest(approval, manifest, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "quarantine") {
+		t.Fatalf("target mismatch error = %v, want quarantine binding rejection", err)
 	}
 }
 

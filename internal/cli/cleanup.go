@@ -1,29 +1,34 @@
 package cli
 
 import (
+	"context"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
 	"github.com/n24q02m/better-drive/internal/cleanup"
+	"github.com/n24q02m/better-drive/internal/driveapi"
 	"github.com/n24q02m/better-drive/internal/exitcode"
 	"github.com/n24q02m/better-drive/internal/output"
+	"github.com/n24q02m/better-drive/internal/protectedfs"
 	"github.com/spf13/cobra"
 )
 
 func cleanupCmd() *cobra.Command {
 	command := &cobra.Command{
-		Use:     "cleanup",
-		Short:   "Inventory and validate exact-ID cleanup manifests",
-		Long:    "Cleanup inventory and validation are read-only. Apply is preview-only and never performs live mutation.",
-		Example: "  better-drive cleanup validate --manifest cleanup.json --format json",
+		Use:   "cleanup",
+		Short: "Inventory, validate, and broker-execute exact-ID cleanup manifests",
+		Long:  "Inventory and validation are read-only. Apply defaults to preview; --execute requires a protected signed approval, remotely consumed owner-risk claim, and exact provider readback.",
+		Example: "  better-drive cleanup validate --manifest cleanup.json " +
+			"--inventory inventory-aggregate.json --all-roots all-roots.json --format json",
 	}
-	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd())
+	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd(), cleanupBrokerCmd(), cleanupTrustCmd(), cleanupFixtureLifecycleCmd())
 	return command
 }
 
@@ -59,7 +64,10 @@ func cleanupApprovalPrepareCmd() *cobra.Command {
 			if strings.TrimSpace(storePath) == "" {
 				storePath = filepath.Join(os.TempDir(), "bdrive-approval-store")
 			}
-			store := cleanup.NewApprovalStore(storePath)
+			store, err := cleanup.NewApprovalStore(storePath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "open the protected approval store")
+			}
 			draft, err := store.Prepare(approval)
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix the approval draft or resolve store conflicts")
@@ -132,7 +140,10 @@ func cleanupApprovalActivateCmd() *cobra.Command {
 			if strings.TrimSpace(storePath) == "" {
 				storePath = filepath.Join(os.TempDir(), "bdrive-approval-store")
 			}
-			store := cleanup.NewApprovalStore(storePath)
+			store, err := cleanup.NewApprovalStore(storePath)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "open the protected approval store")
+			}
 			if err := store.Activate(intent); err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "activate intent in approval store")
 			}
@@ -151,42 +162,73 @@ func cleanupApprovalActivateCmd() *cobra.Command {
 	return command
 }
 
+type cleanupInventoryCapturer interface {
+	Capture(context.Context, driveapi.InventoryPlan) (cleanup.RootSet, cleanup.InventoryAggregate, error)
+}
+
+type cleanupInventoryFactory func(*http.Client, string) (cleanupInventoryCapturer, error)
+
 func cleanupInventoryCmd() *cobra.Command {
-	var account string
-	var allRootsPath string
+	return cleanupInventoryCommand(func(client *http.Client, token string) (cleanupInventoryCapturer, error) {
+		return driveapi.NewInventoryClient(client, token)
+	})
+}
+
+func cleanupInventoryCommand(factory cleanupInventoryFactory) *cobra.Command {
+	var planPath string
+	var capturePath string
 	var statePath string
 	var outputPath string
 	var format string
 	command := &cobra.Command{
 		Use:     "inventory",
-		Short:   "Join a complete enumerated root/page inventory",
-		Long:    "Read an enumerated all-roots capture, require every page to be complete exactly once, and write only aggregate/state evidence.",
-		Example: "  better-drive cleanup inventory --account account-1 --all-roots all-roots.json --state inventory-state.json --output inventory-aggregate.json --format json",
+		Short:   "Capture and join every declared Drive root and page",
+		Long:    "Use the dedicated Drive API client to recursively enumerate an immutable all-roots plan, capture every provider page and exact metadata readback, classify newly discovered unbound objects as unknown, and reject missing or scope-mismatched declared bindings.",
+		Example: "  better-drive cleanup inventory --plan inventory-plan.json --capture all-roots.json --state inventory-state.json --output inventory-aggregate.json --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
-			if strings.TrimSpace(account) == "" || strings.TrimSpace(allRootsPath) == "" || strings.TrimSpace(statePath) == "" || strings.TrimSpace(outputPath) == "" {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup inventory requires --account, --all-roots, --state, and --output")), "provide explicit account, root-set, state, and aggregate paths")
+			if factory == nil || strings.TrimSpace(planPath) == "" || strings.TrimSpace(capturePath) == "" ||
+				strings.TrimSpace(statePath) == "" || strings.TrimSpace(outputPath) == "" {
+				return exitcode.WithRemediation(
+					exitcode.ConfigError(errors.New("cleanup inventory requires --plan, --capture, --state, and --output")),
+					"provide one immutable all-roots plan and distinct capture, state, and aggregate outputs",
+				)
 			}
-			data, err := os.ReadFile(allRootsPath)
+			data, err := os.ReadFile(planPath)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "capture the provider root/page inventory before joining it")
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "provide the immutable Drive inventory plan")
 			}
-			rootSet, err := cleanup.DecodeRootSet(data)
+			plan, err := driveapi.DecodeInventoryPlan(data)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "regenerate the all-roots capture with current schema_version 3")
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "freeze the exact account/root/binding plan before capture")
 			}
-			aggregate, aggregateErr := cleanup.BuildAggregate(rootSet, account)
-			state := cleanup.BuildState(rootSet, aggregate, aggregateErr)
-			if err := writeJSONAtomically(statePath, state); err != nil {
-				return err
+			token, err := readSecretFD(driveTokenFDEnv, maxDriveTokenBytes)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "pass the Drive token through the inherited token file descriptor")
 			}
-			if aggregateErr != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(aggregateErr), "complete every root/page checkpoint before cleanup validation")
+			defer zeroBytes(token)
+			client, err := factory(&http.Client{Timeout: 30 * time.Second}, string(token))
+			if err != nil {
+				return exitcode.ConfigError(err)
 			}
-			if err := writeJSONAtomically(outputPath, aggregate); err != nil {
-				return err
+			rootSet, aggregate, err := client.Capture(cmd.Context(), plan)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "resolve incomplete roots/pages or stale bindings, then rerun the exact plan")
+			}
+			state := cleanup.BuildState(rootSet, aggregate, nil)
+			for _, result := range []struct {
+				path  string
+				value any
+			}{
+				{path: capturePath, value: rootSet},
+				{path: statePath, value: state},
+				{path: outputPath, value: aggregate},
+			} {
+				if err := writeJSONAtomically(result.path, result.value); err != nil {
+					return err
+				}
 			}
 			if format == output.FormatJSON {
 				return output.RenderJSON(cmd.OutOrStdout(), aggregate)
@@ -196,8 +238,8 @@ func cleanupInventoryCmd() *cobra.Command {
 		},
 	}
 	output.AddFormatFlag(command, &format)
-	command.Flags().StringVar(&account, "account", "", "exact provider account reference")
-	command.Flags().StringVar(&allRootsPath, "all-roots", "", "enumerated root/page capture")
+	command.Flags().StringVar(&planPath, "plan", "", "immutable exact Drive account/root/object-binding plan")
+	command.Flags().StringVar(&capturePath, "capture", "", "complete provider all-roots capture output")
 	command.Flags().StringVar(&statePath, "state", "", "inventory checkpoint state output")
 	command.Flags().StringVar(&outputPath, "output", "", "inventory aggregate output")
 	return command
@@ -266,13 +308,14 @@ func cleanupValidateCmd() *cobra.Command {
 
 func cleanupApplyCmd() *cobra.Command {
 	var manifestPath string
+	var approvalID string
 	var format string
 	var execute bool
 	var journalPath string
 	command := &cobra.Command{
 		Use:     "apply",
-		Short:   "Preview an approved cleanup manifest",
-		Long:    "Apply is preview-only. Live mutation is unavailable until a protected provider broker is bound.",
+		Short:   "Preview or broker-execute an approved cleanup manifest",
+		Long:    "Apply defaults to preview. --execute requires protected trust roots, mTLS broker identity, an exact approved snapshot, and a remotely consumed owner-risk claim.",
 		Example: "  better-drive cleanup apply --manifest cleanup.json --journal cleanup.jsonl --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			if err := output.Validate(format); err != nil {
@@ -287,7 +330,18 @@ func cleanupApplyCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "fix validation failures before requesting protected execution")
 			}
 			if execute {
-				return exitcode.WithRemediation(exitcode.ConfigError(errors.New("cleanup apply execution is unavailable until a protected provider broker is bound")), "use preview only; no local capability can authorize Drive mutation")
+				if journalPath != "" {
+					return exitcode.WithRemediation(exitcode.ConfigError(errors.New("--journal is preview-only; protected execution journals remotely")), "remove --journal and use the broker-owned immutable execution journal")
+				}
+				result, executeErr := executeProtectedCleanup(cmd.Context(), manifest, validation, approvalID)
+				if executeErr != nil {
+					return classifyCleanupExecutionError(executeErr)
+				}
+				if format == output.FormatJSON {
+					return output.RenderJSON(cmd.OutOrStdout(), result)
+				}
+				_, executeErr = fmt.Fprintf(cmd.OutOrStdout(), "cleanup %s: claim=%s objects=%d outcome=%s\n", result.Settlement, result.ClaimID, len(result.Moves), result.OutcomeDigest)
+				return executeErr
 			}
 			if journalPath != "" {
 				journal, journalErr := cleanup.OpenFileJournal(journalPath)
@@ -311,11 +365,26 @@ func cleanupApplyCmd() *cobra.Command {
 			return err
 		},
 	}
+
 	output.AddFormatFlag(command, &format)
 	command.Flags().StringVar(&manifestPath, "manifest", "", "exact-ID cleanup manifest")
-	command.Flags().BoolVar(&execute, "execute", false, "request unavailable live mutation (always fail-closed)")
+	command.Flags().StringVar(&approvalID, "approval-id", "", "exact protected cleanup approval ID (required with --execute)")
+	command.Flags().BoolVar(&execute, "execute", false, "consume a protected owner-risk claim and execute one exact leaf move")
 	command.Flags().StringVar(&journalPath, "journal", "", "append-only preview/apply journal path")
 	return command
+}
+func classifyCleanupExecutionError(err error) error {
+	if errors.Is(err, driveapi.ErrSettlementUnknown) ||
+		errors.Is(err, cleanup.ErrOwnerRiskAuthorityUnknown) {
+		return exitcode.WithRemediation(
+			exitcode.SyncFailed(err),
+			"read the authoritative broker state, journal, lease, and provider object; reconcile the unknown settlement and do not retry this claim",
+		)
+	}
+	return exitcode.WithRemediation(
+		exitcode.ConfigError(err),
+		"reconcile the protected approval, broker snapshot, capability, and provider readback before retry",
+	)
 }
 
 func readApproval(path string) (cleanup.Approval, error) {
@@ -327,7 +396,7 @@ func readApproval(path string) (cleanup.Approval, error) {
 		return cleanup.Approval{}, err
 	}
 	var approval cleanup.Approval
-	if err := json.Unmarshal(data, &approval); err != nil {
+	if err := decodeStrictJSON(data, &approval); err != nil {
 		return cleanup.Approval{}, fmt.Errorf("decode approval: %w", err)
 	}
 	if _, err := cleanup.CanonicalApproval(approval); err != nil {
@@ -345,7 +414,7 @@ func readTrustRoot(path string) (cleanup.TrustRoot, error) {
 		return cleanup.TrustRoot{}, err
 	}
 	var root cleanup.TrustRoot
-	if err := json.Unmarshal(data, &root); err != nil {
+	if err := decodeStrictJSON(data, &root); err != nil {
 		return cleanup.TrustRoot{}, fmt.Errorf("decode trust root: %w", err)
 	}
 	return root, nil
@@ -367,29 +436,41 @@ func writeJSONAtomically(path string, value any) error {
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	parent := filepath.Dir(path)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
 		return err
 	}
-	temp, err := os.CreateTemp(filepath.Dir(path), ".cleanup-*.tmp")
+	tempID, err := newCleanupExecutionID("cleanup")
 	if err != nil {
 		return err
 	}
-	tempName := temp.Name()
-	defer os.Remove(tempName)
-	if err := temp.Chmod(0o600); err != nil {
-		temp.Close()
+	tempName := filepath.Join(parent, "."+tempID+".tmp")
+	temp, err := protectedfs.CreatePrivateFile(tempName)
+	if err != nil {
 		return err
+	}
+	cleanupFailure := func(primary error) error {
+		return errors.Join(primary, temp.Close(), removeTemporaryJSON(tempName))
 	}
 	if _, err := temp.Write(append(data, '\n')); err != nil {
-		temp.Close()
-		return err
+		return cleanupFailure(err)
 	}
 	if err := temp.Sync(); err != nil {
-		temp.Close()
-		return err
+		return cleanupFailure(err)
 	}
 	if err := temp.Close(); err != nil {
-		return err
+		return errors.Join(err, removeTemporaryJSON(tempName))
 	}
-	return os.Rename(tempName, path)
+	if err := atomicReplaceFile(tempName, path); err != nil {
+		return errors.Join(err, removeTemporaryJSON(tempName))
+	}
+	return nil
+}
+
+func removeTemporaryJSON(path string) error {
+	err := os.Remove(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	return err
 }

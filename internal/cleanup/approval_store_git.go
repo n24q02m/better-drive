@@ -58,27 +58,46 @@ type SealedIntentRecord struct {
 
 // StateRecord is the hash-chained lifecycle state in refs/cleanup-states/<id>.
 type StateRecord struct {
-	SchemaVersion uint64    `json:"schema_version"`
-	ApprovalID    string    `json:"approval_id"`
-	IntentRef     string    `json:"intent_ref"`
-	IntentOID     string    `json:"intent_oid"`
-	State         string    `json:"state"`
-	ExecutionID   string    `json:"execution_id,omitempty"`
-	Timestamp     time.Time `json:"timestamp"`
-	PreviousOID   string    `json:"previous_oid,omitempty"`
+	SchemaVersion uint64                  `json:"schema_version"`
+	ApprovalID    string                  `json:"approval_id"`
+	IntentRef     string                  `json:"intent_ref"`
+	IntentOID     string                  `json:"intent_oid"`
+	State         string                  `json:"state"`
+	ExecutionID   string                  `json:"execution_id,omitempty"`
+	Timestamp     time.Time               `json:"timestamp"`
+	PreviousOID   string                  `json:"previous_oid,omitempty"`
+	OwnerRisk     *OwnerRiskStateMetadata `json:"owner_risk,omitempty"`
+}
+
+type ApprovalSnapshot struct {
+	Intent     Intent             `json:"intent"`
+	Sealed     SealedIntentRecord `json:"sealed_intent"`
+	State      StateRecord        `json:"state"`
+	IntentOID  string             `json:"intent_oid"`
+	StateOID   string             `json:"state_oid"`
+	JournalOID string             `json:"journal_oid,omitempty"`
+	LeaseOID   string             `json:"lease_oid,omitempty"`
 }
 
 // LeaseRecord is the authoritative destination lease record in refs/destination-leases/<hash>.
 type LeaseRecord struct {
-	SchemaVersion uint64    `json:"schema_version"`
-	IdentityHash  string    `json:"identity_hash"`
-	ApprovalID    string    `json:"approval_id"`
-	Owner         string    `json:"owner"`
-	ExecutionID   string    `json:"execution_id,omitempty"`
-	Generation    uint64    `json:"generation"`
-	State         string    `json:"state"` // free, claimed, needs_reconciliation, consumed
-	Timestamp     time.Time `json:"timestamp"`
-	PreviousOID   string    `json:"previous_oid,omitempty"`
+	SchemaVersion    uint64    `json:"schema_version"`
+	IdentityHash     string    `json:"identity_hash"`
+	ApprovalID       string    `json:"approval_id"`
+	Owner            string    `json:"owner"`
+	ExecutionID      string    `json:"execution_id,omitempty"`
+	ClaimID          string    `json:"claim_id,omitempty"`
+	RequestDigest    string    `json:"request_digest,omitempty"`
+	ClaimDigest      string    `json:"claim_digest,omitempty"`
+	OutcomeDigest    string    `json:"outcome_digest,omitempty"`
+	ProviderRequests []string  `json:"provider_requests,omitempty"`
+	Authority        string    `json:"authority,omitempty"`
+	Generation       uint64    `json:"generation"`
+	Fence            uint64    `json:"fence,omitempty"`
+	State            string    `json:"state"`
+	ExpiresAt        time.Time `json:"expires_at,omitempty"`
+	Timestamp        time.Time `json:"timestamp"`
+	PreviousOID      string    `json:"previous_oid,omitempty"`
 }
 
 // DraftAuthorityTransport allows create-only draft writing. It is restricted from
@@ -92,19 +111,35 @@ type DraftAuthorityTransport interface {
 // ActivationAuthorityTransport allows creating sealed intent and initial state atomically.
 // It cannot write drafts or runtime journals.
 type ActivationAuthorityTransport interface {
-	CreateSealedIntentAndState(intentRef, intentData, stateRef, stateData string) (intentOID, stateOID string, err error)
+	CreateSealedIntentAndState(intentRef, intentData, stateRef string, state StateRecord) (intentOID, stateOID string, err error)
 	ReadRef(ref string) (oid string, exists bool, err error)
 	ReadBlob(oid string) ([]byte, error)
 }
 
-// RuntimeAuthorityTransport allows updating state, journal, and destination lease CAS refs.
-// It cannot write drafts or create new sealed intents.
+type RuntimeRefMutation struct {
+	Ref         string
+	ExpectedOID string
+	Data        string
+}
+
+type RuntimeAuthorityTransition struct {
+	State   RuntimeRefMutation
+	Journal RuntimeRefMutation
+	Lease   RuntimeRefMutation
+}
+
+type RuntimeAuthorityTransitionResult struct {
+	StateOID   string
+	JournalOID string
+	LeaseOID   string
+}
+
+// RuntimeAuthorityTransport commits state, journal, and destination lease refs
+// as one CAS transaction. It cannot write drafts or create sealed intents.
 type RuntimeAuthorityTransport interface {
 	ReadRef(ref string) (oid string, exists bool, err error)
 	ReadBlob(oid string) ([]byte, error)
-	CASState(ref, expectedOID, newData string) (newOID string, err error)
-	CASLease(ref, expectedOID, newData string) (newOID string, err error)
-	AppendJournal(ref, expectedHeadOID, recordData string) (newHeadOID string, err error)
+	CommitRuntimeTransition(RuntimeAuthorityTransition) (RuntimeAuthorityTransitionResult, error)
 }
 
 // LocalGitTransport wraps *GitRepo into the authority-scoped transport interfaces.
@@ -148,7 +183,7 @@ func (t *LocalGitTransport) CreateDraft(ref string, data []byte) (string, error)
 	return oid, nil
 }
 
-func (t *LocalGitTransport) CreateSealedIntentAndState(intentRef, intentData, stateRef, stateData string) (string, string, error) {
+func (t *LocalGitTransport) CreateSealedIntentAndState(intentRef, intentData, stateRef string, state StateRecord) (string, string, error) {
 	if !strings.HasPrefix(intentRef, "refs/cleanup-intents/") {
 		return "", "", fmt.Errorf("activation transport denied writing intent outside refs/cleanup-intents/: %q", intentRef)
 	}
@@ -159,56 +194,86 @@ func (t *LocalGitTransport) CreateSealedIntentAndState(intentRef, intentData, st
 	if err != nil {
 		return "", "", err
 	}
-	stateOID, err := t.Repo.WriteBlob([]byte(stateData))
+	state.IntentOID = intentOID
+	stateData, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {
 		return "", "", err
 	}
-	if err := t.Repo.AtomicCreateTwoRefs(intentRef, intentOID, stateRef, stateOID); err != nil {
+	stateOID, err := t.Repo.WriteBlob(append(stateData, '\n'))
+	if err != nil {
+		return "", "", err
+	}
+	if err := t.Repo.AtomicUpdateRefs(
+		GitRefUpdate{Ref: intentRef, NewOID: intentOID},
+		GitRefUpdate{Ref: stateRef, NewOID: stateOID},
+	); err != nil {
 		return "", "", err
 	}
 	return intentOID, stateOID, nil
 }
 
-func (t *LocalGitTransport) CASState(ref, expectedOID, newData string) (string, error) {
-	if !strings.HasPrefix(ref, "refs/cleanup-states/") {
-		return "", fmt.Errorf("runtime transport denied writing outside refs/cleanup-states/: %q", ref)
+func (t *LocalGitTransport) CommitRuntimeTransition(transition RuntimeAuthorityTransition) (RuntimeAuthorityTransitionResult, error) {
+	if t == nil || t.Repo == nil {
+		return RuntimeAuthorityTransitionResult{}, errors.New("git repo is not configured")
 	}
-	newOID, err := t.Repo.WriteBlob([]byte(newData))
-	if err != nil {
-		return "", err
+	for _, check := range []struct {
+		name     string
+		mutation RuntimeRefMutation
+		prefix   string
+	}{
+		{name: "state", mutation: transition.State, prefix: "refs/cleanup-states/"},
+		{name: "journal", mutation: transition.Journal, prefix: "refs/cleanup-journals/"},
+		{name: "lease", mutation: transition.Lease, prefix: "refs/destination-leases/"},
+	} {
+		if !strings.HasPrefix(check.mutation.Ref, check.prefix) {
+			return RuntimeAuthorityTransitionResult{}, fmt.Errorf(
+				"runtime transport denied writing %s outside %s: %q",
+				check.name,
+				check.prefix,
+				check.mutation.Ref,
+			)
+		}
+		if check.mutation.Data == "" {
+			return RuntimeAuthorityTransitionResult{}, fmt.Errorf("runtime %s data is required", check.name)
+		}
 	}
-	if err := t.Repo.CAS(ref, expectedOID, newOID); err != nil {
-		return "", err
-	}
-	return newOID, nil
-}
 
-func (t *LocalGitTransport) CASLease(ref, expectedOID, newData string) (string, error) {
-	if !strings.HasPrefix(ref, "refs/destination-leases/") {
-		return "", fmt.Errorf("runtime transport denied writing outside refs/destination-leases/: %q", ref)
-	}
-	newOID, err := t.Repo.WriteBlob([]byte(newData))
+	stateOID, err := t.Repo.WriteBlob([]byte(transition.State.Data))
 	if err != nil {
-		return "", err
+		return RuntimeAuthorityTransitionResult{}, err
 	}
-	if err := t.Repo.CAS(ref, expectedOID, newOID); err != nil {
-		return "", err
-	}
-	return newOID, nil
-}
-
-func (t *LocalGitTransport) AppendJournal(ref, expectedHeadOID, recordData string) (string, error) {
-	if !strings.HasPrefix(ref, "refs/cleanup-journals/") {
-		return "", fmt.Errorf("runtime transport denied writing outside refs/cleanup-journals/: %q", ref)
-	}
-	newOID, err := t.Repo.WriteBlob([]byte(recordData))
+	journalOID, err := t.Repo.WriteBlob([]byte(transition.Journal.Data))
 	if err != nil {
-		return "", err
+		return RuntimeAuthorityTransitionResult{}, err
 	}
-	if err := t.Repo.CAS(ref, expectedHeadOID, newOID); err != nil {
-		return "", err
+	leaseOID, err := t.Repo.WriteBlob([]byte(transition.Lease.Data))
+	if err != nil {
+		return RuntimeAuthorityTransitionResult{}, err
 	}
-	return newOID, nil
+	if err := t.Repo.AtomicUpdateRefs(
+		GitRefUpdate{
+			Ref:         transition.State.Ref,
+			ExpectedOID: transition.State.ExpectedOID,
+			NewOID:      stateOID,
+		},
+		GitRefUpdate{
+			Ref:         transition.Journal.Ref,
+			ExpectedOID: transition.Journal.ExpectedOID,
+			NewOID:      journalOID,
+		},
+		GitRefUpdate{
+			Ref:         transition.Lease.Ref,
+			ExpectedOID: transition.Lease.ExpectedOID,
+			NewOID:      leaseOID,
+		},
+	); err != nil {
+		return RuntimeAuthorityTransitionResult{}, err
+	}
+	return RuntimeAuthorityTransitionResult{
+		StateOID:   stateOID,
+		JournalOID: journalOID,
+		LeaseOID:   leaseOID,
+	}, nil
 }
 
 // ApprovalStore manages cleanup drafts, sealed intents, and states via private Git.
@@ -220,23 +285,24 @@ type ApprovalStore struct {
 	Now                 func() time.Time
 }
 
-// NewApprovalStore creates an ApprovalStore backed by a local bare Git repository.
-func NewApprovalStore(root string) *ApprovalStore {
+// NewApprovalStore creates an ApprovalStore backed by a protected local bare
+// Git repository.
+func NewApprovalStore(root string) (*ApprovalStore, error) {
 	if strings.TrimSpace(root) == "" {
-		return &ApprovalStore{Now: time.Now}
+		return nil, errors.New("approval store root is required")
 	}
 	repo, err := NewGitRepo(root)
 	if err != nil {
-		return &ApprovalStore{Root: root, Now: time.Now}
+		return nil, fmt.Errorf("open approval store: %w", err)
 	}
 	local := NewLocalGitTransport(repo)
 	return &ApprovalStore{
 		DraftTransport:      local,
 		ActivationTransport: local,
 		RuntimeTransport:    local,
-		Root:                root,
+		Root:                repo.Root,
 		Now:                 time.Now,
-	}
+	}, nil
 }
 
 func (store *ApprovalStore) now() time.Time {
@@ -277,7 +343,7 @@ func (store *ApprovalStore) Prepare(approval Approval) (DraftRecord, error) {
 			return DraftRecord{}, createErr
 		}
 		var current DraftRecord
-		if err := json.Unmarshal(existingBytes, &current); err != nil {
+		if err := decodeStrictJSONRecord(existingBytes, &current); err != nil {
 			return DraftRecord{}, fmt.Errorf("decode existing draft: %w", err)
 		}
 		currentCanonical, err := CanonicalApproval(current.Approval)
@@ -319,7 +385,7 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 		return fmt.Errorf("read draft blob %q: %w", draftOID, err)
 	}
 	var draft DraftRecord
-	if err := json.Unmarshal(draftData, &draft); err != nil {
+	if err := decodeStrictJSONRecord(draftData, &draft); err != nil {
 		return fmt.Errorf("decode existing draft: %w", err)
 	}
 	draftCanonical, err := CanonicalApproval(draft.Approval)
@@ -351,19 +417,16 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 		SchemaVersion: CurrentApprovalSchemaVersion,
 		ApprovalID:    intent.Approval.ApprovalID,
 		IntentRef:     intentRef,
-		IntentOID:     Digest(sealedData),
+		IntentOID:     "",
 		State:         ApprovalApproved,
 		Timestamp:     now,
 	}
-	stateData, err := json.MarshalIndent(stateRecord, "", "  ")
-	if err != nil {
-		return err
-	}
 
-	// 3. Atomically create intent and state refs.
+	// 3. Create the intent blob, bind its authoritative OID into the initial
+	// state blob, then create both refs through the activation authority.
 	intentOID, stateOID, createErr := store.ActivationTransport.CreateSealedIntentAndState(
 		intentRef, string(append(sealedData, '\n')),
-		stateRef, string(append(stateData, '\n')),
+		stateRef, stateRecord,
 	)
 	if createErr != nil {
 		// Idempotency: check if both exist and match.
@@ -374,10 +437,11 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 			exStateBytes, _ := store.ActivationTransport.ReadBlob(exStateOID)
 			var curIntent SealedIntentRecord
 			var curState StateRecord
-			if json.Unmarshal(exIntentBytes, &curIntent) == nil && json.Unmarshal(exStateBytes, &curState) == nil {
+			if decodeStrictJSONRecord(exIntentBytes, &curIntent) == nil && decodeStrictJSONRecord(exStateBytes, &curState) == nil {
 				curCanonical, _ := CanonicalApproval(curIntent.Approval)
 				if bytes.Equal(curCanonical, canonical) && curIntent.IntentDigest == intent.IntentDigest &&
-					curIntent.SignatureHex == intent.SignatureHex && curState.State == ApprovalApproved {
+					curIntent.SignatureHex == intent.SignatureHex && curState.State == ApprovalApproved &&
+					curState.IntentOID == exIntentOID {
 					return nil
 				}
 			}
@@ -395,57 +459,126 @@ func (store *ApprovalStore) Activate(intent Intent) error {
 }
 
 func (store *ApprovalStore) ReadState(approvalID string) (Intent, error) {
-	if store == nil {
-		return Intent{}, errors.New("approval store is nil")
-	}
-	if err := validateOpaqueApprovalID(approvalID); err != nil {
+	snapshot, err := store.ReadSnapshot(approvalID)
+	if err != nil {
 		return Intent{}, err
 	}
+	return snapshot.Intent, nil
+}
+
+func (store *ApprovalStore) ReadSnapshot(approvalID string) (ApprovalSnapshot, error) {
+	if store == nil {
+		return ApprovalSnapshot{}, errors.New("approval store is nil")
+	}
+	if err := validateOpaqueApprovalID(approvalID); err != nil {
+		return ApprovalSnapshot{}, err
+	}
 	transport := store.RuntimeTransport
-	if transport == nil {
-		if store.ActivationTransport != nil {
-			transport = store.ActivationTransport.(RuntimeAuthorityTransport)
+	if transport == nil && store.ActivationTransport != nil {
+		if runtimeTransport, ok := store.ActivationTransport.(RuntimeAuthorityTransport); ok {
+			transport = runtimeTransport
 		}
 	}
 	if transport == nil {
-		return Intent{}, errors.New("runtime authority transport is not configured")
+		return ApprovalSnapshot{}, errors.New("runtime authority transport is not configured")
 	}
+
 	stateRef := StateRef(approvalID)
 	stateOID, exists, err := transport.ReadRef(stateRef)
 	if err != nil {
-		return Intent{}, err
+		return ApprovalSnapshot{}, err
 	}
 	if !exists {
-		return Intent{}, fmt.Errorf("state ref %q does not exist", stateRef)
+		return ApprovalSnapshot{}, fmt.Errorf("state ref %q does not exist", stateRef)
+	}
+	if !gitOIDPattern.MatchString(stateOID) {
+		return ApprovalSnapshot{}, errors.New("approval state ref does not resolve to an exact Git OID")
 	}
 	stateData, err := transport.ReadBlob(stateOID)
 	if err != nil {
-		return Intent{}, fmt.Errorf("read state blob %q: %w", stateOID, err)
+		return ApprovalSnapshot{}, fmt.Errorf("read state blob %q: %w", stateOID, err)
 	}
 	var stateRecord StateRecord
-	if err := json.Unmarshal(stateData, &stateRecord); err != nil {
-		return Intent{}, fmt.Errorf("decode approval state: %w", err)
+	if err := decodeStrictJSONRecord(stateData, &stateRecord); err != nil {
+		return ApprovalSnapshot{}, fmt.Errorf("decode approval state: %w", err)
+	}
+	if stateRecord.SchemaVersion != CurrentApprovalSchemaVersion ||
+		stateRecord.ApprovalID != approvalID ||
+		stateRecord.IntentRef != IntentRef(approvalID) ||
+		!gitOIDPattern.MatchString(stateRecord.IntentOID) {
+		return ApprovalSnapshot{}, errors.New("approval state does not bind the expected sealed intent")
+	}
+	switch stateRecord.State {
+	case ApprovalApproved, ApprovalClaimed, ApprovalConsumed, ApprovalNeedsReconciliation:
+	default:
+		return ApprovalSnapshot{}, fmt.Errorf("approval state %q is invalid", stateRecord.State)
 	}
 
-	intentRef := stateRecord.IntentRef
-	intentOID, intentExists, err := transport.ReadRef(intentRef)
+	currentIntentOID, intentExists, err := transport.ReadRef(stateRecord.IntentRef)
 	if err != nil || !intentExists {
-		return Intent{}, fmt.Errorf("sealed intent ref %q absent for state %q: %w", intentRef, approvalID, err)
+		return ApprovalSnapshot{}, fmt.Errorf("sealed intent ref %q absent for state %q: %w", stateRecord.IntentRef, approvalID, err)
 	}
-	intentData, err := transport.ReadBlob(intentOID)
+	if currentIntentOID != stateRecord.IntentOID {
+		return ApprovalSnapshot{}, fmt.Errorf("sealed intent ref %q moved from bound intent OID %q to %q", stateRecord.IntentRef, stateRecord.IntentOID, currentIntentOID)
+	}
+	intentData, err := transport.ReadBlob(stateRecord.IntentOID)
 	if err != nil {
-		return Intent{}, fmt.Errorf("read intent blob %q: %w", intentOID, err)
+		return ApprovalSnapshot{}, fmt.Errorf("read intent blob %q: %w", stateRecord.IntentOID, err)
 	}
 	var sealed SealedIntentRecord
-	if err := json.Unmarshal(intentData, &sealed); err != nil {
-		return Intent{}, fmt.Errorf("decode sealed intent: %w", err)
+	if err := decodeStrictJSONRecord(intentData, &sealed); err != nil {
+		return ApprovalSnapshot{}, fmt.Errorf("decode sealed intent: %w", err)
 	}
-	return Intent{
+	canonicalApproval, err := CanonicalApproval(sealed.Approval)
+	if err != nil ||
+		sealed.SchemaVersion != CurrentApprovalSchemaVersion ||
+		sealed.Approval.ApprovalID != approvalID ||
+		sealed.IntentDigest != Digest(canonicalApproval) ||
+		sealed.DraftRef != DraftRef(approvalID) ||
+		!gitOIDPattern.MatchString(sealed.DraftOID) ||
+		sealed.Issuer != sealed.Approval.Issuer ||
+		sealed.CreatedAt.IsZero() {
+		return ApprovalSnapshot{}, errors.New("sealed cleanup intent lineage is invalid")
+	}
+	signature, err := hex.DecodeString(sealed.SignatureHex)
+	if err != nil || len(signature) != ed25519.SignatureSize {
+		return ApprovalSnapshot{}, errors.New("sealed cleanup intent signature is invalid")
+	}
+
+	journalOID, journalExists, err := transport.ReadRef(JournalRef(approvalID))
+	if err != nil {
+		return ApprovalSnapshot{}, err
+	}
+	if journalExists && !gitOIDPattern.MatchString(journalOID) {
+		return ApprovalSnapshot{}, errors.New("cleanup journal ref does not resolve to an exact Git OID")
+	}
+	identityHash, err := QuarantineIdentityHash(sealed.Approval.QuarantineTarget)
+	if err != nil {
+		return ApprovalSnapshot{}, err
+	}
+	leaseOID, leaseExists, err := transport.ReadRef(LeaseRef(identityHash))
+	if err != nil {
+		return ApprovalSnapshot{}, err
+	}
+	if leaseExists && !gitOIDPattern.MatchString(leaseOID) {
+		return ApprovalSnapshot{}, errors.New("cleanup lease ref does not resolve to an exact Git OID")
+	}
+
+	intent := Intent{
 		SchemaVersion: sealed.SchemaVersion,
 		IntentDigest:  sealed.IntentDigest,
 		Approval:      sealed.Approval,
 		SignatureHex:  sealed.SignatureHex,
 		State:         stateRecord.State,
 		CreatedAt:     sealed.CreatedAt,
+	}
+	return ApprovalSnapshot{
+		Intent:     intent,
+		Sealed:     sealed,
+		State:      stateRecord,
+		IntentOID:  stateRecord.IntentOID,
+		StateOID:   stateOID,
+		JournalOID: journalOID,
+		LeaseOID:   leaseOID,
 	}, nil
 }
