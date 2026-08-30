@@ -194,6 +194,29 @@ func TestCleanupApprovalWorkflowCommands(t *testing.T) {
 	}
 }
 
+func TestReadDriveAccessTokenSourceAcceptsLegacyDescriptor(t *testing.T) {
+	setInheritedFileDescriptor(t, driveTokenFDEnv, []byte("legacy-access-token"))
+	tokenSource, err := readDriveAccessTokenSource(&http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := tokenSource.AccessToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "legacy-access-token" {
+		t.Fatalf("legacy access token = %q", token)
+	}
+}
+
+func TestReadDriveAccessTokenSourceRejectsAmbiguousDescriptors(t *testing.T) {
+	t.Setenv(driveTokenFDEnv, "100")
+	t.Setenv(driveOAuthCredentialFDEnv, "101")
+	if _, err := readDriveAccessTokenSource(&http.Client{}); err == nil || !strings.Contains(err.Error(), "only one") {
+		t.Fatalf("ambiguous descriptor error = %v", err)
+	}
+}
+
 func TestCleanupInventoryCapturesProviderAggregateAndState(t *testing.T) {
 	dir := t.TempDir()
 	rootSetPath := writeCleanupTestRootSet(t, dir)

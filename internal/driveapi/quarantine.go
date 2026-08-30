@@ -61,10 +61,11 @@ type quarantineHTTPClient struct {
 }
 
 func newQuarantineHTTPClient(client *http.Client, endpoint, accessToken string) (*quarantineHTTPClient, error) {
-	if err := validateSecretField(accessToken, "Drive access token", maxAccessTokenBytes); err != nil {
+	tokenSource, err := NewStaticAccessTokenSource(accessToken)
+	if err != nil {
 		return nil, err
 	}
-	return newQuarantineHTTPClientWithTokenSource(client, endpoint, staticAccessTokenSource{token: accessToken})
+	return newQuarantineHTTPClientWithTokenSource(client, endpoint, tokenSource)
 }
 
 func newQuarantineHTTPClientWithTokenSource(

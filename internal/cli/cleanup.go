@@ -205,11 +205,11 @@ func cleanupInventoryCommand(factory cleanupInventoryFactory) *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "freeze the exact account/root/binding plan before capture")
 			}
 			driveClient := &http.Client{Timeout: 30 * time.Second}
-			tokenSource, err := readDriveOAuthTokenSource(driveClient)
+			tokenSource, err := readDriveAccessTokenSource(driveClient)
 			if err != nil {
 				return exitcode.WithRemediation(
 					exitcode.ConfigError(err),
-					"pass the refresh-capable Drive OAuth credential through its inherited descriptor",
+					"pass either the refresh-capable Drive OAuth credential or legacy access token through its inherited descriptor",
 				)
 			}
 			client, err := factory(driveClient, tokenSource)

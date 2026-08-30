@@ -81,11 +81,11 @@ func cleanupFixtureLifecycleCmd() *cobra.Command {
 				return err
 			}
 			driveClient := &http.Client{Timeout: 30 * time.Second}
-			tokenSource, err := readDriveOAuthTokenSource(driveClient)
+			tokenSource, err := readDriveAccessTokenSource(driveClient)
 			if err != nil {
 				return exitcode.WithRemediation(
 					exitcode.ConfigError(err),
-					"pass the refresh-capable candidate Drive OAuth credential through its inherited descriptor",
+					"pass either the refresh-capable candidate Drive OAuth credential or legacy access token through its inherited descriptor",
 				)
 			}
 			repo, err := cleanup.NewGitRepo(paths.CleanupAuthorityStoreDir())

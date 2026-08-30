@@ -63,6 +63,15 @@ func (source staticAccessTokenSource) AccessToken(context.Context) (string, erro
 	return source.token, nil
 }
 
+// NewStaticAccessTokenSource preserves the legacy inherited-token contract for
+// callers that cannot yet provide a refresh envelope.
+func NewStaticAccessTokenSource(accessToken string) (AccessTokenSource, error) {
+	if err := validateSecretField(accessToken, "Drive access token", maxAccessTokenBytes); err != nil {
+		return nil, err
+	}
+	return staticAccessTokenSource{token: accessToken}, nil
+}
+
 // DecodeOAuthCredential accepts exactly one current-schema JSON envelope.
 func DecodeOAuthCredential(data []byte) (OAuthCredential, error) {
 	decoder := json.NewDecoder(bytes.NewReader(data))

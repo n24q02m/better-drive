@@ -28,9 +28,11 @@ const (
 	maxCleanupSecurityFile       = 64 << 10
 	maxCleanupPEMBytes           = 1 << 20
 	maxDriveOAuthCredentialBytes = 64 << 10
+	maxDriveTokenBytes           = 16 << 10
 	cleanupMTLSCertFDEnv         = "BETTER_DRIVE_CLEANUP_MTLS_CERT_FD"
 	cleanupMTLSKeyFDEnv          = "BETTER_DRIVE_CLEANUP_MTLS_KEY_FD"
 	driveOAuthCredentialFDEnv    = "BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD"
+	driveTokenFDEnv              = "BETTER_DRIVE_DRIVE_TOKEN_FD"
 )
 
 type cleanupBrokerConfig struct {
@@ -41,7 +43,20 @@ type cleanupBrokerConfig struct {
 	Owner         string `json:"owner"`
 }
 
-func readDriveOAuthTokenSource(client *http.Client) (driveapi.AccessTokenSource, error) {
+func readDriveAccessTokenSource(client *http.Client) (driveapi.AccessTokenSource, error) {
+	hasOAuthCredential := strings.TrimSpace(os.Getenv(driveOAuthCredentialFDEnv)) != ""
+	hasLegacyToken := strings.TrimSpace(os.Getenv(driveTokenFDEnv)) != ""
+	if hasOAuthCredential == hasLegacyToken {
+		return nil, errors.New("set only one Drive OAuth credential or legacy token descriptor")
+	}
+	if hasLegacyToken {
+		data, err := readSecretFD(driveTokenFDEnv, maxDriveTokenBytes)
+		if err != nil {
+			return nil, err
+		}
+		defer zeroBytes(data)
+		return driveapi.NewStaticAccessTokenSource(string(data))
+	}
 	data, err := readSecretFD(driveOAuthCredentialFDEnv, maxDriveOAuthCredentialBytes)
 	if err != nil {
 		return nil, err
@@ -103,7 +118,7 @@ func executeProtectedCleanup(ctx context.Context, manifest cleanup.Manifest, val
 		return driveapi.QuarantineExecutionResult{}, err
 	}
 	driveClient := &http.Client{Timeout: 30 * time.Second}
-	tokenSource, err := readDriveOAuthTokenSource(driveClient)
+	tokenSource, err := readDriveAccessTokenSource(driveClient)
 	if err != nil {
 		return driveapi.QuarantineExecutionResult{}, err
 	}

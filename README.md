@@ -288,12 +288,13 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 
 Run `better-drive <command> --help` for complete flags, examples, and prerequisites.
 
-Drive-backed cleanup inventory, claimed quarantine, and fixture lifecycle commands
-accept a strict OAuth credential envelope only through
-`BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD`. The environment carries the inherited descriptor
-number, never the access token, refresh token, or client secret. The token
-source refreshes before provider requests when expiry is near; refresh failures
-are redacted and no provider mutation is retried.
+Drive-backed cleanup inventory, claimed quarantine, and fixture lifecycle
+commands prefer a strict OAuth credential envelope through
+`BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD`. The environment carries only the
+inherited descriptor number, never credential values. The legacy
+`BETTER_DRIVE_DRIVE_TOKEN_FD` raw-access-token descriptor remains supported as
+a non-refreshing compatibility path; supplying both descriptors is rejected.
+Refresh failures are redacted and no provider mutation is retried.
 
 ## Requirements
 
