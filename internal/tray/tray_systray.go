@@ -47,13 +47,14 @@ func onReady(loops []*syncloop.Loop, jobs []config.Job, agg *Aggregator) {
 		} else {
 			mPause.Disable()
 		}
-		syncEnabled, syncTooltip := syncMenuState(aggregate)
+		syncEnabled, syncTitle, syncTooltip := syncMenuState(aggregate)
+		mSync.SetTitle(syncTitle)
+		mSync.SetTooltip(syncTooltip)
 		if syncEnabled {
 			mSync.Enable()
 		} else {
 			mSync.Disable()
 		}
-		mSync.SetTooltip(syncTooltip)
 	})
 
 	go func() {
