@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const CurrentSchemaVersion = 3
+const CurrentSchemaVersion = 4
 
 const (
 	ModeQuarantine                  Mode = "quarantine"
@@ -25,8 +25,9 @@ type Mode string
 type ObjectType string
 
 const (
-	ObjectTypeFile   ObjectType = "file"
-	ObjectTypeFolder ObjectType = "folder"
+	ObjectTypeFile           ObjectType = "file"
+	ObjectTypeFolder         ObjectType = "folder"
+	ObjectTypeProviderNative ObjectType = "provider_native"
 )
 
 type ObjectClass string
@@ -56,20 +57,22 @@ type QuarantineTarget struct {
 }
 
 type Object struct {
-	ID                 string      `json:"id"`
-	ParentID           string      `json:"parent_id"`
-	Name               string      `json:"name"`
-	Path               string      `json:"path"`
-	ObjectType         ObjectType  `json:"object_type"`
-	ContentHash        string      `json:"content_hash"`
-	Size               int64       `json:"size"`
-	Provider           string      `json:"provider"`
-	AccountID          string      `json:"account_id"`
-	RootID             string      `json:"root_id"`
-	Namespace          string      `json:"namespace"`
-	Version            string      `json:"version"`
-	Generation         string      `json:"generation"`
-	ETag               string      `json:"etag"`
+	ID          string     `json:"id"`
+	ParentID    string     `json:"parent_id"`
+	Name        string     `json:"name"`
+	Path        string     `json:"path"`
+	ObjectType  ObjectType `json:"object_type"`
+	ContentHash string     `json:"content_hash"`
+	Size        int64      `json:"size"`
+	Provider    string     `json:"provider"`
+	AccountID   string     `json:"account_id"`
+	RootID      string     `json:"root_id"`
+	Namespace   string     `json:"namespace"`
+	Version     string     `json:"version"`
+	Generation  string     `json:"generation"`
+	// MetadataDigest binds exact provider metadata for no-CAS drift detection.
+	// It is evidence for the signed one-attempt protocol, never a CAS token.
+	MetadataDigest     string      `json:"metadata_digest"`
 	ModifiedAt         time.Time   `json:"modified_at"`
 	Trashed            bool        `json:"trashed"`
 	Depth              int         `json:"depth"`
@@ -265,7 +268,7 @@ func ValidateManifestAgainstInventory(manifest Manifest, rootSet RootSet, invent
 			observed.Size != selectedObject.Size ||
 			observed.Version != selectedObject.Version ||
 			observed.Generation != selectedObject.Generation ||
-			observed.ETag != selectedObject.ETag ||
+			observed.MetadataDigest != selectedObject.MetadataDigest ||
 			!observed.ModifiedAt.Equal(selectedObject.ModifiedAt) ||
 			observed.Trashed != selectedObject.Trashed ||
 			observed.Depth != selectedObject.Depth ||
@@ -342,7 +345,7 @@ func validateObject(manifest Manifest, object Object) error {
 		"id": object.ID, "parent_id": object.ParentID, "name": object.Name, "path": object.Path,
 		"provider": object.Provider, "account_id": object.AccountID, "root_id": object.RootID,
 		"namespace": object.Namespace, "version": object.Version, "generation": object.Generation,
-		"etag": object.ETag,
+		"metadata_digest": object.MetadataDigest,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
@@ -350,6 +353,9 @@ func validateObject(manifest Manifest, object Object) error {
 		if strings.ContainsAny(value, "*?[]") {
 			return fmt.Errorf("%s must not contain wildcard characters", name)
 		}
+	}
+	if err := validateSHA256Hex(object.MetadataDigest, "metadata_digest"); err != nil {
+		return err
 	}
 	if object.ModifiedAt.IsZero() {
 		return errors.New("modified_at is required")

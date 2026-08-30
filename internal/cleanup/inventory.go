@@ -11,8 +11,8 @@ import (
 )
 
 const (
-	CurrentInventorySchemaVersion = 2
-	CurrentRootSetSchemaVersion   = 3
+	CurrentInventorySchemaVersion = 3
+	CurrentRootSetSchemaVersion   = 4
 )
 const maxInt64 = int64(1<<63 - 1)
 
@@ -302,11 +302,14 @@ func validateInventoryObject(root Root, page Page, object Object) error {
 		"id": object.ID, "parent_id": object.ParentID, "name": object.Name, "path": object.Path,
 		"provider": object.Provider, "account_id": object.AccountID, "root_id": object.RootID,
 		"namespace": object.Namespace, "version": object.Version, "generation": object.Generation,
-		"etag": object.ETag,
+		"metadata_digest": object.MetadataDigest,
 	} {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
 		}
+	}
+	if err := validateSHA256Hex(object.MetadataDigest, "metadata_digest"); err != nil {
+		return err
 	}
 	if object.ParentID != page.ParentID {
 		return fmt.Errorf("parent ID %q does not match page parent %q", object.ParentID, page.ParentID)
@@ -337,6 +340,13 @@ func validateInventoryObject(root Root, page Page, object Object) error {
 		}
 		if !object.ChildrenComplete || !object.SubtreeComplete {
 			return errors.New("folder children/subtree are not complete")
+		}
+	case ObjectTypeProviderNative:
+		if object.Size != 0 || object.ContentHash != "" || object.Class != ClassUnknown {
+			return errors.New("provider-native object must remain an unknown zero-byte inventory record")
+		}
+		if object.ChildrenComplete || object.ChildCount != 0 || object.SubtreeComplete || object.SubtreeObjectCount != 0 {
+			return errors.New("provider-native object contains folder subtree metadata")
 		}
 	default:
 		return fmt.Errorf("object_type %q is unsupported", object.ObjectType)

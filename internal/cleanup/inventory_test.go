@@ -12,7 +12,7 @@ func inventoryObject(id string) Object {
 		ID: id, ParentID: "root-1", Name: id + ".bin", Path: id + ".bin", ObjectType: ObjectTypeFile,
 		ContentHash: strings.Repeat("a", 64), Size: 4, Provider: "drive", AccountID: "account-1",
 		RootID: "root-1", Namespace: "backup/home", Version: "v1", Generation: "generation-" + id,
-		ETag: "etag-" + id, ModifiedAt: time.Unix(100, 0).UTC(), Depth: 1, Class: ClassUnknown,
+		MetadataDigest: Digest([]byte("metadata-" + id)), ModifiedAt: time.Unix(100, 0).UTC(), Depth: 1, Class: ClassUnknown,
 	}
 }
 
@@ -48,6 +48,19 @@ func TestValidateRootSetAndAggregate(t *testing.T) {
 	}
 	if aggregate.RootSetHash == "" || aggregate.InventoryHash == "" {
 		t.Fatal("expected root-set and inventory hashes")
+	}
+}
+
+func TestBuildAggregateRejectsMalformedMetadataDigest(t *testing.T) {
+	rootSet := validRootSet()
+	rootSet.ExpectedHash = ""
+	rootSet.Roots[0].Pages[0].Objects[0].MetadataDigest = "not-a-sha256"
+	rootSet, err := FreezeRootSet(rootSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildAggregate(rootSet, "account-1"); err == nil || !strings.Contains(err.Error(), "metadata_digest") {
+		t.Fatalf("metadata digest error = %v, want lowercase SHA-256 rejection", err)
 	}
 }
 func TestDecodeAggregateRequiresExactRootCapture(t *testing.T) {

@@ -278,7 +278,7 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit. |
 | `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
 | `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
-| `better-drive cleanup inventory` | Join a complete enumerated all-roots/page capture into read-only aggregate evidence. |
+| `better-drive cleanup inventory` | Recursively capture and join every declared Drive root/page/object into read-only aggregate evidence, using a refresh-capable OAuth credential from an inherited descriptor. |
 | `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
 | `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
 | `better-drive cleanup approval prepare|canonicalize|activate` | Create a create-only draft, render canonical bytes for offline signing, and activate a detached signature only against an enrolled trust root and named capability. |
@@ -287,6 +287,21 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive uninstall` | Remove the login-autostart registration. |
 
 Run `better-drive <command> --help` for complete flags, examples, and prerequisites.
+
+Drive-backed cleanup inventory, claimed quarantine, and fixture lifecycle
+commands prefer a strict OAuth credential envelope through
+`BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD`. The environment carries only the
+inherited descriptor number, never credential values. The legacy
+`BETTER_DRIVE_DRIVE_TOKEN_FD` raw-access-token descriptor remains supported as
+a non-refreshing compatibility path; supplying both descriptors is rejected.
+Refresh failures are redacted and no provider mutation is retried.
+Inventory paginates the declared Drive corpus, including active, enrolled
+quarantine, and native-trash objects, then reconstructs the root tree from
+parent metadata instead of issuing one list request per folder or one metadata
+request per object. Every mutation still performs an exact target read and
+verifies the inventory-bound metadata digest immediately before the one-attempt
+operation.
+Any provider `incompleteSearch` response fails the inventory closed.
 
 ## Requirements
 

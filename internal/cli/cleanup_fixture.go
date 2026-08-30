@@ -80,11 +80,14 @@ func cleanupFixtureLifecycleCmd() *cobra.Command {
 				_, err = fmt.Fprintf(command.OutOrStdout(), "fixture lifecycle preview: fixture=%s capability=%s production_denied=true\n", preview.FixtureID, preview.CapabilityDigest)
 				return err
 			}
-			token, err := readSecretFD(driveTokenFDEnv, maxDriveTokenBytes)
+			driveClient := &http.Client{Timeout: 30 * time.Second}
+			tokenSource, err := readDriveAccessTokenSource(driveClient)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "pass the candidate Drive token through the inherited token file descriptor")
+				return exitcode.WithRemediation(
+					exitcode.ConfigError(err),
+					"pass either the refresh-capable candidate Drive OAuth credential or legacy access token through its inherited descriptor",
+				)
 			}
-			defer zeroBytes(token)
 			repo, err := cleanup.NewGitRepo(paths.CleanupAuthorityStoreDir())
 			if err != nil {
 				return exitcode.ConfigError(err)
@@ -93,9 +96,9 @@ func cleanupFixtureLifecycleCmd() *cobra.Command {
 			if err != nil {
 				return exitcode.ConfigError(err)
 			}
-			executor, err := driveapi.NewFixtureLifecycleExecutor(
-				&http.Client{Timeout: 30 * time.Second},
-				string(token),
+			executor, err := driveapi.NewFixtureLifecycleExecutorWithTokenSource(
+				driveClient,
+				tokenSource,
 				publicKey,
 				receiptStore,
 			)

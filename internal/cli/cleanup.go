@@ -166,11 +166,11 @@ type cleanupInventoryCapturer interface {
 	Capture(context.Context, driveapi.InventoryPlan) (cleanup.RootSet, cleanup.InventoryAggregate, error)
 }
 
-type cleanupInventoryFactory func(*http.Client, string) (cleanupInventoryCapturer, error)
+type cleanupInventoryFactory func(*http.Client, driveapi.AccessTokenSource) (cleanupInventoryCapturer, error)
 
 func cleanupInventoryCmd() *cobra.Command {
-	return cleanupInventoryCommand(func(client *http.Client, token string) (cleanupInventoryCapturer, error) {
-		return driveapi.NewInventoryClient(client, token)
+	return cleanupInventoryCommand(func(client *http.Client, tokenSource driveapi.AccessTokenSource) (cleanupInventoryCapturer, error) {
+		return driveapi.NewInventoryClientWithTokenSource(client, tokenSource)
 	})
 }
 
@@ -204,12 +204,15 @@ func cleanupInventoryCommand(factory cleanupInventoryFactory) *cobra.Command {
 			if err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), "freeze the exact account/root/binding plan before capture")
 			}
-			token, err := readSecretFD(driveTokenFDEnv, maxDriveTokenBytes)
+			driveClient := &http.Client{Timeout: 30 * time.Second}
+			tokenSource, err := readDriveAccessTokenSource(driveClient)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), "pass the Drive token through the inherited token file descriptor")
+				return exitcode.WithRemediation(
+					exitcode.ConfigError(err),
+					"pass either the refresh-capable Drive OAuth credential or legacy access token through its inherited descriptor",
+				)
 			}
-			defer zeroBytes(token)
-			client, err := factory(&http.Client{Timeout: 30 * time.Second}, string(token))
+			client, err := factory(driveClient, tokenSource)
 			if err != nil {
 				return exitcode.ConfigError(err)
 			}

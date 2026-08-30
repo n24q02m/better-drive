@@ -46,9 +46,10 @@ func TestFixtureLifecycleExecutorRunsExactThreePhaseSequenceAndRejectsReplay(t *
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		writer.Header().Set("ETag", `"etag-`+parent.Load().(string)+`"`)
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"id":             "fixture-file",
+			"name":           "fixture.bin",
+			"mimeType":       "application/octet-stream",
 			"parents":        []string{parent.Load().(string)},
 			"trashed":        false,
 			"md5Checksum":    strings.Repeat("a", 32),
@@ -120,9 +121,10 @@ func TestFixtureLifecycleExecutorPersistsAttemptBeforeProviderFailure(t *testing
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		writer.Header().Set("ETag", `"etag-fixture-source"`)
 		_ = json.NewEncoder(writer).Encode(map[string]any{
 			"id":             "fixture-file",
+			"name":           "fixture.bin",
+			"mimeType":       "application/octet-stream",
 			"parents":        []string{"fixture-source"},
 			"trashed":        false,
 			"md5Checksum":    strings.Repeat("a", 32),
@@ -166,6 +168,21 @@ func TestFixtureLifecycleExecutorPersistsAttemptBeforeProviderFailure(t *testing
 	}
 	if patches.Load() != 1 {
 		t.Fatalf("provider PATCH calls = %d, want one", patches.Load())
+	}
+}
+
+func TestFreezeFixtureLifecycleRejectsMalformedMetadataDigest(t *testing.T) {
+	now := time.Unix(200, 0).UTC()
+	_, privateKey, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, metadataDigest := range []string{"not-a-sha256", strings.Repeat("A", 64)} {
+		capability := fixtureLifecycleCapability(t, now, privateKey).Capability
+		capability.Initial.MetadataDigest = metadataDigest
+		if _, err := FreezeFixtureLifecycleCapability(capability); err == nil || !strings.Contains(err.Error(), "active fixture") {
+			t.Fatalf("metadata digest %q error = %v, want active-fixture rejection", metadataDigest, err)
+		}
 	}
 }
 
@@ -213,6 +230,14 @@ func TestFixtureLifecycleExecutorDeniesProductionRootBeforeProviderCall(t *testi
 
 func fixtureLifecycleCapability(t *testing.T, now time.Time, privateKey ed25519.PrivateKey) FixtureLifecycleRequest {
 	t.Helper()
+	metadataDigest, err := driveMetadataDigest(driveFile{
+		ID: "fixture-file", Name: "fixture.bin", MIMEType: "application/octet-stream",
+		Parents: []string{"fixture-source"}, MD5Checksum: strings.Repeat("a", 32), Size: "10",
+		ModifiedTime: now.Format(time.RFC3339Nano), Version: "1", HeadRevisionID: "generation-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	capability, err := FreezeFixtureLifecycleCapability(FixtureLifecycleCapability{
 		SchemaVersion:      CurrentFixtureLifecycleSchemaVersion,
 		FixtureID:          "candidate-fixture-1",
@@ -235,7 +260,7 @@ func fixtureLifecycleCapability(t *testing.T, now time.Time, privateKey ed25519.
 		Initial: cleanup.Object{
 			ID: "fixture-file", ParentID: "fixture-source", Name: "fixture.bin", Path: "/candidate-fixture/fixture.bin", ObjectType: cleanup.ObjectTypeFile,
 			ContentHash: strings.Repeat("a", 32), Size: 10, Provider: "drive", AccountID: "candidate-account", RootID: "candidate-root", Namespace: "candidate-fixture",
-			Version: "1", Generation: "generation-1", ETag: `"etag-fixture-source"`, ModifiedAt: now, Class: cleanup.ClassExpectedFixture,
+			Version: "1", Generation: "generation-1", MetadataDigest: metadataDigest, ModifiedAt: now, Class: cleanup.ClassExpectedFixture,
 			OwnershipMarker: "fixture:candidate-fixture-1", RestoreEvidence: "fixture:candidate-fixture-1:" + strings.Repeat("b", 64),
 		},
 	})

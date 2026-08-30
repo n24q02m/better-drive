@@ -45,7 +45,7 @@ func writeCleanupTestManifest(t *testing.T, dir string) string {
 		Objects: []cleanup.Object{{
 			ID: "object-1", ParentID: "root-1", Name: "object.bin", Path: "object.bin", ObjectType: cleanup.ObjectTypeFile,
 			ContentHash: strings.Repeat("b", 64), Size: 5, Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home",
-			Version: "v1", Generation: "generation-1", ETag: "etag-1", ModifiedAt: time.Now().UTC(), Depth: 1,
+			Version: "v1", Generation: "generation-1", MetadataDigest: strings.Repeat("d", 64), ModifiedAt: time.Now().UTC(), Depth: 1,
 			Class: cleanup.ClassOrphan, OwnershipMarker: "marker-1", RestoreEvidence: "restore-1",
 		}},
 	}
@@ -68,7 +68,7 @@ func writeCleanupTestRootSet(t *testing.T, dir string) string {
 			Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", ExpectedPages: 1,
 			Pages: []cleanup.Page{{Number: 1, ParentID: "root-1", Cursor: "cursor-1", Status: cleanup.PageComplete, Objects: []cleanup.Object{{
 				ID: "object-1", ParentID: "root-1", Name: "object.bin", Path: "object.bin", ObjectType: cleanup.ObjectTypeFile,
-				ContentHash: strings.Repeat("a", 64), Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Version: "v1", Generation: "generation-1", ETag: "etag-1", ModifiedAt: time.Now().UTC(), Depth: 1, Size: 5,
+				ContentHash: strings.Repeat("a", 64), Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup/home", Version: "v1", Generation: "generation-1", MetadataDigest: strings.Repeat("d", 64), ModifiedAt: time.Now().UTC(), Depth: 1, Size: 5,
 			}}},
 			}},
 		}}
@@ -194,6 +194,29 @@ func TestCleanupApprovalWorkflowCommands(t *testing.T) {
 	}
 }
 
+func TestReadDriveAccessTokenSourceAcceptsLegacyDescriptor(t *testing.T) {
+	setInheritedFileDescriptor(t, driveTokenFDEnv, []byte("legacy-access-token"))
+	tokenSource, err := readDriveAccessTokenSource(&http.Client{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token, err := tokenSource.AccessToken(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if token != "legacy-access-token" {
+		t.Fatalf("legacy access token = %q", token)
+	}
+}
+
+func TestReadDriveAccessTokenSourceRejectsAmbiguousDescriptors(t *testing.T) {
+	t.Setenv(driveTokenFDEnv, "100")
+	t.Setenv(driveOAuthCredentialFDEnv, "101")
+	if _, err := readDriveAccessTokenSource(&http.Client{}); err == nil || !strings.Contains(err.Error(), "only one") {
+		t.Fatalf("ambiguous descriptor error = %v", err)
+	}
+}
+
 func TestCleanupInventoryCapturesProviderAggregateAndState(t *testing.T) {
 	dir := t.TempDir()
 	rootSetPath := writeCleanupTestRootSet(t, dir)
@@ -227,11 +250,23 @@ func TestCleanupInventoryCapturesProviderAggregateAndState(t *testing.T) {
 	if err := os.WriteFile(planPath, planData, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	setInheritedFileDescriptor(t, driveTokenFDEnv, []byte("inventory-token"))
+	credentialData, err := json.Marshal(driveapi.OAuthCredential{
+		SchemaVersion: driveapi.CurrentOAuthCredentialSchemaVersion,
+		AccessToken:   "inventory-token", RefreshToken: "refresh-token", TokenType: "Bearer",
+		Expiry: time.Now().UTC().Add(time.Hour), ClientID: "client-id", ClientSecret: "client-secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	setInheritedFileDescriptor(t, driveOAuthCredentialFDEnv, credentialData)
 	statePath := filepath.Join(dir, "inventory-state.json")
 	capturePath := filepath.Join(dir, "all-roots.json")
 	aggregatePath := filepath.Join(dir, "inventory-aggregate.json")
-	command := cleanupInventoryCommand(func(_ *http.Client, token string) (cleanupInventoryCapturer, error) {
+	command := cleanupInventoryCommand(func(_ *http.Client, tokenSource driveapi.AccessTokenSource) (cleanupInventoryCapturer, error) {
+		token, err := tokenSource.AccessToken(t.Context())
+		if err != nil {
+			t.Fatal(err)
+		}
 		if token != "inventory-token" {
 			t.Fatalf("inventory token = %q", token)
 		}
@@ -311,7 +346,7 @@ func TestCleanupFixtureLifecyclePreviewVerifiesSignedProductionDenial(t *testing
 		Initial: cleanup.Object{
 			ID: "fixture-file", ParentID: "fixture-source", Name: "fixture.bin", Path: "/candidate-fixture/fixture.bin", ObjectType: cleanup.ObjectTypeFile,
 			ContentHash: strings.Repeat("a", 32), Size: 10, Provider: "drive", AccountID: "candidate-account", RootID: "candidate-root", Namespace: "candidate-fixture",
-			Version: "1", Generation: "generation-1", ETag: `"etag-1"`, ModifiedAt: now, Class: cleanup.ClassExpectedFixture,
+			Version: "1", Generation: "generation-1", MetadataDigest: strings.Repeat("e", 64), ModifiedAt: now, Class: cleanup.ClassExpectedFixture,
 			OwnershipMarker: "fixture:preview-fixture", RestoreEvidence: "fixture:preview-fixture:" + strings.Repeat("b", 64),
 		},
 	})

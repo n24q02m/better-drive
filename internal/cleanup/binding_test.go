@@ -55,7 +55,7 @@ func TestValidateManifestAgainstInventoryBindsExactMetadata(t *testing.T) {
 	if _, err := ValidateManifestAgainstInventory(manifest, rootSet, inventory, time.Unix(150, 0).UTC()); err != nil {
 		t.Fatalf("ValidateManifestAgainstInventory() error = %v", err)
 	}
-	inventory.Objects[0].ETag = "foreign-etag"
+	inventory.Objects[0].MetadataDigest = strings.Repeat("f", 64)
 	if _, err := ValidateManifestAgainstInventory(manifest, rootSet, inventory, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "exactly match") {
 		t.Fatalf("expected exact capture rejection, got %v", err)
 	}
@@ -72,7 +72,7 @@ func TestValidateManifestAgainstInventoryBindsEveryObservedField(t *testing.T) {
 		{name: "size", mutate: func(object *Object) { object.Size++ }},
 		{name: "version", mutate: func(object *Object) { object.Version = "drifted-version" }},
 		{name: "generation", mutate: func(object *Object) { object.Generation = "drifted-generation" }},
-		{name: "etag", mutate: func(object *Object) { object.ETag = "drifted-etag" }},
+		{name: "metadata_digest", mutate: func(object *Object) { object.MetadataDigest = strings.Repeat("f", 64) }},
 		{name: "modified_at", mutate: func(object *Object) { object.ModifiedAt = object.ModifiedAt.Add(time.Second) }},
 		{name: "trashed", mutate: func(object *Object) { object.Trashed = true }},
 		{name: "depth", mutate: func(object *Object) { object.Depth++ }},

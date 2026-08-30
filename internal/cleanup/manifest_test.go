@@ -43,7 +43,7 @@ func validManifest() Manifest {
 				Namespace:       "backup/home",
 				Version:         "v2",
 				Generation:      "generation-b",
-				ETag:            "etag-b",
+				MetadataDigest:  strings.Repeat("d", 64),
 				ModifiedAt:      time.Unix(90, 0).UTC(),
 				Depth:           1,
 				Class:           ClassDuplicateSameHash,
@@ -65,7 +65,7 @@ func validManifest() Manifest {
 				Namespace:       "backup/home",
 				Version:         "v1",
 				Generation:      "generation-a",
-				ETag:            "etag-a",
+				MetadataDigest:  strings.Repeat("e", 64),
 				ModifiedAt:      time.Unix(91, 0).UTC(),
 				Depth:           1,
 				Class:           ClassDuplicateSameHash,
@@ -128,6 +128,14 @@ func TestValidateManifestRequiresExplicitNoCASAcceptance(t *testing.T) {
 	m.MutationSemantics = ""
 	if _, err := ValidateManifest(m, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "no-CAS") {
 		t.Fatalf("mutation semantics error = %v, want explicit no-CAS acceptance", err)
+	}
+}
+
+func TestValidateManifestRejectsMalformedMetadataDigest(t *testing.T) {
+	manifest := validManifest()
+	manifest.Objects[0].MetadataDigest = "not-a-sha256"
+	if _, err := ValidateManifest(manifest, time.Unix(150, 0).UTC()); err == nil || !strings.Contains(err.Error(), "metadata_digest") {
+		t.Fatalf("metadata digest error = %v, want lowercase SHA-256 rejection", err)
 	}
 }
 

@@ -315,7 +315,13 @@ func TestLargeArtifactsUseBoundedReadAndWriteChunks(t *testing.T) {
 }
 
 func TestSpoolsArePrivateAndRemovedOnSuccessAndFailure(t *testing.T) {
-	tempDir := os.TempDir()
+	tempDir := t.TempDir()
+	for _, name := range []string{"TMPDIR", "TMP", "TEMP"} {
+		t.Setenv(name, tempDir)
+	}
+	if actual := os.TempDir(); actual != tempDir {
+		t.Fatalf("isolated temporary directory = %q, want %q", actual, tempDir)
+	}
 	before := artifactSpoolEntries(t, tempDir)
 	metadata := testMetadata()
 	resolver := testResolver{metadata.Reference(): testKey()}

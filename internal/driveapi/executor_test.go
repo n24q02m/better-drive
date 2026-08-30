@@ -105,6 +105,10 @@ func (authority *signingOwnerRiskAuthority) SettleOwnerRisk(_ context.Context, r
 func validQuarantineExecution(t *testing.T, approvalPrivateKey ed25519.PrivateKey) QuarantineExecutionRequest {
 	t.Helper()
 	now := time.Unix(150, 0).UTC()
+	metadataDigest, err := driveMetadataDigest(quarantineDriveFile("source-parent", "7"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	manifest := cleanup.Manifest{
 		SchemaVersion:     cleanup.CurrentSchemaVersion,
 		ManifestID:        "manifest-01",
@@ -139,7 +143,7 @@ func validQuarantineExecution(t *testing.T, approvalPrivateKey ed25519.PrivateKe
 			Namespace:       "backup/home",
 			Version:         "7",
 			Generation:      "revision-1",
-			ETag:            `"etag-1"`,
+			MetadataDigest:  metadataDigest,
 			ModifiedAt:      time.Unix(100, 0).UTC(),
 			Depth:           1,
 			Class:           cleanup.ClassOrphan,
@@ -245,11 +249,11 @@ func executionDriveServer(t *testing.T, patchStatus int) (*httptest.Server, *ato
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		switch request.Method {
 		case http.MethodGet:
-			version, etag := "7", `"etag-1"`
+			version := "7"
 			if parent == "quarantine-parent" {
-				version, etag = "8", `"etag-2"`
+				version = "8"
 			}
-			writeDriveFile(t, writer, parent, version, etag)
+			writeDriveFile(t, writer, parent, version)
 		case http.MethodPatch:
 			patchCalls.Add(1)
 			if patchStatus >= http.StatusBadRequest {
@@ -257,7 +261,7 @@ func executionDriveServer(t *testing.T, patchStatus int) (*httptest.Server, *ato
 				return
 			}
 			parent = "quarantine-parent"
-			writeDriveFile(t, writer, parent, "8", `"etag-2"`)
+			writeDriveFile(t, writer, parent, "8")
 		default:
 			writer.WriteHeader(http.StatusMethodNotAllowed)
 		}
