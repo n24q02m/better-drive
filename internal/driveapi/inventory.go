@@ -20,7 +20,8 @@ import (
 const (
 	CurrentInventoryPlanSchemaVersion = 1
 	driveFolderMIMEType               = "application/vnd.google-apps.folder"
-	maxDriveInventoryPages            = 10_000
+	maxDriveInventoryProviderPages    = 10_000
+	maxDriveInventoryEvidencePages    = 1_000_000
 	maxDriveInventoryObjects          = 1_000_000
 )
 
@@ -62,9 +63,15 @@ type inventoryParent struct {
 	depth int
 }
 
+type inventoryCorpusObject struct {
+	file         driveFile
+	providerPage int
+}
+
 type driveListResponse struct {
-	NextPageToken string      `json:"nextPageToken"`
-	Files         []driveFile `json:"files"`
+	NextPageToken    string      `json:"nextPageToken"`
+	IncompleteSearch bool        `json:"incompleteSearch"`
+	Files            []driveFile `json:"files"`
 }
 
 func NewInventoryClientWithTokenSource(client *http.Client, tokenSource AccessTokenSource) (*InventoryClient, error) {
@@ -169,6 +176,24 @@ func (client *InventoryClient) captureRoot(
 	bindings map[string]InventoryBinding,
 	usedBindings map[string]struct{},
 ) (cleanup.Root, error) {
+	corpus, err := client.listCorpus(ctx, declaration)
+	if err != nil {
+		return cleanup.Root{}, err
+	}
+	childrenByParent := make(map[string][]inventoryCorpusObject)
+	seenCorpusObjects := make(map[string]struct{}, len(corpus))
+	for _, record := range corpus {
+		if _, duplicate := seenCorpusObjects[record.file.ID]; duplicate {
+			return cleanup.Root{}, fmt.Errorf("Drive object %q appeared more than once", record.file.ID)
+		}
+		seenCorpusObjects[record.file.ID] = struct{}{}
+		if len(record.file.Parents) == 1 {
+			parentID := record.file.Parents[0]
+			childrenByParent[parentID] = append(childrenByParent[parentID], record)
+		}
+	}
+	corpus = nil
+
 	root := cleanup.Root{
 		Provider:  declaration.Provider,
 		AccountID: declaration.AccountID,
@@ -182,72 +207,75 @@ func (client *InventoryClient) captureRoot(
 	for len(queue) > 0 {
 		parent := queue[0]
 		queue = queue[1:]
-		pageToken := ""
-		seenTokens := make(map[string]struct{})
-		for {
-			if len(root.Pages) >= maxDriveInventoryPages {
-				return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded page limit")
+		children := childrenByParent[parent.id]
+		currentProviderPage := 0
+		if len(children) == 0 {
+			if len(root.Pages) >= maxDriveInventoryEvidencePages {
+				return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded evidence page limit")
 			}
-			if _, duplicate := seenTokens[pageToken]; duplicate {
-				return cleanup.Root{}, errors.New("Drive inventory pagination token repeated")
+			root.Pages = append(root.Pages, cleanup.Page{
+				Number:   len(root.Pages) + 1,
+				ParentID: parent.id,
+				Cursor:   inventoryCursor("corpus-empty"),
+				Status:   cleanup.PageComplete,
+				Objects:  []cleanup.Object{},
+			})
+			continue
+		}
+		for _, record := range children {
+			if currentProviderPage != record.providerPage {
+				if len(root.Pages) >= maxDriveInventoryEvidencePages {
+					return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded evidence page limit")
+				}
+				currentProviderPage = record.providerPage
+				root.Pages = append(root.Pages, cleanup.Page{
+					Number:   len(root.Pages) + 1,
+					ParentID: parent.id,
+					Cursor:   inventoryCursor("corpus-page-" + strconv.Itoa(record.providerPage)),
+					Status:   cleanup.PageComplete,
+					Objects:  make([]cleanup.Object, 0),
+				})
 			}
-			seenTokens[pageToken] = struct{}{}
-			files, nextPageToken, err := client.listChildren(ctx, declaration, parent.id, pageToken)
+			listed := record.file
+			if len(seenObjects) >= maxDriveInventoryObjects {
+				return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded object limit")
+			}
+			if _, duplicate := seenObjects[listed.ID]; duplicate {
+				return cleanup.Root{}, fmt.Errorf("Drive object %q forms a duplicate or ancestry cycle", listed.ID)
+			}
+			bindingKey := inventoryBindingKey(declaration.Provider, declaration.AccountID, declaration.RootID, declaration.Namespace, listed.ID)
+			binding, bound := bindings[bindingKey]
+			if !bound {
+				binding = InventoryBinding{
+					Provider:  declaration.Provider,
+					AccountID: declaration.AccountID,
+					RootID:    declaration.RootID,
+					Namespace: declaration.Namespace,
+					ObjectID:  listed.ID,
+					Class:     cleanup.ClassUnknown,
+				}
+			}
+			metadataDigest, err := driveMetadataDigest(listed)
 			if err != nil {
 				return cleanup.Root{}, err
 			}
-			page := cleanup.Page{
-				Number:   len(root.Pages) + 1,
-				ParentID: parent.id,
-				Cursor:   inventoryCursor(pageToken),
-				Status:   cleanup.PageComplete,
-				Objects:  make([]cleanup.Object, 0, len(files)),
+			object, err := inventoryObject(declaration, binding, listed, metadataDigest, parent)
+			if err != nil {
+				return cleanup.Root{}, err
 			}
-			for _, listed := range files {
-				if len(seenObjects) >= maxDriveInventoryObjects {
-					return cleanup.Root{}, errors.New("Drive inventory exceeded the bounded object limit")
-				}
-				if _, duplicate := seenObjects[listed.ID]; duplicate {
-					return cleanup.Root{}, fmt.Errorf("Drive object %q appeared more than once", listed.ID)
-				}
-				bindingKey := inventoryBindingKey(declaration.Provider, declaration.AccountID, declaration.RootID, declaration.Namespace, listed.ID)
-				binding, bound := bindings[bindingKey]
-				if !bound {
-					binding = InventoryBinding{
-						Provider:  declaration.Provider,
-						AccountID: declaration.AccountID,
-						RootID:    declaration.RootID,
-						Namespace: declaration.Namespace,
-						ObjectID:  listed.ID,
-						Class:     cleanup.ClassUnknown,
-					}
-				}
-				metadataDigest, err := driveMetadataDigest(listed)
-				if err != nil {
-					return cleanup.Root{}, err
-				}
-				object, err := inventoryObject(declaration, binding, listed, metadataDigest, parent)
-				if err != nil {
-					return cleanup.Root{}, err
-				}
-				page.Objects = append(page.Objects, object)
-				seenObjects[object.ID] = struct{}{}
-				if bound {
-					usedBindings[bindingKey] = struct{}{}
-				}
-				if object.ObjectType == cleanup.ObjectTypeFolder {
-					if _, duplicate := seenFolders[object.ID]; duplicate {
-						return cleanup.Root{}, fmt.Errorf("Drive folder %q forms a duplicate or cycle", object.ID)
-					}
-					seenFolders[object.ID] = struct{}{}
-					queue = append(queue, inventoryParent{id: object.ID, path: object.Path, depth: object.Depth})
-				}
+			page := &root.Pages[len(root.Pages)-1]
+			page.Objects = append(page.Objects, object)
+			seenObjects[object.ID] = struct{}{}
+			if bound {
+				usedBindings[bindingKey] = struct{}{}
 			}
-			root.Pages = append(root.Pages, page)
-			if nextPageToken == "" {
-				break
+			if object.ObjectType == cleanup.ObjectTypeFolder {
+				if _, duplicate := seenFolders[object.ID]; duplicate {
+					return cleanup.Root{}, fmt.Errorf("Drive folder %q forms a duplicate or cycle", object.ID)
+				}
+				seenFolders[object.ID] = struct{}{}
+				queue = append(queue, inventoryParent{id: object.ID, path: object.Path, depth: object.Depth})
 			}
-			pageToken = nextPageToken
 		}
 	}
 	root.ExpectedPages = len(root.Pages)
@@ -257,55 +285,70 @@ func (client *InventoryClient) captureRoot(
 	return root, nil
 }
 
-func (client *InventoryClient) listChildren(
-	ctx context.Context,
-	root InventoryRoot,
-	parentID string,
-	pageToken string,
-) ([]driveFile, string, error) {
-	if err := validateDriveID(parentID, "Drive inventory parent ID"); err != nil {
-		return nil, "", err
+func (client *InventoryClient) listCorpus(ctx context.Context, root InventoryRoot) ([]inventoryCorpusObject, error) {
+	objects := make([]inventoryCorpusObject, 0, 1000)
+	pageToken := ""
+	seenTokens := make(map[string]struct{})
+	for providerPage := 1; ; providerPage++ {
+		if providerPage > maxDriveInventoryProviderPages {
+			return nil, errors.New("Drive inventory exceeded the bounded provider page limit")
+		}
+		if _, duplicate := seenTokens[pageToken]; duplicate {
+			return nil, errors.New("Drive inventory pagination token repeated")
+		}
+		seenTokens[pageToken] = struct{}{}
+		query := url.Values{
+			"corpora":                   {"user"},
+			"fields":                    {"nextPageToken,incompleteSearch,files(id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId)"},
+			"includeItemsFromAllDrives": {"true"},
+			"pageSize":                  {"1000"},
+			"spaces":                    {"drive"},
+			"supportsAllDrives":         {"true"},
+		}
+		if root.DriveID != "" {
+			query.Set("corpora", "drive")
+			query.Set("driveId", root.DriveID)
+		}
+		if pageToken != "" {
+			query.Set("pageToken", pageToken)
+		}
+		endpoint := *client.provider.baseURL
+		endpoint.Path += "files"
+		endpoint.RawQuery = query.Encode()
+		data, _, status, err := client.provider.request(ctx, http.MethodGet, endpoint.String(), nil, false)
+		if err != nil {
+			return nil, err
+		}
+		if status != http.StatusOK {
+			return nil, fmt.Errorf("Drive inventory list rejected with status %d", status)
+		}
+		var response driveListResponse
+		decoder := json.NewDecoder(bytes.NewReader(data))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&response); err != nil {
+			return nil, errors.New("Drive inventory list response is invalid")
+		}
+		var trailing any
+		if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+			return nil, errors.New("Drive inventory list response has trailing data")
+		}
+		if response.IncompleteSearch {
+			return nil, errors.New("Drive inventory corpus returned an incomplete search")
+		}
+		if len(response.Files) > 1000 {
+			return nil, errors.New("Drive inventory list exceeded the requested page size")
+		}
+		if len(objects) > maxDriveInventoryObjects-len(response.Files) {
+			return nil, errors.New("Drive inventory exceeded the bounded object limit")
+		}
+		for _, file := range response.Files {
+			objects = append(objects, inventoryCorpusObject{file: file, providerPage: providerPage})
+		}
+		if response.NextPageToken == "" {
+			return objects, nil
+		}
+		pageToken = response.NextPageToken
 	}
-	query := url.Values{
-		"corpora":                   {"user"},
-		"fields":                    {"nextPageToken,files(id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId)"},
-		"includeItemsFromAllDrives": {"true"},
-		"pageSize":                  {"1000"},
-		"q":                         {fmt.Sprintf("'%s' in parents", parentID)},
-		"spaces":                    {"drive"},
-		"supportsAllDrives":         {"true"},
-	}
-	if root.DriveID != "" {
-		query.Set("corpora", "drive")
-		query.Set("driveId", root.DriveID)
-	}
-	if pageToken != "" {
-		query.Set("pageToken", pageToken)
-	}
-	endpoint := *client.provider.baseURL
-	endpoint.Path += "files"
-	endpoint.RawQuery = query.Encode()
-	data, _, status, err := client.provider.request(ctx, http.MethodGet, endpoint.String(), nil, false)
-	if err != nil {
-		return nil, "", err
-	}
-	if status != http.StatusOK {
-		return nil, "", fmt.Errorf("Drive inventory list rejected with status %d", status)
-	}
-	var response driveListResponse
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&response); err != nil {
-		return nil, "", errors.New("Drive inventory list response is invalid")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return nil, "", errors.New("Drive inventory list response has trailing data")
-	}
-	if len(response.Files) > 1000 {
-		return nil, "", errors.New("Drive inventory list exceeded the requested page size")
-	}
-	return response.Files, response.NextPageToken, nil
 }
 
 func inventoryObject(

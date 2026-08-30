@@ -20,40 +20,36 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 		"file-1":   driveInventoryTestFile("file-1", "root-1", "alpha.bin", "application/octet-stream", strings.Repeat("a", 32), "10", modified, "1", "generation-1"),
 		"file-2":   driveInventoryTestFile("file-2", "root-1", "beta.bin", "application/octet-stream", strings.Repeat("b", 32), "20", modified, "1", "generation-2"),
 		"file-3":   driveInventoryTestFile("file-3", "folder-1", "nested.bin", "application/octet-stream", strings.Repeat("c", 32), "30", modified, "1", "generation-3"),
+		"outside":  driveInventoryTestFile("outside", "other-root", "outside.bin", "application/octet-stream", strings.Repeat("d", 32), "40", modified, "1", "generation-outside"),
 	}
+	files["trashed"] = driveInventoryTestFile("trashed", "root-1", "trashed.bin", "application/octet-stream", strings.Repeat("e", 32), "50", modified, "1", "generation-trashed")
+	files["trashed"]["trashed"] = true
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Header.Get("Authorization") != "Bearer inventory-token" {
 			http.Error(writer, "missing token", http.StatusUnauthorized)
 			return
 		}
-		if request.URL.Path == "/files" {
-			parent := inventoryQueryParent(request.URL.Query().Get("q"))
-			token := request.URL.Query().Get("pageToken")
-			response := map[string]any{"files": []any{}}
-			switch parent + ":" + token {
-			case "root-1:":
-				response["files"] = []any{files["folder-1"], files["file-1"]}
-				response["nextPageToken"] = "root-page-2"
-			case "root-1:root-page-2":
-				response["files"] = []any{files["file-2"]}
-			case "folder-1:":
-				response["files"] = []any{files["file-3"]}
-			default:
-				http.Error(writer, "unexpected list", http.StatusBadRequest)
-				return
-			}
-			writer.Header().Set("Content-Type", "application/json")
-			_ = json.NewEncoder(writer).Encode(response)
+		if request.URL.Path != "/files" {
+			http.Error(writer, "unexpected per-object metadata read", http.StatusTooManyRequests)
 			return
 		}
-		id := strings.TrimPrefix(request.URL.Path, "/files/")
-		file, ok := files[id]
-		if !ok || id == request.URL.Path {
-			http.NotFound(writer, request)
+		if request.URL.Query().Get("q") != "" {
+			http.Error(writer, "inventory must not exclude native trash", http.StatusBadRequest)
+			return
+		}
+		response := map[string]any{"files": []any{}}
+		switch request.URL.Query().Get("pageToken") {
+		case "":
+			response["files"] = []any{files["folder-1"], files["file-1"]}
+			response["nextPageToken"] = "corpus-page-2"
+		case "corpus-page-2":
+			response["files"] = []any{files["file-2"], files["file-3"], files["outside"], files["trashed"]}
+		default:
+			http.Error(writer, "unexpected corpus page token", http.StatusBadRequest)
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(writer).Encode(file)
+		_ = json.NewEncoder(writer).Encode(response)
 	}))
 	defer server.Close()
 
@@ -69,7 +65,7 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	if len(rootSet.Roots) != 1 || rootSet.Roots[0].ExpectedPages != 3 || len(rootSet.Roots[0].Pages) != 3 {
 		t.Fatalf("captured roots/pages = %+v", rootSet.Roots)
 	}
-	if aggregate.Status != cleanup.InventoryComplete || aggregate.RootCount != 1 || aggregate.PageCount != 3 || aggregate.ObjectCount != 4 || aggregate.ByteCount != 60 {
+	if aggregate.Status != cleanup.InventoryComplete || aggregate.RootCount != 1 || aggregate.PageCount != 3 || aggregate.ObjectCount != 5 || aggregate.ByteCount != 110 {
 		t.Fatalf("inventory aggregate = %+v", aggregate)
 	}
 	for _, object := range aggregate.Objects {
@@ -86,6 +82,16 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}
 	if folder.ID != "folder-1" || !folder.ChildrenComplete || !folder.SubtreeComplete || folder.ChildCount != 1 || folder.SubtreeObjectCount != 1 {
 		t.Fatalf("folder traversal metadata = %+v", folder)
+	}
+	var trashed cleanup.Object
+	for _, object := range aggregate.Objects {
+		if object.ID == "trashed" {
+			trashed = object
+			break
+		}
+	}
+	if trashed.ID != "trashed" || !trashed.Trashed || trashed.Class != cleanup.ClassUnknown {
+		t.Fatalf("native-trash inventory object = %+v", trashed)
 	}
 }
 
@@ -104,13 +110,26 @@ func TestInventoryClientUsesPagedListMetadataWithoutPerObjectReads(t *testing.T)
 	var perObjectRequests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		writer.Header().Set("Content-Type", "application/json")
-		if request.URL.Path == "/files" {
-			listRequests.Add(1)
-			_ = json.NewEncoder(writer).Encode(map[string]any{"files": files})
+		if request.URL.Path != "/files" {
+			perObjectRequests.Add(1)
+			http.Error(writer, "per-object inventory read is not scale-safe", http.StatusTooManyRequests)
 			return
 		}
-		perObjectRequests.Add(1)
-		http.Error(writer, "per-object inventory read is not scale-safe", http.StatusTooManyRequests)
+		if request.URL.Query().Get("q") != "" {
+			http.Error(writer, "inventory must not exclude native trash", http.StatusBadRequest)
+			return
+		}
+		listRequests.Add(1)
+		switch request.URL.Query().Get("pageToken") {
+		case "":
+			_ = json.NewEncoder(writer).Encode(map[string]any{
+				"files": files[:objectCount/2], "nextPageToken": "corpus-page-2",
+			})
+		case "corpus-page-2":
+			_ = json.NewEncoder(writer).Encode(map[string]any{"files": files[objectCount/2:]})
+		default:
+			http.Error(writer, "unexpected corpus page token", http.StatusBadRequest)
+		}
 	}))
 	defer server.Close()
 
@@ -122,10 +141,13 @@ func TestInventoryClientUsesPagedListMetadataWithoutPerObjectReads(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if listRequests.Load() != 1 || perObjectRequests.Load() != 0 {
+	if listRequests.Load() != 2 || perObjectRequests.Load() != 0 {
 		t.Fatalf("inventory requests: list=%d per-object=%d", listRequests.Load(), perObjectRequests.Load())
 	}
-	objects := rootSet.Roots[0].Pages[0].Objects
+	objects := make([]cleanup.Object, 0, objectCount)
+	for _, page := range rootSet.Roots[0].Pages {
+		objects = append(objects, page.Objects...)
+	}
 	for index, object := range objects {
 		if object.ID != fmt.Sprintf("file-%02d", index) {
 			t.Fatalf("object %d = %q, want provider list order", index, object.ID)
@@ -158,6 +180,25 @@ func TestInventoryClientCapturesUnboundProviderObjectAsUnknown(t *testing.T) {
 	if len(aggregate.Objects) != 1 || aggregate.Objects[0].Class != cleanup.ClassUnknown ||
 		aggregate.Objects[0].OwnershipMarker != "" || aggregate.Objects[0].RestoreEvidence != "" {
 		t.Fatalf("unbound provider object = %+v", aggregate.Objects)
+	}
+}
+
+func TestInventoryClientRejectsIncompleteCorpusSearch(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{
+			"incompleteSearch": true,
+			"files":            []any{},
+		})
+	}))
+	defer server.Close()
+
+	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.Capture(t.Context(), inventoryTestPlan(t, nil)); err == nil || !strings.Contains(err.Error(), "incomplete search") {
+		t.Fatalf("incomplete corpus search error = %v", err)
 	}
 }
 
@@ -288,10 +329,4 @@ func driveInventoryTestFile(id, parent, name, mimeType, md5Checksum, size, modif
 		"version":        version,
 		"headRevisionId": generation,
 	}
-}
-
-func inventoryQueryParent(query string) string {
-	var parent string
-	_, _ = fmt.Sscanf(query, "'%s' in parents", &parent)
-	return strings.TrimSuffix(parent, "'")
 }

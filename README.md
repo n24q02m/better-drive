@@ -295,10 +295,13 @@ inherited descriptor number, never credential values. The legacy
 `BETTER_DRIVE_DRIVE_TOKEN_FD` raw-access-token descriptor remains supported as
 a non-refreshing compatibility path; supplying both descriptors is rejected.
 Refresh failures are redacted and no provider mutation is retried.
-Inventory consumes each bounded Drive `files.list` page once instead of issuing
-one additional metadata request per object. Every mutation still performs an
-exact target read and verifies the inventory-bound metadata digest immediately
-before the one-attempt operation.
+Inventory paginates the declared Drive corpus, including active, enrolled
+quarantine, and native-trash objects, then reconstructs the root tree from
+parent metadata instead of issuing one list request per folder or one metadata
+request per object. Every mutation still performs an exact target read and
+verifies the inventory-bound metadata digest immediately before the one-attempt
+operation.
+Any provider `incompleteSearch` response fails the inventory closed.
 
 ## Requirements
 
