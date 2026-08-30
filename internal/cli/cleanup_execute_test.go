@@ -30,11 +30,15 @@ import (
 
 func setTestConfigHome(t *testing.T, root string) {
 	t.Helper()
-	if runtime.GOOS == "windows" {
+	switch runtime.GOOS {
+	case "windows":
 		t.Setenv("APPDATA", root)
-		return
+	case "darwin":
+		t.Setenv("HOME", root)
+	default:
+		t.Setenv("XDG_CONFIG_HOME", root)
 	}
-	t.Setenv("XDG_CONFIG_HOME", root)
+
 }
 
 func TestReadProtectedFileAcceptsOnlyBoundedRegularFilesInsideSecurityRoot(t *testing.T) {
