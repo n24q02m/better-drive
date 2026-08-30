@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -85,6 +86,50 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}
 	if folder.ID != "folder-1" || !folder.ChildrenComplete || !folder.SubtreeComplete || folder.ChildCount != 1 || folder.SubtreeObjectCount != 1 {
 		t.Fatalf("folder traversal metadata = %+v", folder)
+	}
+}
+
+func TestInventoryClientUsesPagedListMetadataWithoutPerObjectReads(t *testing.T) {
+	const objectCount = 16
+	modified := time.Unix(100, 0).UTC().Format(time.RFC3339Nano)
+	files := make([]map[string]any, objectCount)
+	for index := range objectCount {
+		id := fmt.Sprintf("file-%02d", index)
+		files[index] = driveInventoryTestFile(
+			id, "root-1", id+".bin", "application/octet-stream",
+			strings.Repeat("a", 32), "1", modified, "1", "generation-"+id,
+		)
+	}
+	var listRequests atomic.Int32
+	var perObjectRequests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/files" {
+			listRequests.Add(1)
+			_ = json.NewEncoder(writer).Encode(map[string]any{"files": files})
+			return
+		}
+		perObjectRequests.Add(1)
+		http.Error(writer, "per-object inventory read is not scale-safe", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootSet, _, err := client.Capture(t.Context(), inventoryTestPlan(t, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if listRequests.Load() != 1 || perObjectRequests.Load() != 0 {
+		t.Fatalf("inventory requests: list=%d per-object=%d", listRequests.Load(), perObjectRequests.Load())
+	}
+	objects := rootSet.Roots[0].Pages[0].Objects
+	for index, object := range objects {
+		if object.ID != fmt.Sprintf("file-%02d", index) {
+			t.Fatalf("object %d = %q, want provider list order", index, object.ID)
+		}
 	}
 }
 

@@ -222,14 +222,11 @@ func (client *InventoryClient) captureRoot(
 						Class:     cleanup.ClassUnknown,
 					}
 				}
-				observed, metadataDigest, err := client.readInventoryFile(ctx, listed.ID)
+				metadataDigest, err := driveMetadataDigest(listed)
 				if err != nil {
 					return cleanup.Root{}, err
 				}
-				if err := compareListedDriveFile(listed, observed, parent.id); err != nil {
-					return cleanup.Root{}, fmt.Errorf("Drive object %q changed during inventory: %w", listed.ID, err)
-				}
-				object, err := inventoryObject(declaration, binding, observed, metadataDigest, parent)
+				object, err := inventoryObject(declaration, binding, listed, metadataDigest, parent)
 				if err != nil {
 					return cleanup.Root{}, err
 				}
@@ -309,49 +306,6 @@ func (client *InventoryClient) listChildren(
 		return nil, "", errors.New("Drive inventory list exceeded the requested page size")
 	}
 	return response.Files, response.NextPageToken, nil
-}
-
-func (client *InventoryClient) readInventoryFile(ctx context.Context, fileID string) (driveFile, string, error) {
-	if err := validateDriveID(fileID, "Drive inventory file ID"); err != nil {
-		return driveFile{}, "", err
-	}
-	query := url.Values{
-		"alt":               {"json"},
-		"fields":            {"id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId"},
-		"supportsAllDrives": {"true"},
-	}
-	data, _, status, err := client.provider.request(ctx, http.MethodGet, client.provider.fileURL(fileID, query), nil, false)
-	if err != nil {
-		return driveFile{}, "", err
-	}
-	if status != http.StatusOK {
-		return driveFile{}, "", fmt.Errorf("Drive inventory metadata read rejected with status %d", status)
-	}
-	var file driveFile
-	decoder := json.NewDecoder(bytes.NewReader(data))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&file); err != nil {
-		return driveFile{}, "", errors.New("Drive inventory metadata response is invalid")
-	}
-	var trailing any
-	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
-		return driveFile{}, "", errors.New("Drive inventory metadata response has trailing data")
-	}
-	metadataDigest, err := driveMetadataDigest(file)
-	if err != nil {
-		return driveFile{}, "", err
-	}
-	return file, metadataDigest, nil
-}
-
-func compareListedDriveFile(listed, observed driveFile, expectedParent string) error {
-	if listed.ID != observed.ID || listed.Name != observed.Name || listed.MIMEType != observed.MIMEType ||
-		listed.Trashed != observed.Trashed || listed.MD5Checksum != observed.MD5Checksum || listed.Size != observed.Size ||
-		listed.ModifiedTime != observed.ModifiedTime || listed.Version != observed.Version || listed.HeadRevisionID != observed.HeadRevisionID ||
-		len(listed.Parents) != 1 || len(observed.Parents) != 1 || listed.Parents[0] != expectedParent || observed.Parents[0] != expectedParent {
-		return errors.New("list and exact metadata readback differ")
-	}
-	return nil
 }
 
 func inventoryObject(
