@@ -14,7 +14,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/n24q02m/better-drive/internal/cleanup"
 )
@@ -37,15 +36,15 @@ type moveRequest struct {
 }
 
 type FileState struct {
-	ID          string    `json:"id"`
-	ParentID    string    `json:"parent_id"`
-	ContentHash string    `json:"content_hash"`
-	Size        int64     `json:"size"`
-	ModifiedAt  time.Time `json:"modified_at"`
-	Version     string    `json:"version"`
-	Generation  string    `json:"generation"`
-	ETag        string    `json:"etag"`
-	Trashed     bool      `json:"trashed"`
+	ID             string    `json:"id"`
+	ParentID       string    `json:"parent_id"`
+	ContentHash    string    `json:"content_hash"`
+	Size           int64     `json:"size"`
+	ModifiedAt     time.Time `json:"modified_at"`
+	Version        string    `json:"version"`
+	Generation     string    `json:"generation"`
+	MetadataDigest string    `json:"metadata_digest"`
+	Trashed        bool      `json:"trashed"`
 }
 
 type MoveResult struct {
@@ -58,20 +57,26 @@ type MoveResult struct {
 type quarantineHTTPClient struct {
 	client      *http.Client
 	baseURL     *url.URL
-	accessToken string
+	tokenSource AccessTokenSource
 }
 
 func newQuarantineHTTPClient(client *http.Client, endpoint, accessToken string) (*quarantineHTTPClient, error) {
+	if err := validateSecretField(accessToken, "Drive access token", maxAccessTokenBytes); err != nil {
+		return nil, err
+	}
+	return newQuarantineHTTPClientWithTokenSource(client, endpoint, staticAccessTokenSource{token: accessToken})
+}
+
+func newQuarantineHTTPClientWithTokenSource(
+	client *http.Client,
+	endpoint string,
+	tokenSource AccessTokenSource,
+) (*quarantineHTTPClient, error) {
 	if client == nil {
 		return nil, errors.New("Drive HTTP client is required")
 	}
-	if len(accessToken) == 0 || len(accessToken) > maxAccessTokenBytes || strings.TrimSpace(accessToken) != accessToken {
-		return nil, errors.New("Drive access token is missing or malformed")
-	}
-	for _, character := range accessToken {
-		if unicode.IsControl(character) {
-			return nil, errors.New("Drive access token is missing or malformed")
-		}
+	if tokenSource == nil {
+		return nil, errors.New("Drive access token source is required")
 	}
 	parsed, err := url.Parse(endpoint)
 	if err != nil || parsed.User != nil || parsed.Fragment != "" || parsed.RawQuery != "" || !strings.HasSuffix(parsed.Path, "/") {
@@ -92,7 +97,7 @@ func newQuarantineHTTPClient(client *http.Client, endpoint, accessToken string) 
 	boundedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
-	return &quarantineHTTPClient{client: &boundedClient, baseURL: parsed, accessToken: accessToken}, nil
+	return &quarantineHTTPClient{client: &boundedClient, baseURL: parsed, tokenSource: tokenSource}, nil
 }
 
 func isLoopbackHost(host string) bool {
@@ -121,12 +126,19 @@ func (client *quarantineHTTPClient) request(ctx context.Context, method, request
 	if ctx == nil {
 		return nil, nil, 0, errors.New("context is nil")
 	}
+	accessToken, err := client.tokenSource.AccessToken(ctx)
+	if err != nil {
+		return nil, nil, 0, errors.New("Drive access token source failed")
+	}
+	if err := validateSecretField(accessToken, "Drive access token", maxAccessTokenBytes); err != nil {
+		return nil, nil, 0, err
+	}
 	request, err := http.NewRequestWithContext(ctx, method, requestURL, bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, 0, errors.New("build Drive request")
 	}
 	request.Header.Set("Accept", "application/json")
-	request.Header.Set("Authorization", "Bearer "+client.accessToken)
+	request.Header.Set("Authorization", "Bearer "+accessToken)
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
@@ -167,7 +179,34 @@ type driveFile struct {
 	HeadRevisionID string   `json:"headRevisionId"`
 }
 
-func decodeFileState(data []byte, headers http.Header, expectedID string) (FileState, error) {
+func driveMetadataDigest(file driveFile) (string, error) {
+	if file.ID == "" || file.Name == "" || file.MIMEType == "" || len(file.Parents) != 1 ||
+		file.ModifiedTime == "" || file.Version == "" {
+		return "", errors.New("Drive metadata identity is incomplete")
+	}
+	data, err := json.Marshal(struct {
+		ID             string   `json:"id"`
+		Name           string   `json:"name"`
+		MIMEType       string   `json:"mime_type"`
+		Parents        []string `json:"parents"`
+		Trashed        bool     `json:"trashed"`
+		MD5Checksum    string   `json:"md5_checksum"`
+		Size           string   `json:"size"`
+		ModifiedTime   string   `json:"modified_time"`
+		Version        string   `json:"version"`
+		HeadRevisionID string   `json:"head_revision_id"`
+	}{
+		ID: file.ID, Name: file.Name, MIMEType: file.MIMEType, Parents: file.Parents,
+		Trashed: file.Trashed, MD5Checksum: file.MD5Checksum, Size: file.Size,
+		ModifiedTime: file.ModifiedTime, Version: file.Version, HeadRevisionID: file.HeadRevisionID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("canonicalize Drive metadata: %w", err)
+	}
+	return cleanup.Digest(data), nil
+}
+
+func decodeFileState(data []byte, expectedID string) (FileState, error) {
 	var file driveFile
 	decoder := json.NewDecoder(bytes.NewReader(data))
 	decoder.DisallowUnknownFields()
@@ -189,20 +228,23 @@ func decodeFileState(data []byte, headers http.Header, expectedID string) (FileS
 	if err != nil {
 		return FileState{}, errors.New("Drive metadata modified time is invalid")
 	}
-	etag := headers.Get("ETag")
-	if file.Version == "" || file.HeadRevisionID == "" || etag == "" {
+	if file.Version == "" || file.HeadRevisionID == "" {
 		return FileState{}, errors.New("Drive metadata version readback is incomplete")
 	}
+	metadataDigest, err := driveMetadataDigest(file)
+	if err != nil {
+		return FileState{}, err
+	}
 	return FileState{
-		ID:          file.ID,
-		ParentID:    file.Parents[0],
-		ContentHash: file.MD5Checksum,
-		Size:        size,
-		ModifiedAt:  modifiedAt.UTC(),
-		Version:     file.Version,
-		Generation:  file.HeadRevisionID,
-		ETag:        etag,
-		Trashed:     file.Trashed,
+		ID:             file.ID,
+		ParentID:       file.Parents[0],
+		ContentHash:    file.MD5Checksum,
+		Size:           size,
+		ModifiedAt:     modifiedAt.UTC(),
+		Version:        file.Version,
+		Generation:     file.HeadRevisionID,
+		MetadataDigest: metadataDigest,
+		Trashed:        file.Trashed,
 	}, nil
 }
 
@@ -212,17 +254,17 @@ func (client *quarantineHTTPClient) read(ctx context.Context, fileID string) (Fi
 	}
 	query := url.Values{
 		"alt":               {"json"},
-		"fields":            {"id,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId"},
+		"fields":            {"id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId"},
 		"supportsAllDrives": {"true"},
 	}
-	data, headers, status, err := client.request(ctx, http.MethodGet, client.fileURL(fileID, query), nil, false)
+	data, _, status, err := client.request(ctx, http.MethodGet, client.fileURL(fileID, query), nil, false)
 	if err != nil {
 		return FileState{}, err
 	}
 	if status != http.StatusOK {
 		return FileState{}, fmt.Errorf("Drive metadata read rejected with status %d", status)
 	}
-	return decodeFileState(data, headers, fileID)
+	return decodeFileState(data, fileID)
 }
 
 func validateExpectedState(expected cleanup.Object, observed FileState) error {
@@ -233,7 +275,7 @@ func validateExpectedState(expected cleanup.Object, observed FileState) error {
 		!observed.ModifiedAt.Equal(expected.ModifiedAt) ||
 		observed.Version != expected.Version ||
 		observed.Generation != expected.Generation ||
-		observed.ETag != expected.ETag ||
+		observed.MetadataDigest != expected.MetadataDigest ||
 		observed.Trashed != expected.Trashed {
 		return errors.New("Drive object metadata drifted before mutation")
 	}

@@ -52,7 +52,6 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 			return
 		}
 		writer.Header().Set("Content-Type", "application/json")
-		writer.Header().Set("ETag", `"etag-`+id+`"`)
 		_ = json.NewEncoder(writer).Encode(file)
 	}))
 	defer server.Close()
@@ -71,6 +70,11 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}
 	if aggregate.Status != cleanup.InventoryComplete || aggregate.RootCount != 1 || aggregate.PageCount != 3 || aggregate.ObjectCount != 4 || aggregate.ByteCount != 60 {
 		t.Fatalf("inventory aggregate = %+v", aggregate)
+	}
+	for _, object := range aggregate.Objects {
+		if len(object.MetadataDigest) != 64 {
+			t.Fatalf("object %q metadata digest = %q", object.ID, object.MetadataDigest)
+		}
 	}
 	var folder cleanup.Object
 	for _, object := range aggregate.Objects {
@@ -93,7 +97,6 @@ func TestInventoryClientCapturesUnboundProviderObjectAsUnknown(t *testing.T) {
 			_ = json.NewEncoder(writer).Encode(map[string]any{"files": []any{file}})
 			return
 		}
-		writer.Header().Set("ETag", `"etag-extra"`)
 		_ = json.NewEncoder(writer).Encode(file)
 	}))
 	defer server.Close()
@@ -110,6 +113,38 @@ func TestInventoryClientCapturesUnboundProviderObjectAsUnknown(t *testing.T) {
 	if len(aggregate.Objects) != 1 || aggregate.Objects[0].Class != cleanup.ClassUnknown ||
 		aggregate.Objects[0].OwnershipMarker != "" || aggregate.Objects[0].RestoreEvidence != "" {
 		t.Fatalf("unbound provider object = %+v", aggregate.Objects)
+	}
+}
+
+func TestInventoryClientCapturesProviderNativeObjectAsUnknown(t *testing.T) {
+	modified := time.Unix(100, 0).UTC().Format(time.RFC3339Nano)
+	file := driveInventoryTestFile(
+		"shortcut-1", "root-1", "native shortcut", "application/vnd.google-apps.shortcut",
+		"", "", modified, "2", "",
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		if request.URL.Path == "/files" {
+			_ = json.NewEncoder(writer).Encode(map[string]any{"files": []any{file}})
+			return
+		}
+		_ = json.NewEncoder(writer).Encode(file)
+	}))
+	defer server.Close()
+
+	plan := inventoryTestPlan(t, nil)
+	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, aggregate, err := client.Capture(t.Context(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(aggregate.Objects) != 1 || aggregate.Objects[0].ObjectType != cleanup.ObjectTypeProviderNative ||
+		aggregate.Objects[0].Class != cleanup.ClassUnknown || aggregate.Objects[0].ContentHash != "" ||
+		aggregate.Objects[0].Size != 0 || len(aggregate.Objects[0].MetadataDigest) != 64 {
+		t.Fatalf("provider-native inventory object = %+v", aggregate.Objects)
 	}
 }
 

@@ -24,14 +24,13 @@ import (
 )
 
 const (
-	cleanupBrokerConfigSchema = 1
-	maxCleanupSecurityFile    = 64 << 10
-	maxCleanupPEMBytes        = 1 << 20
-	maxDriveTokenBytes        = 16 << 10
-
-	cleanupMTLSCertFDEnv = "BETTER_DRIVE_CLEANUP_MTLS_CERT_FD"
-	cleanupMTLSKeyFDEnv  = "BETTER_DRIVE_CLEANUP_MTLS_KEY_FD"
-	driveTokenFDEnv      = "BETTER_DRIVE_DRIVE_TOKEN_FD"
+	cleanupBrokerConfigSchema    = 1
+	maxCleanupSecurityFile       = 64 << 10
+	maxCleanupPEMBytes           = 1 << 20
+	maxDriveOAuthCredentialBytes = 64 << 10
+	cleanupMTLSCertFDEnv         = "BETTER_DRIVE_CLEANUP_MTLS_CERT_FD"
+	cleanupMTLSKeyFDEnv          = "BETTER_DRIVE_CLEANUP_MTLS_KEY_FD"
+	driveOAuthCredentialFDEnv    = "BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD"
 )
 
 type cleanupBrokerConfig struct {
@@ -40,6 +39,19 @@ type cleanupBrokerConfig struct {
 	Repository    string `json:"repository"`
 	Authority     string `json:"authority"`
 	Owner         string `json:"owner"`
+}
+
+func readDriveOAuthTokenSource(client *http.Client) (driveapi.AccessTokenSource, error) {
+	data, err := readSecretFD(driveOAuthCredentialFDEnv, maxDriveOAuthCredentialBytes)
+	if err != nil {
+		return nil, err
+	}
+	defer zeroBytes(data)
+	credential, err := driveapi.DecodeOAuthCredential(data)
+	if err != nil {
+		return nil, err
+	}
+	return driveapi.NewGoogleOAuthTokenSource(client, credential)
 }
 
 func executeProtectedCleanup(ctx context.Context, manifest cleanup.Manifest, validation cleanup.Validation, approvalID string) (driveapi.QuarantineExecutionResult, error) {
@@ -90,14 +102,14 @@ func executeProtectedCleanup(ctx context.Context, manifest cleanup.Manifest, val
 	if err != nil {
 		return driveapi.QuarantineExecutionResult{}, err
 	}
-	driveToken, err := readSecretFD(driveTokenFDEnv, maxDriveTokenBytes)
+	driveClient := &http.Client{Timeout: 30 * time.Second}
+	tokenSource, err := readDriveOAuthTokenSource(driveClient)
 	if err != nil {
 		return driveapi.QuarantineExecutionResult{}, err
 	}
-	defer zeroBytes(driveToken)
-	executor, err := driveapi.NewQuarantineExecutor(
-		&http.Client{Timeout: 30 * time.Second},
-		string(driveToken),
+	executor, err := driveapi.NewQuarantineExecutorWithTokenSource(
+		driveClient,
+		tokenSource,
 		authority,
 		approvalPublicKey,
 		authorityPublicKey,

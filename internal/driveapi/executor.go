@@ -57,23 +57,20 @@ type QuarantineExecutor struct {
 	consumedClaims map[string]struct{}
 }
 
-func NewQuarantineExecutor(
+func NewQuarantineExecutorWithTokenSource(
 	client *http.Client,
-	accessToken string,
+	tokenSource AccessTokenSource,
 	authority cleanup.OwnerRiskAuthority,
 	approvalPublicKey ed25519.PublicKey,
 	authorityPublicKey ed25519.PublicKey,
 	expectedAuthority string,
 ) (*QuarantineExecutor, error) {
-	return newQuarantineExecutor(
-		client,
-		googleDriveAPIBaseURL,
-		accessToken,
-		authority,
-		approvalPublicKey,
-		authorityPublicKey,
-		expectedAuthority,
-		time.Now,
+	provider, err := newQuarantineHTTPClientWithTokenSource(client, googleDriveAPIBaseURL, tokenSource)
+	if err != nil {
+		return nil, err
+	}
+	return newQuarantineExecutorWithProvider(
+		provider, authority, approvalPublicKey, authorityPublicKey, expectedAuthority, time.Now,
 	)
 }
 
@@ -87,6 +84,26 @@ func newQuarantineExecutor(
 	expectedAuthority string,
 	now func() time.Time,
 ) (*QuarantineExecutor, error) {
+	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return newQuarantineExecutorWithProvider(
+		provider, authority, approvalPublicKey, authorityPublicKey, expectedAuthority, now,
+	)
+}
+
+func newQuarantineExecutorWithProvider(
+	provider *quarantineHTTPClient,
+	authority cleanup.OwnerRiskAuthority,
+	approvalPublicKey ed25519.PublicKey,
+	authorityPublicKey ed25519.PublicKey,
+	expectedAuthority string,
+	now func() time.Time,
+) (*QuarantineExecutor, error) {
+	if provider == nil {
+		return nil, errors.New("Drive quarantine provider is required")
+	}
 	if authority == nil {
 		return nil, errors.New("owner-risk cleanup authority is required")
 	}
@@ -101,10 +118,6 @@ func newQuarantineExecutor(
 	}
 	if now == nil {
 		return nil, errors.New("cleanup clock is required")
-	}
-	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
-	if err != nil {
-		return nil, err
 	}
 	return &QuarantineExecutor{
 		provider:           provider,

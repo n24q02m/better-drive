@@ -18,7 +18,7 @@ import (
 )
 
 const (
-	CurrentFixtureLifecycleSchemaVersion = 1
+	CurrentFixtureLifecycleSchemaVersion = 2
 	FixtureMutationSemantics             = "drive_candidate_fixture_quarantine_restore_requarantine_no_cas"
 	FixturePhaseQuarantine               = "quarantine"
 	FixturePhaseRestore                  = "restore"
@@ -72,13 +72,17 @@ type FixtureLifecycleExecutor struct {
 	now          func() time.Time
 }
 
-func NewFixtureLifecycleExecutor(
+func NewFixtureLifecycleExecutorWithTokenSource(
 	client *http.Client,
-	accessToken string,
+	tokenSource AccessTokenSource,
 	publicKey ed25519.PublicKey,
 	receiptStore cleanup.FixtureLifecycleReceiptStore,
 ) (*FixtureLifecycleExecutor, error) {
-	return newFixtureLifecycleExecutor(client, googleDriveAPIBaseURL, accessToken, publicKey, receiptStore, time.Now)
+	provider, err := newQuarantineHTTPClientWithTokenSource(client, googleDriveAPIBaseURL, tokenSource)
+	if err != nil {
+		return nil, err
+	}
+	return newFixtureLifecycleExecutorWithProvider(provider, publicKey, receiptStore, time.Now)
 }
 
 func newFixtureLifecycleExecutor(
@@ -89,6 +93,22 @@ func newFixtureLifecycleExecutor(
 	receiptStore cleanup.FixtureLifecycleReceiptStore,
 	now func() time.Time,
 ) (*FixtureLifecycleExecutor, error) {
+	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return newFixtureLifecycleExecutorWithProvider(provider, publicKey, receiptStore, now)
+}
+
+func newFixtureLifecycleExecutorWithProvider(
+	provider *quarantineHTTPClient,
+	publicKey ed25519.PublicKey,
+	receiptStore cleanup.FixtureLifecycleReceiptStore,
+	now func() time.Time,
+) (*FixtureLifecycleExecutor, error) {
+	if provider == nil {
+		return nil, errors.New("Drive fixture provider is required")
+	}
 	if len(publicKey) != ed25519.PublicKeySize {
 		return nil, errors.New("fixture lifecycle public key is invalid")
 	}
@@ -97,10 +117,6 @@ func newFixtureLifecycleExecutor(
 	}
 	if now == nil {
 		return nil, errors.New("fixture lifecycle clock is required")
-	}
-	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
-	if err != nil {
-		return nil, err
 	}
 	return &FixtureLifecycleExecutor{
 		provider:     provider,
@@ -293,7 +309,7 @@ func fixtureExpectedState(template cleanup.Object, state FileState) cleanup.Obje
 	template.ModifiedAt = state.ModifiedAt
 	template.Version = state.Version
 	template.Generation = state.Generation
-	template.ETag = state.ETag
+	template.MetadataDigest = state.MetadataDigest
 	template.Trashed = state.Trashed
 	return template
 }
@@ -374,7 +390,7 @@ func validateFixtureLifecycleCapability(capability FixtureLifecycleCapability, n
 	}
 	if initial.Class != cleanup.ClassExpectedFixture || initial.ObjectType != cleanup.ObjectTypeFile || initial.Trashed ||
 		strings.TrimSpace(initial.ContentHash) == "" || initial.Size < 0 || initial.ModifiedAt.IsZero() ||
-		strings.TrimSpace(initial.Version) == "" || strings.TrimSpace(initial.Generation) == "" || strings.TrimSpace(initial.ETag) == "" {
+		strings.TrimSpace(initial.Version) == "" || strings.TrimSpace(initial.Generation) == "" || !isExactSHA256(initial.MetadataDigest) {
 		return errors.New("fixture lifecycle initial object is not a fresh active fixture leaf")
 	}
 	if initial.OwnershipMarker != "fixture:"+capability.FixtureID ||
@@ -400,7 +416,7 @@ func fixtureLifecycleIdentityDigest(capability FixtureLifecycleCapability) strin
 }
 
 func isExactSHA256(value string) bool {
-	if len(value) != 64 {
+	if len(value) != 64 || value != strings.ToLower(value) {
 		return false
 	}
 	decoded, err := hex.DecodeString(value)

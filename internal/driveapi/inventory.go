@@ -67,12 +67,24 @@ type driveListResponse struct {
 	Files         []driveFile `json:"files"`
 }
 
-func NewInventoryClient(client *http.Client, accessToken string) (*InventoryClient, error) {
-	return newInventoryClient(client, googleDriveAPIBaseURL, accessToken)
+func NewInventoryClientWithTokenSource(client *http.Client, tokenSource AccessTokenSource) (*InventoryClient, error) {
+	return newInventoryClientWithTokenSource(client, googleDriveAPIBaseURL, tokenSource)
 }
 
 func newInventoryClient(client *http.Client, endpoint, accessToken string) (*InventoryClient, error) {
 	provider, err := newQuarantineHTTPClient(client, endpoint, accessToken)
+	if err != nil {
+		return nil, err
+	}
+	return &InventoryClient{provider: provider}, nil
+}
+
+func newInventoryClientWithTokenSource(
+	client *http.Client,
+	endpoint string,
+	tokenSource AccessTokenSource,
+) (*InventoryClient, error) {
+	provider, err := newQuarantineHTTPClientWithTokenSource(client, endpoint, tokenSource)
 	if err != nil {
 		return nil, err
 	}
@@ -210,14 +222,14 @@ func (client *InventoryClient) captureRoot(
 						Class:     cleanup.ClassUnknown,
 					}
 				}
-				observed, etag, err := client.readInventoryFile(ctx, listed.ID)
+				observed, metadataDigest, err := client.readInventoryFile(ctx, listed.ID)
 				if err != nil {
 					return cleanup.Root{}, err
 				}
 				if err := compareListedDriveFile(listed, observed, parent.id); err != nil {
 					return cleanup.Root{}, fmt.Errorf("Drive object %q changed during inventory: %w", listed.ID, err)
 				}
-				object, err := inventoryObject(declaration, binding, observed, etag, parent)
+				object, err := inventoryObject(declaration, binding, observed, metadataDigest, parent)
 				if err != nil {
 					return cleanup.Root{}, err
 				}
@@ -308,7 +320,7 @@ func (client *InventoryClient) readInventoryFile(ctx context.Context, fileID str
 		"fields":            {"id,name,mimeType,parents,trashed,md5Checksum,size,modifiedTime,version,headRevisionId"},
 		"supportsAllDrives": {"true"},
 	}
-	data, headers, status, err := client.provider.request(ctx, http.MethodGet, client.provider.fileURL(fileID, query), nil, false)
+	data, _, status, err := client.provider.request(ctx, http.MethodGet, client.provider.fileURL(fileID, query), nil, false)
 	if err != nil {
 		return driveFile{}, "", err
 	}
@@ -325,11 +337,11 @@ func (client *InventoryClient) readInventoryFile(ctx context.Context, fileID str
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return driveFile{}, "", errors.New("Drive inventory metadata response has trailing data")
 	}
-	etag := headers.Get("ETag")
-	if strings.TrimSpace(etag) == "" {
-		return driveFile{}, "", errors.New("Drive inventory metadata ETag is missing")
+	metadataDigest, err := driveMetadataDigest(file)
+	if err != nil {
+		return driveFile{}, "", err
 	}
-	return file, etag, nil
+	return file, metadataDigest, nil
 }
 
 func compareListedDriveFile(listed, observed driveFile, expectedParent string) error {
@@ -346,7 +358,7 @@ func inventoryObject(
 	root InventoryRoot,
 	binding InventoryBinding,
 	file driveFile,
-	etag string,
+	metadataDigest string,
 	parent inventoryParent,
 ) (cleanup.Object, error) {
 	if file.ID != binding.ObjectID || len(file.Parents) != 1 || file.Parents[0] != parent.id {
@@ -362,15 +374,22 @@ func inventoryObject(
 	objectType := cleanup.ObjectTypeFile
 	size := int64(0)
 	generation := file.HeadRevisionID
-	if file.MIMEType == driveFolderMIMEType {
+	switch {
+	case file.MIMEType == driveFolderMIMEType:
 		objectType = cleanup.ObjectTypeFolder
 		if generation == "" {
 			generation = file.Version
 		}
-	} else {
+	case file.MD5Checksum == "" || file.Size == "" || file.HeadRevisionID == "":
+		objectType = cleanup.ObjectTypeProviderNative
+		generation = file.Version
+		if binding.Class != cleanup.ClassUnknown {
+			return cleanup.Object{}, errors.New("Drive provider-native object must remain class unknown")
+		}
+	default:
 		size, err = strconv.ParseInt(file.Size, 10, 64)
-		if err != nil || size < 0 || strings.TrimSpace(file.MD5Checksum) == "" || strings.TrimSpace(generation) == "" {
-			return cleanup.Object{}, errors.New("Drive inventory file content identity is incomplete")
+		if err != nil || size < 0 {
+			return cleanup.Object{}, errors.New("Drive inventory file size is invalid")
 		}
 	}
 	return cleanup.Object{
@@ -387,7 +406,7 @@ func inventoryObject(
 		Namespace:       root.Namespace,
 		Version:         file.Version,
 		Generation:      generation,
-		ETag:            etag,
+		MetadataDigest:  metadataDigest,
 		ModifiedAt:      modifiedAt.UTC(),
 		Trashed:         file.Trashed,
 		Depth:           parent.depth + 1,

@@ -278,7 +278,7 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit. |
 | `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
 | `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
-| `better-drive cleanup inventory` | Join a complete enumerated all-roots/page capture into read-only aggregate evidence. |
+| `better-drive cleanup inventory` | Recursively capture and join every declared Drive root/page/object into read-only aggregate evidence, using a refresh-capable OAuth credential from an inherited descriptor. |
 | `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
 | `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
 | `better-drive cleanup approval prepare|canonicalize|activate` | Create a create-only draft, render canonical bytes for offline signing, and activate a detached signature only against an enrolled trust root and named capability. |
@@ -287,6 +287,13 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive uninstall` | Remove the login-autostart registration. |
 
 Run `better-drive <command> --help` for complete flags, examples, and prerequisites.
+
+Drive-backed cleanup inventory, claimed quarantine, and fixture lifecycle commands
+accept a strict OAuth credential envelope only through
+`BETTER_DRIVE_DRIVE_OAUTH_CREDENTIAL_FD`. The environment carries the inherited descriptor
+number, never the access token, refresh token, or client secret. The token
+source refreshes before provider requests when expiry is near; refresh failures
+are redacted and no provider mutation is retried.
 
 ## Requirements
 
