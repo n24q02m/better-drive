@@ -28,7 +28,7 @@ func cleanupCmd() *cobra.Command {
 		Example: "  better-drive cleanup validate --manifest cleanup.json " +
 			"--inventory inventory-aggregate.json --all-roots all-roots.json --format json",
 	}
-	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd(), cleanupBrokerCmd(), cleanupTrustCmd(), cleanupFixtureLifecycleCmd())
+	command.AddCommand(cleanupInventoryCmd(), cleanupValidateCmd(), cleanupApplyCmd(), cleanupApprovalCmd(), cleanupBrokerCmd(), cleanupTrustCmd(), cleanupFixtureLifecycleCmd(), cleanupCandidateControlCmd())
 	return command
 }
 

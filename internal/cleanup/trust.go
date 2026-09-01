@@ -35,7 +35,7 @@ func NewTrustRoot(rootID, issuer, purpose string, publicKey ed25519.PublicKey, e
 	if strings.TrimSpace(rootID) == "" || strings.TrimSpace(issuer) == "" {
 		return TrustRoot{}, errors.New("trust root ID and issuer are required")
 	}
-	if purpose != CleanupTrustPurpose && purpose != OwnerRiskAuthorityPurpose {
+	if !isSupportedTrustPurpose(purpose) {
 		return TrustRoot{}, fmt.Errorf("unsupported trust root purpose %q", purpose)
 	}
 	if len(publicKey) != ed25519.PublicKeySize {
@@ -76,7 +76,7 @@ func (root TrustRoot) PublicKeyForPurpose(expectedPurpose, expectedIssuer string
 	if strings.TrimSpace(root.RootID) == "" || strings.TrimSpace(root.Issuer) == "" {
 		return nil, errors.New("trust root ID and issuer are required")
 	}
-	if expectedPurpose != CleanupTrustPurpose && expectedPurpose != OwnerRiskAuthorityPurpose {
+	if !isSupportedTrustPurpose(expectedPurpose) {
 		return nil, fmt.Errorf("unsupported expected trust purpose %q", expectedPurpose)
 	}
 	if root.Purpose != expectedPurpose {
@@ -102,6 +102,13 @@ func (root TrustRoot) PublicKeyForPurpose(expectedPurpose, expectedIssuer string
 		return nil, errors.New("trust root public key fingerprint mismatch")
 	}
 	return append(ed25519.PublicKey(nil), publicKey...), nil
+}
+
+func isSupportedTrustPurpose(purpose string) bool {
+	return purpose == CleanupTrustPurpose ||
+		purpose == OwnerRiskAuthorityPurpose ||
+		purpose == CandidateControlIssuerPurpose ||
+		purpose == CandidateControlReadbackPurpose
 }
 
 func trustFingerprint(publicKey []byte) string {
