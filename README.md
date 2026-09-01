@@ -275,7 +275,7 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive account list\|add\|remove` | Inspect, create, or remove Drive accounts/remotes. |
 | `better-drive run` | Run every configured job continuously with tray status. |
 | `better-drive status [--format table\|json]` | Print configured jobs without touching the network. |
-| `better-drive sync [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit. |
+| `better-drive sync [--config <path>] [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit; managed schedulers pass their enrolled absolute config path explicitly. |
 | `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
 | `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
 | `better-drive cleanup inventory` | Recursively capture and join every declared Drive root/page/object into read-only aggregate evidence, using a refresh-capable OAuth credential from an inherited descriptor. |
