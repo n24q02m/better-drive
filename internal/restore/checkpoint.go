@@ -18,23 +18,23 @@ const (
 // MachineCheckpoint is an externally issued, signed authorization for one explicit restore batch.
 // Restore cannot mint it; it can only verify.
 type MachineCheckpoint struct {
-	ID           string         `json:"id"`
-	Kind         CheckpointKind `json:"kind"`
-	Root         string         `json:"root"`
-	RootIdentity RootIdentity   `json:"root_identity"`
-	Entries      []string       `json:"entries"` // canonical relative paths, sorted
-	CapacityBytes int64         `json:"capacity_bytes"`
-	ExpiresAt    time.Time      `json:"expires_at"`
-	Signature    string         `json:"signature"`
+	ID            string         `json:"id"`
+	Kind          CheckpointKind `json:"kind"`
+	Root          string         `json:"root"`
+	RootIdentity  RootIdentity   `json:"root_identity"`
+	Entries       []string       `json:"entries"` // canonical relative paths, sorted
+	CapacityBytes int64          `json:"capacity_bytes"`
+	ExpiresAt     time.Time      `json:"expires_at"`
+	Signature     string         `json:"signature"`
 	// IssuedAt is the checkpoint issuance time for TTL/expiry reasoning.
 	IssuedAt time.Time `json:"issued_at"`
 }
 
 // ApplyIntent is the exact restore intent that a checkpoint must authorize.
 type ApplyIntent struct {
-	Plan          Plan   `json:"plan"`
-	CapacityBytes int64  `json:"capacity_bytes"`
-	TotalObjects  int    `json:"total_objects"`
+	Plan          Plan  `json:"plan"`
+	CapacityBytes int64 `json:"capacity_bytes"`
+	TotalObjects  int   `json:"total_objects"`
 	// For replace, CurrentIdentities binds existing destination state; for create it is empty.
 	CurrentIdentities map[string]DestinationIdentity `json:"current_identities,omitempty"`
 }
