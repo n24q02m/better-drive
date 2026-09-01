@@ -12,6 +12,7 @@ import (
 	"io"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -896,17 +897,18 @@ func canonicalCandidateControlValue(value any) ([]byte, error) {
 }
 
 func candidateControlGitObjectOID(kind string, data []byte) [sha1.Size]byte {
-	object := make(
-		[]byte,
-		0,
-		len(kind)+1+20+1+len(data),
-	)
-	object = append(object, kind...)
-	object = append(object, ' ')
-	object = append(object, fmt.Sprintf("%d", len(data))...)
-	object = append(object, 0)
-	object = append(object, data...)
-	return sha1.Sum(object)
+	header := make([]byte, 0, 64)
+	header = append(header, kind...)
+	header = append(header, ' ')
+	header = strconv.AppendInt(header, int64(len(data)), 10)
+	header = append(header, 0)
+
+	digest := sha1.New() // Git SHA-1 object identity, not a security signature.
+	_, _ = digest.Write(header)
+	_, _ = digest.Write(data)
+	var result [sha1.Size]byte
+	copy(result[:], digest.Sum(result[:0]))
+	return result
 }
 
 func validateCandidateControlDenial(probe CandidateControlDenialProbe, remote, ref, outcome string, expectedProviderCalls int64) error {
