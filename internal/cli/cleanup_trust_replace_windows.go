@@ -2,7 +2,12 @@
 
 package cli
 
-import "golang.org/x/sys/windows"
+import (
+	"errors"
+	"time"
+
+	"golang.org/x/sys/windows"
+)
 
 func atomicReplaceFile(source, destination string) error {
 	sourcePath, err := windows.UTF16PtrFromString(source)
@@ -13,9 +18,22 @@ func atomicReplaceFile(source, destination string) error {
 	if err != nil {
 		return err
 	}
-	return windows.MoveFileEx(
-		sourcePath,
-		destinationPath,
-		windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
-	)
+	const attempts = 10
+	for attempt := range attempts {
+		err = windows.MoveFileEx(
+			sourcePath,
+			destinationPath,
+			windows.MOVEFILE_REPLACE_EXISTING|windows.MOVEFILE_WRITE_THROUGH,
+		)
+		if err == nil {
+			return nil
+		}
+		if attempt == attempts-1 ||
+			(!errors.Is(err, windows.ERROR_ACCESS_DENIED) &&
+				!errors.Is(err, windows.ERROR_SHARING_VIOLATION)) {
+			return err
+		}
+		time.Sleep(5 * time.Millisecond << attempt)
+	}
+	return err
 }

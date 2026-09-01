@@ -282,9 +282,17 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
 | `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
 | `better-drive cleanup approval prepare|canonicalize|activate` | Create a create-only draft, render canonical bytes for offline signing, and activate a detached signature only against an enrolled trust root and named capability. |
+| `better-drive cleanup candidate-control verify --capability <path> --capability-root <path> --readback <path> --readback-root <path>` | Verify canonical signed Skret capability/readback evidence only when both evidence roots exactly match the fixed protected candidate-control trust bundle; derive `BD-CANDIDATE-CONTROL-EXERCISED` with the bundle digest and reject fixture transport, replay mutation, and production/ref escape claims. |
+| `better-drive cleanup candidate-control trust enroll\|rotate` | Create or CAS-rotate the fixed protected capability/readback root bundle from `BETTER_DRIVE_CANDIDATE_CONTROL_TRUST_BUNDLE_FD`; arbitrary evidence files cannot enroll trust. |
 | `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
 | `better-drive install` | Register the sync daemon to start at login. |
 | `better-drive uninstall` | Remove the login-autostart registration. |
+
+Candidate-control root files are evidence inputs, not authority by themselves.
+Both must exactly match the fixed protected bundle enrolled through the
+inherited descriptor, and the derived marker binds that bundle's digest. A
+protected publisher must still read back the protected signed result; local
+verifier output alone is not published marker evidence.
 
 Run `better-drive <command> --help` for complete flags, examples, and prerequisites.
 

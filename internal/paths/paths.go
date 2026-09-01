@@ -61,6 +61,9 @@ func CleanupSecurityDir() string {
 func CleanupTrustBundleFile() string {
 	return filepath.Join(CleanupSecurityDir(), "trust-bundle.json")
 }
+func CleanupCandidateControlTrustBundleFile() string {
+	return filepath.Join(CleanupSecurityDir(), "candidate-control-trust-bundle.json")
+}
 
 func CleanupAuthorityStoreDir() string {
 	return filepath.Join(CleanupSecurityDir(), "authority.git")
