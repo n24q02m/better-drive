@@ -18,3 +18,7 @@
 ## 2024-08-26 - Explicitly disable unsupported platform actions
 **Learning:** Silently ignoring an action (like opening a folder) on unsupported platforms causes user confusion because the UI element appears interactive. It is a critical UX and accessibility issue when a control fails silently without explaining why.
 **Action:** Always explicitly disable UI elements that are not supported on the current platform and update their tooltip to explain the platform constraint to the user.
+
+## 2024-08-26 - Handling PR Rejections for Micro-UX Changes
+**Learning:** If a micro-UX PR is rejected (e.g., due to being categorized as bot-generated noise or not meeting strict triage policies) and no further code changes are requested, the correct response is to acknowledge the feedback, revert the rejected code changes in the working tree, document the learning in the relevant journal file, and use the `submit` tool to push the journal update to the same branch.
+**Action:** Acknowledge the PR closure, clean up the working tree by reverting the changes to `internal/tray/tray_systray.go`, and submit the journal update to the same branch.
