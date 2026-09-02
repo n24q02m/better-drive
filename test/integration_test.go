@@ -27,7 +27,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 	local := t.TempDir()
 	workdir := t.TempDir()
-	e := engine.New("")
+	e := engine.NewForeground("")
 	defer e.Close()
 
 	// The .driveignore and files exist BEFORE the first sync, exactly as in real
@@ -49,7 +49,7 @@ func TestRoundTrip(t *testing.T) {
 	}
 
 	// first run: resync baseline WITH filters -> syncs keep files up, excludes skip.tmp
-	if _, err := e.Bisync(engine.BisyncParams{Path1: local, Path2: remotePath, Workdir: workdir, Resync: true, Filters: filters}); err != nil {
+	if _, err := e.Bisync(engine.BisyncParams{Path1: local, Path2: remotePath, Workdir: workdir, Resync: true, Filters: filters, Stderr: os.Stderr}); err != nil {
 		t.Fatalf("resync: %v", err)
 	}
 
@@ -64,23 +64,32 @@ func TestRoundTrip(t *testing.T) {
 		t.Errorf("skip.tmp present in remote listing %v, want filtered by .driveignore", names)
 	}
 
-	// 2-way delete propagation: remove one keep file locally (well under the 50%
-	// safety threshold), sync (no resync, same filters), assert deletion reached Drive.
-	if err := os.Remove(filepath.Join(local, "keep0.txt")); err != nil {
-		t.Fatalf("remove keep0.txt: %v", err)
+	// Add a remote-only file through the same verified engine, then run a normal
+	// bisync cycle and prove it arrives locally. The provider fixture remains
+	// intact for the caller's exact-ID active-quarantine teardown.
+	remoteSource := filepath.Join(t.TempDir(), "remote-only.txt")
+	mustWrite(t, remoteSource, "from remote")
+	if err := e.Copy(engine.CopyParams{Local: remoteSource, Remote: remotePath}); err != nil {
+		t.Fatalf("seed remote-only file: %v", err)
 	}
-	if _, err := e.Bisync(engine.BisyncParams{Path1: local, Path2: remotePath, Workdir: workdir, Filters: filters}); err != nil {
-		t.Fatalf("sync after delete: %v", err)
+	if _, err := e.Bisync(engine.BisyncParams{Path1: local, Path2: remotePath, Workdir: workdir, Filters: filters, Stderr: os.Stderr}); err != nil {
+		t.Fatalf("sync remote-only file: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(local, "remote-only.txt"))
+	if err != nil {
+		t.Fatalf("read pulled remote-only file: %v", err)
+	}
+	if string(data) != "from remote" {
+		t.Fatalf("pulled remote-only content = %q", data)
 	}
 	names2, err := e.ListRemote(remotePath)
 	if err != nil {
-		t.Fatalf("list remote after delete: %v", err)
+		t.Fatalf("list remote after pull: %v", err)
 	}
-	if contains(names2, "keep0.txt") {
-		t.Errorf("keep0.txt still on remote %v after local delete, want deletion propagated", names2)
-	}
-	if !contains(names2, "keep1.txt") {
-		t.Errorf("keep1.txt unexpectedly gone from remote %v", names2)
+	for _, want := range []string{"keep0.txt", "keep1.txt", "remote-only.txt"} {
+		if !contains(names2, want) {
+			t.Errorf("%s missing from intact remote fixture %v", want, names2)
+		}
 	}
 }
 

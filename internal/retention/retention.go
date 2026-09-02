@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/n24q02m/better-drive/internal/driveapi"
 	"github.com/n24q02m/better-drive/internal/r2api"
 )
 
@@ -260,32 +259,45 @@ func (marker OwnershipMarker) Validate() error {
 type ActionKind string
 
 const (
-	ActionNoop           ActionKind = "noop"
-	ActionDriveMutation  ActionKind = "drive_mutation"
-	ActionQuarantineCopy ActionKind = "quarantine_copy"
-	ActionSourceDelete   ActionKind = "source_delete"
-	ActionPurge          ActionKind = "purge"
+	ActionNoop                  ActionKind = "noop"
+	ActionDriveQuarantineIntent ActionKind = "drive_quarantine_intent"
+	ActionQuarantineCopy        ActionKind = "quarantine_copy"
+	ActionSourceDelete          ActionKind = "source_delete"
+	ActionPurge                 ActionKind = "purge"
 )
 
-type Action struct {
-	ID               string     `json:"id"`
-	RequestID        string     `json:"request_id"`
-	PlanID           string     `json:"plan_id"`
-	PolicyDigest     string     `json:"policy_digest"`
-	QuarantineTarget string     `json:"quarantine_target"`
-	Kind             ActionKind `json:"kind"`
-	Provider         Provider   `json:"provider"`
-	Object           Object     `json:"object"`
-	Target           Object     `json:"target,omitempty"`
-	Optional         bool       `json:"optional"`
+type DriveQuarantineIntent struct {
+	ObjectID     string `json:"object_id"`
+	AccountID    string `json:"account_id"`
+	RootID       string `json:"root_id"`
+	Namespace    string `json:"namespace"`
+	ParentID     string `json:"parent_id"`
+	ExpectedETag string `json:"expected_etag"`
+	Version      string `json:"version"`
+	Generation   string `json:"generation"`
+	Size         int64  `json:"size"`
+	Hash         string `json:"hash"`
+	RequestID    string `json:"request_id"`
+}
 
-	DriveRequest       driveapi.MutationRequest `json:"drive_request,omitempty"`
-	R2Copy             r2api.CopyRequest        `json:"r2_copy,omitempty"`
-	R2CopyCapability   r2api.CopyCapability     `json:"r2_copy_capability,omitempty"`
-	R2Delete           r2api.DeleteRequest      `json:"r2_delete,omitempty"`
-	R2DeleteCapability r2api.DeleteCapability   `json:"r2_delete_capability,omitempty"`
-	R2Purge            r2api.PurgeRequest       `json:"r2_purge,omitempty"`
-	R2PurgeCapability  r2api.PurgeCapability    `json:"r2_purge_capability,omitempty"`
+type Action struct {
+	ID                 string                 `json:"id"`
+	RequestID          string                 `json:"request_id"`
+	PlanID             string                 `json:"plan_id"`
+	PolicyDigest       string                 `json:"policy_digest"`
+	QuarantineTarget   string                 `json:"quarantine_target"`
+	Kind               ActionKind             `json:"kind"`
+	Provider           Provider               `json:"provider"`
+	Object             Object                 `json:"object"`
+	Target             Object                 `json:"target,omitempty"`
+	Optional           bool                   `json:"optional"`
+	DriveIntent        *DriveQuarantineIntent `json:"drive_quarantine_intent,omitempty"`
+	R2Copy             r2api.CopyRequest      `json:"r2_copy,omitempty"`
+	R2CopyCapability   r2api.CopyCapability   `json:"r2_copy_capability,omitempty"`
+	R2Delete           r2api.DeleteRequest    `json:"r2_delete,omitempty"`
+	R2DeleteCapability r2api.DeleteCapability `json:"r2_delete_capability,omitempty"`
+	R2Purge            r2api.PurgeRequest     `json:"r2_purge,omitempty"`
+	R2PurgeCapability  r2api.PurgeCapability  `json:"r2_purge_capability,omitempty"`
 }
 
 type Plan struct {
@@ -348,9 +360,6 @@ func PlanRetention(policy Policy, inventory Inventory, owner OwnershipMarker, no
 		}
 		bytes += object.Size
 	}
-	if policy.Provider == ProviderDrive && policy.DeletePolicy == DeletePolicyQuarantine {
-		return Plan{}, errors.New("Drive retention quarantine requires an injected exact signed capability")
-	}
 
 	if policy.DeletePolicy == DeletePolicyQuarantine {
 		seen := make(map[string]struct{})
@@ -398,8 +407,12 @@ func planAction(policy Policy, owner OwnershipMarker, object Object) (Action, er
 		action.Target = Object{Provider: string(ProviderR2), AccountID: object.AccountID, Bucket: policy.QuarantineBucket, Key: policy.QuarantinePrefix + object.Key, ObjectID: object.ObjectID, Size: object.Size, Hash: object.Hash}
 		action.R2Copy = r2api.CopyRequest{Source: source, Destination: destination, ExpectedSize: object.Size, ExpectedSHA256: object.Hash, RequestID: action.RequestID}
 	case ProviderDrive:
-		action.Kind = ActionDriveMutation
-		action.DriveRequest = driveapi.MutationRequest{ObjectID: object.ObjectID, AccountID: object.AccountID, RootID: object.RootID, Namespace: object.Namespace, ParentID: object.ParentID, Mode: "quarantine", ExpectedETag: object.ETag, Version: object.Version, Generation: object.Generation, Size: object.Size, Hash: object.Hash, RequestID: action.RequestID, NoCASRiskAccepted: true, NoCASClassification: driveapi.NoCASAccepted, OwnerRiskApproved: true}
+		action.Kind = ActionDriveQuarantineIntent
+		action.DriveIntent = &DriveQuarantineIntent{
+			ObjectID: object.ObjectID, AccountID: object.AccountID, RootID: object.RootID, Namespace: object.Namespace,
+			ParentID: object.ParentID, ExpectedETag: object.ETag, Version: object.Version, Generation: object.Generation,
+			Size: object.Size, Hash: object.Hash, RequestID: action.RequestID,
+		}
 	default:
 		return Action{}, fmt.Errorf("unsupported retention provider %q", object.Provider)
 	}
@@ -413,7 +426,6 @@ func bindAction(plan Plan, action Action) Action {
 	action.QuarantineTarget = target
 	action.ID = digestString(strings.Join([]string{plan.ID, plan.PolicyDigest, target, objectSortKey(action.Object)}, "\x00"))
 	action.RequestID = action.ID
-	action.DriveRequest.RequestID = action.RequestID
 	action.R2Copy.RequestID = action.RequestID
 	action.R2Delete.RequestID = action.RequestID
 	action.R2Purge.RequestID = action.RequestID
@@ -429,10 +441,6 @@ func quarantineTarget(policy Policy, object Object) string {
 	default:
 		return strings.Join([]string{string(policy.Provider), policy.QuarantineBucket, policy.QuarantinePrefix, object.ObjectID}, "\x00")
 	}
-}
-
-type DriveProvider interface {
-	Mutate(context.Context, driveapi.MutationRequest) (driveapi.MutationResult, error)
 }
 
 type R2Provider interface {
@@ -546,18 +554,17 @@ type Report struct {
 
 type Engine struct {
 	R2      R2Provider
-	Drive   DriveProvider
 	Journal *Journal
 	Lease   Lease
 	Now     func() time.Time
 	blocked map[string]struct{}
 }
 
-func NewEngine(r2 R2Provider, drive DriveProvider, journal *Journal) *Engine {
+func NewEngine(r2 R2Provider, journal *Journal) *Engine {
 	if journal == nil {
 		journal = NewJournal()
 	}
-	return &Engine{R2: r2, Drive: drive, Journal: journal, Now: time.Now, blocked: make(map[string]struct{})}
+	return &Engine{R2: r2, Journal: journal, Now: time.Now, blocked: make(map[string]struct{})}
 }
 
 func (engine *Engine) Apply(ctx context.Context, plan Plan, currentPolicy Policy) (Report, error) {
@@ -644,23 +651,8 @@ func (engine *Engine) applyAction(ctx context.Context, action Action) error {
 	switch action.Kind {
 	case ActionNoop:
 		return nil
-	case ActionDriveMutation:
-		if engine.Drive == nil {
-			return errors.New("Drive provider is not configured")
-		}
-		result, err := engine.Drive.Mutate(ctx, action.DriveRequest)
-		if err != nil {
-			return err
-		}
-		if result.ProviderID != action.DriveRequest.ObjectID || result.ObjectID != action.DriveRequest.ObjectID ||
-			result.AccountID != action.DriveRequest.AccountID || result.RootID != action.DriveRequest.RootID ||
-			result.Namespace != action.DriveRequest.Namespace || result.ParentID != action.DriveRequest.ParentID ||
-			result.ETag != action.DriveRequest.ExpectedETag || result.Version != action.DriveRequest.Version ||
-			result.Generation != action.DriveRequest.Generation || result.Size != action.DriveRequest.Size ||
-			result.Hash != action.DriveRequest.Hash || result.RequestID != action.DriveRequest.RequestID || result.State == "" {
-			return unknownRetentionError(errors.New("Drive mutation readback does not match exact request"))
-		}
-		return nil
+	case ActionDriveQuarantineIntent:
+		return errors.New("Drive quarantine execution is unavailable without a protected provider broker")
 	case ActionQuarantineCopy:
 		if engine.R2 == nil || action.R2CopyCapability.Signature == "" {
 			return errors.New("R2 quarantine copy requires exact capability")
@@ -716,7 +708,7 @@ func unknownRetentionError(cause error) error {
 }
 
 func isUnknownSettlement(err error) bool {
-	return errors.Is(err, ErrUnknownSettlement) || errors.Is(err, driveapi.ErrUnknownSettlement) || errors.Is(err, r2api.ErrUnknownSettlement)
+	return errors.Is(err, ErrUnknownSettlement) || errors.Is(err, r2api.ErrUnknownSettlement)
 }
 
 func (engine *Engine) outcomeRecord(plan Plan, action Action, after, outcome string, now time.Time) JournalRecord {

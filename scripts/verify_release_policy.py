@@ -91,8 +91,8 @@ def check(root: Path) -> list[str]:
         findings.append("CD must own the consolidated publish-stable job")
     if "environment: stable-publish" not in stable_block:
         findings.append("CD stable publication must run in the protected stable-publish environment")
-    if "n24q02m/better-semantic-release@087b84e8d2ba75bdec350924d3bf8247088e0b1a" not in stable_block:
-        findings.append("CD stable release must use the pinned better-semantic-release action (v1.4.0)")
+    if "n24q02m/better-semantic-release@274ef643f3758549bc9e2c616505bd1c32a83409" not in stable_block:
+        findings.append("CD stable release must use the pinned better-semantic-release action (v1.5.0)")
     if "actions/create-github-app-token" not in stable_block:
         findings.append("CD stable release must push the release commit via the CI App identity")
     if "args: release --config=.goreleaser.yaml --clean" not in stable_block:

@@ -3,6 +3,8 @@ package engine
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,9 +27,8 @@ type Engine struct {
 	cfg    string
 	run    runner
 	stream streamRunner
-	// syncMu serializes the sync operations (Bisync/Copy/Sync). Each rclone
-	// subprocess is independent, but the lock protects temp filter-file
-	// lifetimes and keeps one sync operation's state isolated from another.
+	// syncMu serializes sync operations. The lock protects invocation-scoped
+	// filter lifetimes and content-addressed bisync workdir state from overlap.
 	syncMu sync.Mutex
 
 	workingConfigDir string
@@ -500,7 +501,7 @@ func (e *Engine) Bisync(p BisyncParams) (BisyncResult, error) {
 			return BisyncResult{}, err
 		}
 	}
-	filterArgv, cleanup, err := writeFilters("--filters-file", p.Filters)
+	filterArgv, cleanup, err := writeBisyncFilters(p.Workdir, p.Filters, p.DryRun)
 	if err != nil {
 		return BisyncResult{}, err
 	}
@@ -607,11 +608,9 @@ func commonSyncFlags() []string {
 	}
 }
 
-// writeFilters writes filters (if any) to a temp file and returns the argv
-// flag+path to append (e.g. ["--filter-from", path] for copy/sync, or
-// ["--filters-file", path] for bisync) plus a cleanup func that removes the
-// temp file - always safe to call, even when no file was created (len(filters)
-// == 0 returns a nil argv and a no-op cleanup).
+// writeFilters writes filters (if any) to an invocation-scoped temporary file.
+// Copy and sync do not persist filter identity between calls, so their files
+// can be removed immediately after rclone returns.
 func writeFilters(flag string, filters []string) (argv []string, cleanup func(), err error) {
 	if len(filters) == 0 {
 		return nil, func() {}, nil
@@ -625,20 +624,9 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 		_ = os.Remove(path) // #nosec G104 -- xóa tệp bộ lọc tạm theo best-effort; callback không thể trả lỗi dọn dẹp.
 	}
 
-	// Pre-allocate exact capacity for all strings plus their trailing newlines
-	// to avoid hidden double allocations from strings.Join(...) + "\n"
-	capacity := len(filters) // for newlines
-	for _, filter := range filters {
-		capacity += len(filter)
-	}
-	var sb strings.Builder
-	sb.Grow(capacity)
-	for _, filter := range filters {
-		sb.WriteString(filter)
-		sb.WriteByte('\n')
-	}
+	content := filterContent(filters)
 
-	if _, err := f.WriteString(sb.String()); err != nil {
+	if _, err := f.WriteString(content); err != nil {
 		if closeErr := f.Close(); closeErr != nil {
 			err = fmt.Errorf("write error: %w, close error: %v", err, closeErr)
 		}
@@ -650,6 +638,69 @@ func writeFilters(flag string, filters []string) (argv []string, cleanup func(),
 		return nil, func() {}, err
 	}
 	return []string{flag, path}, cleanup, nil
+}
+
+// writeBisyncFilters keeps a content-addressed filter path under Workdir.
+// rclone records the absolute --filters-file path in its bisync baseline;
+// rotating a generic temporary filename on each cycle makes the next call
+// abort with "filters file md5 hash not found". A dry-run reuses an existing
+// stable file but does not create one.
+func writeBisyncFilters(workdir string, filters []string, dryRun bool) ([]string, func(), error) {
+	if len(filters) == 0 {
+		return nil, func() {}, nil
+	}
+	content := filterContent(filters)
+	contentBytes := []byte(content)
+	sum := sha256.Sum256(contentBytes)
+	path := filepath.Join(workdir, ".better-drive-bisync-filters-"+hex.EncodeToString(sum[:])+".txt")
+	data, err := os.ReadFile(path)
+	if err == nil {
+		if !bytes.Equal(data, contentBytes) {
+			return nil, func() {}, errors.New("bisync filter file content does not match its digest")
+		}
+		return []string{"--filters-file", path}, func() {}, nil
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		return nil, func() {}, fmt.Errorf("read bisync filter file: %w", err)
+	}
+	if dryRun {
+		return writeFilters("--filters-file", filters)
+	}
+
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			data, readErr := os.ReadFile(path)
+			if readErr == nil && bytes.Equal(data, contentBytes) {
+				return []string{"--filters-file", path}, func() {}, nil
+			}
+		}
+		return nil, func() {}, fmt.Errorf("create bisync filter file: %w", err)
+	}
+	if _, err := file.Write(contentBytes); err != nil {
+		_ = file.Close()
+		_ = os.Remove(path)
+		return nil, func() {}, fmt.Errorf("write bisync filter file: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, func() {}, fmt.Errorf("close bisync filter file: %w", err)
+	}
+	return []string{"--filters-file", path}, func() {}, nil
+}
+
+func filterContent(filters []string) string {
+	capacity := len(filters)
+	for _, filter := range filters {
+		capacity += len(filter)
+	}
+	var content strings.Builder
+	content.Grow(capacity)
+	for _, filter := range filters {
+		content.WriteString(filter)
+		content.WriteByte('\n')
+	}
+	return content.String()
 }
 
 // joinRemotePath joins a remote directory (e.g. "gdrive:Backups/claude") and a

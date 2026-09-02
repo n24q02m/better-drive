@@ -563,8 +563,8 @@ func TestSyncCommandsStreamProgressAndCancel(t *testing.T) {
 // <path2> --workdir <workdir> ...` with the shared perf/retry/skip_gdocs
 // flags plus the bisync-specific ones (--resilient, --recover, --max-delete
 // 50, --conflict-resolve newer, --conflict-loser num, --compare
-// size,modtime,checksum), and a --filters-file whose content is the joined
-// filter lines - the temp file removed again once Bisync returns.
+// size,modtime,checksum), and a stable --filters-file whose content is the
+// joined filter lines.
 func TestBisyncBuildsRcloneArgs(t *testing.T) {
 	// path1 must be a real (but disposable) directory: Resync:true makes
 	// Bisync os.MkdirAll(p.Path1), and a hard-coded "C:/x" would leak that
@@ -578,9 +578,7 @@ func TestBisyncBuildsRcloneArgs(t *testing.T) {
 	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
 		if len(args) > 0 && args[0] == "bisync" {
 			gotArgv = args
-			// Read the --filters-file HERE, while Bisync's defer cleanup()
-			// has not yet run - the one point the temp file is guaranteed to
-			// still exist.
+			// Read the --filters-file during the fake rclone call.
 			if idx := indexOf(args, "--filters-file"); idx != -1 && idx+1 < len(args) {
 				filterPath = args[idx+1]
 				data, err := os.ReadFile(filterPath)
@@ -630,8 +628,36 @@ func TestBisyncBuildsRcloneArgs(t *testing.T) {
 	if filterFileContent != "- **/*.tmp\n" {
 		t.Errorf("filters file content = %q, want %q", filterFileContent, "- **/*.tmp\n")
 	}
-	if _, err := os.Stat(filterPath); !os.IsNotExist(err) {
-		t.Errorf("--filters-file temp file %q still exists after Bisync returns, want removed", filterPath)
+	if _, err := os.Stat(filterPath); err != nil {
+		t.Errorf("--filters-file %q must survive for the next bisync cycle: %v", filterPath, err)
+	}
+	if filepath.Dir(filterPath) != workdir {
+		t.Errorf("--filters-file directory = %q, want workdir %q", filepath.Dir(filterPath), workdir)
+	}
+}
+
+func TestBisyncReusesStableFiltersFileAcrossCycles(t *testing.T) {
+	workdir := t.TempDir()
+	var filterPaths []string
+	e := newFakeRunnerEngine("", func(args ...string) (string, string, error) {
+		if idx := indexOf(args, "--filters-file"); idx != -1 && idx+1 < len(args) {
+			filterPaths = append(filterPaths, args[idx+1])
+		}
+		return "", "", nil
+	})
+	params := BisyncParams{
+		Path1: t.TempDir(), Path2: "gdrive:x", Workdir: workdir,
+		Resync: true, Filters: []string{"- **/*.tmp"},
+	}
+	if _, err := e.Bisync(params); err != nil {
+		t.Fatal(err)
+	}
+	params.Resync = false
+	if _, err := e.Bisync(params); err != nil {
+		t.Fatal(err)
+	}
+	if len(filterPaths) != 2 || filterPaths[0] != filterPaths[1] {
+		t.Fatalf("bisync filter paths = %v, want one stable path", filterPaths)
 	}
 }
 

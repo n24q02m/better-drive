@@ -38,7 +38,7 @@ func OpenFileJournal(path string) (*FileJournal, error) {
 	scanner := bufio.NewScanner(file)
 	for line := 1; scanner.Scan(); line++ {
 		var record JournalRecord
-		if err := json.Unmarshal(scanner.Bytes(), &record); err != nil {
+		if err := decodeStrictJSONRecord(scanner.Bytes(), &record); err != nil {
 			return nil, fmt.Errorf("journal line %d: %w", line, err)
 		}
 		journal.Records = append(journal.Records, record)

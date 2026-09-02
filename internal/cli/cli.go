@@ -87,7 +87,7 @@ func newRootCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), artifactCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
@@ -96,7 +96,10 @@ func newRootCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 // Sync-capable commands add the runtime/endpoint gate through
 // loadExecutionConfig before constructing an engine.
 func loadConfig() (*config.Config, error) {
-	path := paths.ConfigFile()
+	return loadConfigAt(paths.ConfigFile())
+}
+
+func loadConfigAt(path string) (*config.Config, error) {
 	cfg, err := config.Load(path)
 	if err != nil {
 		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
@@ -110,18 +113,26 @@ func loadConfig() (*config.Config, error) {
 }
 
 func loadExecutionConfig() (*config.Config, error) {
+	return loadExecutionConfigAt(paths.ConfigFile())
+}
+
+func loadExecutionConfigAt(path string) (*config.Config, error) {
 	resolver := config.FileBindingResolver{}
-	return loadExecutionConfigWithBindings(resolver, resolver)
+	return loadExecutionConfigWithBindingsAt(path, resolver, resolver)
 }
 
 func loadExecutionConfigWithBindings(policyResolver config.PolicyBindingResolver, roleResolver config.RoleBindingResolver) (*config.Config, error) {
-	cfg, err := loadConfig()
+	return loadExecutionConfigWithBindingsAt(paths.ConfigFile(), policyResolver, roleResolver)
+}
+
+func loadExecutionConfigWithBindingsAt(path string, policyResolver config.PolicyBindingResolver, roleResolver config.RoleBindingResolver) (*config.Config, error) {
+	cfg, err := loadConfigAt(path)
 	if err != nil {
 		return nil, err
 	}
 	if err := validateExecutionConfigWithBindings(cfg, policyResolver, roleResolver); err != nil {
 		return nil, exitcode.WithRemediation(exitcode.ConfigError(err),
-			fmt.Sprintf("enroll the pinned runtime and role/policy bindings in %s before running transfers", paths.ConfigFile()))
+			fmt.Sprintf("enroll the pinned runtime and role/policy bindings in %s before running transfers", path))
 	}
 	return cfg, nil
 }
@@ -712,20 +723,23 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 	var format string
 	var dryRun bool
 	var resync bool
+	var configPath string
 	c := &cobra.Command{
 		Use:   "sync",
 		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
 		Long: "Run a single sync cycle for every pair in config.toml, then exit - no tray,\n" +
 			"no ticker. A pair whose local path does not exist is SKIPPED (not a\n" +
 			"failure). Successful pairs are reported on stdout; SKIPPED and FAILED\n" +
-			"pairs go to stderr. Use --format json for machine-readable output and\n" +
-			"--dry-run to preview changes without applying them.\n\n" +
+			"pairs go to stderr. Use --config to select the enrolled config path,\n" +
+			"--format json for machine-readable output, and --dry-run to preview\n" +
+			"changes without applying them.\n\n" +
 			"--resync rebuilds the bisync baseline of every bisync-mode pair. It is\n" +
 			"the recovery path for a pair reporting that its baseline is missing or\n" +
 			"unusable. Use it only when that happens: a resync does NOT propagate\n" +
 			"deletions, so files deleted on one side since the baseline broke come\n" +
 			"back from the other. Combine it with --dry-run to preview first.",
 		Example: "  better-drive sync\n" +
+			"  better-drive sync --config /etc/better-drive/config.toml\n" +
 			"  better-drive sync --dry-run\n" +
 			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
@@ -736,18 +750,22 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 			if err := output.Validate(format); err != nil {
 				return badFormatErr(err)
 			}
-			cfg, err := loadExecutionConfig()
+			activeConfigPath := configPath
+			if activeConfigPath == "" {
+				activeConfigPath = paths.ConfigFile()
+			}
+			cfg, err := loadExecutionConfigAt(activeConfigPath)
 			if err != nil {
 				return err
 			}
 			if err := deps.validateForConfig(cfg); err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err),
-					fmt.Sprintf("enroll retention runtime dependencies before running quarantine jobs in %s", paths.ConfigFile()))
+					fmt.Sprintf("enroll retention runtime dependencies before running quarantine jobs in %s", activeConfigPath))
 			}
 
 			e, err := engine.NewTransferVerified(cfg.RcloneRuntime)
 			if err != nil {
-				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", paths.ConfigFile()))
+				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("fix the pinned rclone_runtime in %s", activeConfigPath))
 			}
 			defer func() {
 				commandErr = errors.Join(commandErr, e.Close())
@@ -777,6 +795,7 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 		},
 	}
 	output.AddFormatFlag(c, &format)
+	c.Flags().StringVar(&configPath, "config", "", "read configuration from path (default: platform config directory)")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without modifying anything")
 	c.Flags().BoolVar(&resync, "resync", false, "rebuild the bisync baseline of every bisync pair (recovery; does not propagate deletions)")
 	return c

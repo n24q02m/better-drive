@@ -486,6 +486,26 @@ func TestSyncCmd_InvalidConfig_ErrorHasRemediation(t *testing.T) {
 	}
 }
 
+func TestSyncCmd_ConfigFlagSelectsExplicitConfig(t *testing.T) {
+	explicitPath := filepath.Join(t.TempDir(), "explicit.toml")
+	if err := os.WriteFile(explicitPath, []byte(""), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("BETTER_DRIVE_CONFIG", filepath.Join(t.TempDir(), "wrong.toml"))
+
+	cmd := syncCmd()
+	cmd.SetOut(&bytes.Buffer{})
+	cmd.SetErr(&bytes.Buffer{})
+	cmd.SetArgs([]string{"--config", explicitPath})
+	err := cmd.Execute()
+	if err == nil {
+		t.Fatal("want error: explicit config has 0 jobs")
+	}
+	if hint := exitcode.RemediationOf(err); !strings.Contains(hint, explicitPath) {
+		t.Errorf("remediation = %q, want a hint mentioning explicit --config %q", hint, explicitPath)
+	}
+}
+
 // TestStatusCmd_BadFormatFlag_ErrorHasRemediation and its sync counterpart
 // verify an unknown --format value fails with a remediation hint naming the
 // two accepted values, so a caller doesn't have to guess.
