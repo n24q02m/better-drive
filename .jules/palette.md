@@ -18,3 +18,7 @@
 ## 2024-08-28 - Ineffective Menu Item Tooltips
 **Learning:** Standard macOS and Windows system tray menus do not display tooltips on individual menu dropdown items. Relying on `SetTooltip` to explain disabled states on menu items is ineffective and leads to a lack of context.
 **Action:** Do not rely on menu item tooltips as the sole method for conveying critical state changes or disabled reasons. When possible, append the reason to the menu item text or ensure the action provides visible feedback.
+
+## 2024-08-28 - PR Rejected (UX/A11y Constraint)
+**Learning:** The PR to fix a silent failure by supporting open folder across platforms was rejected and closed as obsolete/bot-generated noise per internal triage policies. While cross-platform support is generally good UX, the rejection indicates this task was not aligned with current development priorities or the exact constraints of this repository, which prioritizes strict adherence to internal policies over unsolicited UX micro-fixes.
+**Action:** If a PR is rejected without requests for further code changes, ensure to revert all local changes to maintain a clean git tree before stopping work, and carefully read internal documentation/policy before submitting future PRs.
