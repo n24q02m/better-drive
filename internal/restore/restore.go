@@ -142,16 +142,15 @@ func BuildPlan(root string, entries []Entry) (Plan, error) {
 
 func cleanRelativePath(value string) (string, error) {
 	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
-	if value == "" || value[0] == '/' || strings.Contains(value, ":") {
+	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, ":") {
 		return "", fmt.Errorf("path must be relative and cannot contain drive or alternate-stream syntax")
 	}
 	if strings.Contains(value, "#") {
 		return "", fmt.Errorf("path cannot contain archive traversal or fragment syntax (#)")
 	}
-	clean := make([]string, 0, strings.Count(value, "/")+1)
-	for value != "" {
-		var part string
-		part, value, _ = strings.Cut(value, "/")
+	parts := strings.Split(value, "/")
+	clean := make([]string, 0, len(parts))
+	for _, part := range parts {
 		if part == "" || part == "." {
 			continue
 		}
@@ -646,13 +645,9 @@ func isSafeDirectoryPath(path string) bool {
 }
 
 func safeParent(root, relative string) (string, error) {
+	parts := strings.Split(relative, "/")
 	parent := root
-	for {
-		part, rest, found := strings.Cut(relative, "/")
-		if !found {
-			break
-		}
-		relative = rest
+	for _, part := range parts[:len(parts)-1] {
 		parent = filepath.Join(parent, part)
 		info, err := os.Lstat(parent)
 		if os.IsNotExist(err) {
@@ -919,13 +914,9 @@ func validateTransactionID(id string) error {
 }
 
 func safeExistingParent(root, relative string) (string, bool, error) {
+	parts := strings.Split(relative, "/")
 	parent := root
-	for {
-		part, rest, found := strings.Cut(relative, "/")
-		if !found {
-			break
-		}
-		relative = rest
+	for _, part := range parts[:len(parts)-1] {
 		parent = filepath.Join(parent, part)
 		info, err := os.Lstat(parent)
 		if os.IsNotExist(err) {
