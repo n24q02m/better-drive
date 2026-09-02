@@ -93,7 +93,12 @@ func resolveRcloneExecutable(bin string) string {
 	if err != nil {
 		return bin
 	}
-	for _, line := range strings.Split(string(data), "\n") {
+	// Bolt optimization: Parse shim config file line-by-line using strings.Cut to avoid
+	// the dynamic slice allocation and garbage collection overhead of strings.Split.
+	remaining := string(data)
+	for remaining != "" {
+		line, rest, _ := strings.Cut(remaining, "\n")
+		remaining = rest
 		key, value, found := strings.Cut(line, "=")
 		if !found || strings.TrimSpace(strings.TrimPrefix(key, "\ufeff")) != "path" {
 			continue

@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2025-05-18 - Sorting 'KEY=VALUE' strings changes sorting order compared to sorting keys
+**Learning:** Optimizing environment string building by sorting the final `KEY=VALUE` strings instead of sorting the map keys first introduces a subtle sorting order regression because the ASCII value of '=' affects the comparison for keys sharing prefixes.
+**Action:** When building sorted `KEY=VALUE` strings from a map, do not skip the intermediate slice of keys just to save an allocation; maintain correctness by sorting the keys first, then building the result slice.
