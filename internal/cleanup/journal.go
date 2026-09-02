@@ -19,7 +19,15 @@ func OpenFileJournal(path string) (*FileJournal, error) {
 		return nil, errors.New("journal path is required")
 	}
 	journal := &FileJournal{Path: path}
-	file, err := os.Open(path)
+	root, err := os.OpenRoot(filepath.Dir(path))
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return journal, nil
+		}
+		return nil, err
+	}
+	defer root.Close()
+	file, err := root.Open(filepath.Base(path))
 	if errors.Is(err, os.ErrNotExist) {
 		return journal, nil
 	}
@@ -53,10 +61,16 @@ func (journal *FileJournal) Append(record JournalRecord) error {
 		return err
 	}
 	record = memory.Records[len(memory.Records)-1]
-	if err := os.MkdirAll(filepath.Dir(journal.Path), 0o700); err != nil {
+	dir := filepath.Dir(journal.Path)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return err
 	}
-	file, err := os.OpenFile(journal.Path, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	file, err := root.OpenFile(filepath.Base(journal.Path), os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 	if err != nil {
 		return err
 	}
