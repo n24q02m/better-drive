@@ -18,3 +18,7 @@
 ## 2024-08-11 - Disable reasons in menu titles
 **Learning:** Standard macOS and Windows system tray menus do not display tooltips on individual menu dropdown items, meaning users cannot see why an item is disabled if you only use tooltips.
 **Action:** To explain restrictions, append the disabled reason to the menu item's title (e.g. "Sync now (paused)") instead of relying solely on tooltips.
+
+## 2024-08-11 - Rejecting trivial UI changes
+**Learning:** PRs addressing trivial UI changes may be rejected as noise or if they don't pass repo checks.
+**Action:** When working on UI changes, prioritize issues that have measurable user impact and follow strict repository validation guidelines to avoid generating noise.
