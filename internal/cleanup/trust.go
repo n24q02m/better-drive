@@ -13,6 +13,7 @@ import (
 const (
 	CurrentTrustRootSchemaVersion = 1
 	CleanupTrustPurpose           = "BD-CLEANUP-APPROVAL-V1"
+	OwnerRiskAuthorityPurpose     = "BD-CLEANUP-AUTHORITY-V1"
 )
 
 // TrustRoot is a public, non-secret record for an enrolled approval issuer.
@@ -34,7 +35,7 @@ func NewTrustRoot(rootID, issuer, purpose string, publicKey ed25519.PublicKey, e
 	if strings.TrimSpace(rootID) == "" || strings.TrimSpace(issuer) == "" {
 		return TrustRoot{}, errors.New("trust root ID and issuer are required")
 	}
-	if purpose != CleanupTrustPurpose {
+	if !isSupportedTrustPurpose(purpose) {
 		return TrustRoot{}, fmt.Errorf("unsupported trust root purpose %q", purpose)
 	}
 	if len(publicKey) != ed25519.PublicKeySize {
@@ -61,22 +62,28 @@ func VerifyApprovalAgainstTrustRoot(approval Approval, signature []byte, root Tr
 	if approval.Issuer != root.Issuer {
 		return fmt.Errorf("approval issuer %q is not enrolled in trust root %q", approval.Issuer, root.RootID)
 	}
-	publicKey, err := root.publicKey(now)
+	publicKey, err := root.PublicKeyForPurpose(CleanupTrustPurpose, approval.Issuer, now)
 	if err != nil {
 		return err
 	}
 	return VerifyApproval(approval, signature, publicKey, now)
 }
 
-func (root TrustRoot) publicKey(now time.Time) (ed25519.PublicKey, error) {
+func (root TrustRoot) PublicKeyForPurpose(expectedPurpose, expectedIssuer string, now time.Time) (ed25519.PublicKey, error) {
 	if root.SchemaVersion != CurrentTrustRootSchemaVersion {
 		return nil, fmt.Errorf("unsupported trust root schema_version %d", root.SchemaVersion)
 	}
 	if strings.TrimSpace(root.RootID) == "" || strings.TrimSpace(root.Issuer) == "" {
 		return nil, errors.New("trust root ID and issuer are required")
 	}
-	if root.Purpose != CleanupTrustPurpose {
-		return nil, fmt.Errorf("unsupported trust root purpose %q", root.Purpose)
+	if !isSupportedTrustPurpose(expectedPurpose) {
+		return nil, fmt.Errorf("unsupported expected trust purpose %q", expectedPurpose)
+	}
+	if root.Purpose != expectedPurpose {
+		return nil, fmt.Errorf("trust root purpose %q does not match expected purpose %q", root.Purpose, expectedPurpose)
+	}
+	if root.Issuer != expectedIssuer {
+		return nil, fmt.Errorf("trust root issuer %q does not match expected issuer %q", root.Issuer, expectedIssuer)
 	}
 	if !root.Active {
 		return nil, errors.New("trust root is inactive")
@@ -95,6 +102,13 @@ func (root TrustRoot) publicKey(now time.Time) (ed25519.PublicKey, error) {
 		return nil, errors.New("trust root public key fingerprint mismatch")
 	}
 	return append(ed25519.PublicKey(nil), publicKey...), nil
+}
+
+func isSupportedTrustPurpose(purpose string) bool {
+	return purpose == CleanupTrustPurpose ||
+		purpose == OwnerRiskAuthorityPurpose ||
+		purpose == CandidateControlIssuerPurpose ||
+		purpose == CandidateControlReadbackPurpose
 }
 
 func trustFingerprint(publicKey []byte) string {

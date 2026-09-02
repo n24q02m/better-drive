@@ -2,8 +2,11 @@ package restore
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -52,6 +55,55 @@ func (v *testStagingVerifier) Verify(_ string, identity RootIdentity) (StagingEv
 	return evidence, nil
 }
 
+type testSourceProvider struct {
+	artifacts map[string][]byte
+}
+
+func (p *testSourceProvider) Open(_ context.Context, ref SourceReference) (io.ReadCloser, SourceReadback, error) {
+	key := fmt.Sprintf("%s/%s/%s/%s", ref.Provider, ref.AccountID, ref.ObjectID, ref.Version)
+	data, ok := p.artifacts[key]
+	if !ok {
+		return nil, SourceReadback{}, fmt.Errorf("source artifact %q not found in test provider", key)
+	}
+	sum := sha256.Sum256(data)
+	digest := "sha256:" + hex.EncodeToString(sum[:])
+	readback := SourceReadback{
+		Reference:        ref,
+		Size:             int64(len(data)),
+		CiphertextDigest: digest,
+		Version:          ref.Version,
+	}
+	return io.NopCloser(bytes.NewReader(data)), readback, nil
+}
+
+type testCheckpointVerifier struct {
+	err error
+}
+
+func (v *testCheckpointVerifier) Verify(_ context.Context, checkpoint MachineCheckpoint, intent ApplyIntent) error {
+	if v.err != nil {
+		return v.err
+	}
+	if checkpoint.Signature != "valid-sig" {
+		return fmt.Errorf("invalid checkpoint signature")
+	}
+	return nil
+}
+
+type testCleanupVerifier struct {
+	err error
+}
+
+func (v *testCleanupVerifier) Verify(_ context.Context, claim CleanupClaim, intent CleanupIntent) error {
+	if v.err != nil {
+		return v.err
+	}
+	if claim.Signature != "valid-claim-sig" {
+		return fmt.Errorf("invalid cleanup claim signature")
+	}
+	return nil
+}
+
 func sealedEntry(t *testing.T, relative string, payload []byte, metadata artifactcrypto.Metadata, resolver artifactcrypto.Resolver) Entry {
 	t.Helper()
 	source := filepath.Join(t.TempDir(), "artifact.bin")
@@ -77,15 +129,67 @@ func sealedEntry(t *testing.T, relative string, payload []byte, metadata artifac
 	}
 }
 
+func sealedProviderEntry(t *testing.T, relative string, payload []byte, metadata artifactcrypto.Metadata, resolver artifactcrypto.Resolver, provider *testSourceProvider, ref SourceReference) Entry {
+	t.Helper()
+	var sealed bytes.Buffer
+	result, err := artifactcrypto.Seal(&sealed, bytes.NewReader(payload), resolver, metadata)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref.Size = int64(sealed.Len())
+	ref.CiphertextDigest = result.CiphertextDigest
+	key := fmt.Sprintf("%s/%s/%s/%s", ref.Provider, ref.AccountID, ref.ObjectID, ref.Version)
+	if provider.artifacts == nil {
+		provider.artifacts = make(map[string][]byte)
+	}
+	provider.artifacts[key] = sealed.Bytes()
+	return Entry{
+		RelativePath:     relative,
+		SourceReference:  &ref,
+		ArtifactMetadata: metadata,
+		PlaintextDigest:  result.PlaintextDigest,
+		CiphertextDigest: result.CiphertextDigest,
+		PlaintextSize:    int64(len(payload)),
+	}
+}
+
 func TestBuildPlanRejectsTraversalAbsoluteAndDuplicatePaths(t *testing.T) {
 	root := t.TempDir()
-	for _, relative := range []string{"C:/escape", "/absolute", "../escape", "a/../../escape", "secret:stream"} {
+	for _, relative := range []string{
+		"C:/escape", "/absolute", "../escape", "a/../../escape", "secret:stream",
+		"archive.zip#inside.txt", "CON", "NUL", "COM1", "sub/AUX/file.txt",
+	} {
 		if _, err := BuildPlan(root, []Entry{{RelativePath: relative}}); err == nil {
 			t.Errorf("BuildPlan accepted unsafe path %q", relative)
 		}
 	}
 	if _, err := BuildPlan(root, []Entry{{RelativePath: "a.txt"}, {RelativePath: "a.txt"}}); err == nil || !strings.Contains(err.Error(), "duplicate") {
 		t.Fatal("BuildPlan accepted duplicate destination path")
+	}
+}
+
+func TestBuildPlanComputesCapacityAndConflictEvidence(t *testing.T) {
+	root := t.TempDir()
+	conflictPath := filepath.Join(root, "existing.txt")
+	if err := os.WriteFile(conflictPath, []byte("existing"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entries := []Entry{
+		{RelativePath: "existing.txt", PlaintextSize: 100},
+		{RelativePath: "new.txt", PlaintextSize: 250},
+	}
+	plan, err := BuildPlan(root, entries)
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if plan.CapacityBytes != 350 {
+		t.Fatalf("CapacityBytes = %d, want 350", plan.CapacityBytes)
+	}
+	if plan.TotalObjects != 2 {
+		t.Fatalf("TotalObjects = %d, want 2", plan.TotalObjects)
+	}
+	if len(plan.Conflicts) != 1 || plan.Conflicts[0] != "existing.txt" {
+		t.Fatalf("Conflicts = %#v, want [existing.txt]", plan.Conflicts)
 	}
 }
 
@@ -122,6 +226,31 @@ func TestBuildPlanValidatesExecutableEnvelopeFields(t *testing.T) {
 	entry := Entry{RelativePath: "state.txt", SourcePath: filepath.Join(t.TempDir(), "artifact.bin")}
 	if _, err := BuildPlan(root, []Entry{entry}); err == nil || !strings.Contains(err.Error(), "plaintext_digest") {
 		t.Fatalf("BuildPlan accepted incomplete executable entry: %v", err)
+	}
+}
+
+func TestStageFileWithTypedSourceProvider(t *testing.T) {
+	root := t.TempDir()
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-prov", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	provider := &testSourceProvider{}
+	ref := SourceReference{
+		Provider:  "drive",
+		AccountID: "acct-1",
+		ObjectID:  "obj-state",
+		Version:   "v1",
+	}
+	entry := sealedProviderEntry(t, "category/state.txt", []byte("provider-restore-data"), metadata, resolver, provider, ref)
+	plan, err := BuildPlan(root, []Entry{entry})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	if err := StageFileWithProvider(context.Background(), plan, entry, resolver, &testStagingVerifier{}, provider); err != nil {
+		t.Fatalf("StageFileWithProvider: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(root, "category", "state.txt"))
+	if err != nil || string(got) != "provider-restore-data" {
+		t.Fatalf("staged provider data = %q, err=%v", got, err)
 	}
 }
 
@@ -214,97 +343,294 @@ func TestStageFileRejectsEvidenceDriftBeforeTempCreation(t *testing.T) {
 	}
 }
 
-func TestStageFileRejectsEnvelopeAndManifestFailuresWithoutCommit(t *testing.T) {
-	metadata := artifactcrypto.Metadata{RestoreSetID: "set-1", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
-	key := []byte("0123456789abcdef0123456789abcdef")
-	resolver := testArtifactResolver{metadata.Reference(): key}
-	cases := []struct {
-		name   string
-		mutate func(t *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver)
-	}{
+func TestStageAndReplaceWithRollbackSnapshot(t *testing.T) {
+	root := t.TempDir()
+	destPath := filepath.Join(root, "replace.txt")
+	if err := os.WriteFile(destPath, []byte("original-destination-content"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-rep", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := sealedEntry(t, "replace.txt", []byte("new-replaced-content"), metadata, resolver)
+	plan, err := BuildPlan(root, []Entry{entry})
+	if err != nil {
+		t.Fatalf("BuildPlan: %v", err)
+	}
+	rollbackDir := filepath.Join(root, ".restore-rollback", "tx-test")
+	rollbackSnapshot, err := StageAndReplaceFile(context.Background(), plan, entry, resolver, &testStagingVerifier{}, nil, rollbackDir)
+	if err != nil {
+		t.Fatalf("StageAndReplaceFile: %v", err)
+	}
+	// Verify rollback snapshot has original content.
+	orig, err := os.ReadFile(rollbackSnapshot)
+	if err != nil || string(orig) != "original-destination-content" {
+		t.Fatalf("rollback snapshot = %q err=%v", orig, err)
+	}
+	// Verify destination has new content.
+	got, err := os.ReadFile(destPath)
+	if err != nil || string(got) != "new-replaced-content" {
+		t.Fatalf("replaced destination = %q err=%v", got, err)
+	}
+	// Now recover from rollback.
+	records := []JournalRecord{
 		{
-			name: "wrong key",
-			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				return data, testArtifactResolver{metadata.Reference(): []byte("abcdef0123456789abcdef0123456789")}
-			},
-		},
-		{
-			name: "resolver failure",
-			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				return data, testArtifactResolver{}
-			},
-		},
-		{
-			name: "wrong key reference",
-			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				entry.ArtifactMetadata.KeyRef = "other-key"
-				return data, resolver
-			},
-		},
-		{
-			name: "tampered envelope",
-			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				data[len(data)-1] ^= 0x01
-				return data, resolver
-			},
-		},
-		{
-			name: "truncated envelope",
-			mutate: func(_ *testing.T, _ *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				return data[:len(data)-1], resolver
-			},
-		},
-		{
-			name: "ciphertext digest mismatch",
-			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				entry.CiphertextDigest = "sha256:" + strings.Repeat("0", sha256.Size*2)
-				return data, resolver
-			},
-		},
-		{
-			name: "plaintext digest mismatch",
-			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				entry.PlaintextDigest = "sha256:" + strings.Repeat("0", sha256.Size*2)
-				return data, resolver
-			},
-		},
-		{
-			name: "plaintext size mismatch",
-			mutate: func(_ *testing.T, entry *Entry, data []byte) ([]byte, artifactcrypto.Resolver) {
-				entry.PlaintextSize++
-				return data, resolver
-			},
-		},
-		{
-			name: "plaintext source",
-			mutate: func(_ *testing.T, entry *Entry, _ []byte) ([]byte, artifactcrypto.Resolver) {
-				return []byte("restore-data"), resolver
-			},
+			TransactionID:   "tx-test",
+			Entry:           "replace.txt",
+			Action:          "replace",
+			Before:          digestBytes("original-destination-content"),
+			After:           "replaced",
+			PlaintextDigest: entry.PlaintextDigest,
+			RollbackPath:    rollbackSnapshot,
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			root := t.TempDir()
-			entry := sealedEntry(t, "state.txt", []byte("restore-data"), metadata, resolver)
-			data, err := os.ReadFile(entry.SourcePath)
-			if err != nil {
-				t.Fatal(err)
-			}
-			data, caseResolver := tc.mutate(t, &entry, data)
-			if err := os.WriteFile(entry.SourcePath, data, 0o600); err != nil {
-				t.Fatal(err)
-			}
-			plan, err := BuildPlan(root, []Entry{entry})
-			if err != nil {
-				t.Fatalf("BuildPlan: %v", err)
-			}
-			if err := StageFile(plan, entry, caseResolver, &testStagingVerifier{}); err == nil {
-				t.Fatal("StageFile accepted an invalid envelope or manifest")
-			}
-			if _, err := os.Lstat(filepath.Join(root, "state.txt")); !os.IsNotExist(err) {
-				t.Fatalf("failed restore created destination: %v", err)
-			}
-		})
+	if err := RecoverWithIdentity(root, plan.RootIdentity, records); err != nil {
+		t.Fatalf("RecoverWithIdentity replace: %v", err)
+	}
+	restored, err := os.ReadFile(destPath)
+	if err != nil || string(restored) != "original-destination-content" {
+		t.Fatalf("restored content = %q err=%v", restored, err)
+	}
+}
+
+func TestMachineCheckpointVerification(t *testing.T) {
+	root := t.TempDir()
+	plan, err := BuildPlan(root, []Entry{{RelativePath: "a.txt", PlaintextSize: 100}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	intent := ApplyIntent{
+		Plan:          plan,
+		CapacityBytes: 100,
+		TotalObjects:  1,
+	}
+	cp := MachineCheckpoint{
+		ID:            "cp-1",
+		Kind:          CheckpointKindCreate,
+		Root:          plan.Root,
+		RootIdentity:  plan.RootIdentity,
+		Entries:       []string{"a.txt"},
+		CapacityBytes: 100,
+		ExpiresAt:     time.Now().Add(1 * time.Hour),
+		Signature:     "valid-sig",
+	}
+	verifier := &testCheckpointVerifier{}
+	if err := VerifyCheckpoint(context.Background(), cp, intent, verifier); err != nil {
+		t.Fatalf("VerifyCheckpoint: %v", err)
+	}
+
+	// Tampered entry in checkpoint
+	badCP := cp
+	badCP.Entries = []string{"other.txt"}
+	if err := VerifyCheckpoint(context.Background(), badCP, intent, verifier); err == nil {
+		t.Fatal("VerifyCheckpoint accepted checkpoint with wrong entries")
+	}
+
+	// Insufficient capacity
+	lowCapCP := cp
+	lowCapCP.CapacityBytes = 50
+	if err := VerifyCheckpoint(context.Background(), lowCapCP, intent, verifier); err == nil {
+		t.Fatal("VerifyCheckpoint accepted checkpoint with insufficient capacity")
+	}
+
+	// Expired checkpoint
+	expCP := cp
+	expCP.ExpiresAt = time.Now().Add(-1 * time.Hour)
+	if err := VerifyCheckpoint(context.Background(), expCP, intent, verifier); err == nil {
+		t.Fatal("VerifyCheckpoint accepted expired checkpoint")
+	}
+}
+
+func TestCleanupClaimAndPlaintextTTLAlerts(t *testing.T) {
+	root := t.TempDir()
+	stagingDir, rollbackDir := StagingRollbackDirs(root)
+	if err := os.MkdirAll(stagingDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(rollbackDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stagedFile := filepath.Join(stagingDir, "test.tmp")
+	if err := os.WriteFile(stagedFile, []byte("leftover"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Fresh file is within TTL.
+	if err := CheckPlaintextTTL(root, 24*time.Hour); err != nil {
+		t.Fatalf("CheckPlaintextTTL fresh error: %v", err)
+	}
+
+	// Simulated stale file older than TTL.
+	oldTime := time.Now().Add(-48 * time.Hour)
+	if err := os.Chtimes(stagedFile, oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	if err := CheckPlaintextTTL(root, 24*time.Hour); err == nil || !strings.Contains(err.Error(), "pending_cleanup") {
+		t.Fatalf("CheckPlaintextTTL old file error = %v, want pending_cleanup", err)
+	}
+
+	// Cleanup with verified claim.
+	identity, err := CaptureRootIdentity(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := CleanupClaim{
+		ID:           "claim-1",
+		Root:         root,
+		RootIdentity: identity,
+		ExpiresAt:    time.Now().Add(1 * time.Hour),
+		Signature:    "valid-claim-sig",
+	}
+	intent := CleanupIntent{
+		Root:           root,
+		RootIdentity:   identity,
+		TransactionIDs: []string{"tx-1"},
+		PlaintextPaths: []string{".restore-staging/test.tmp"},
+		ExpiresAt:      time.Now().Add(1 * time.Hour),
+	}
+	cleanupVerifier := &testCleanupVerifier{}
+	if err := CleanupPlaintextWithClaim(context.Background(), intent, claim, cleanupVerifier); err != nil {
+		t.Fatalf("CleanupPlaintextWithClaim: %v", err)
+	}
+	if _, err := os.Lstat(stagedFile); !os.IsNotExist(err) {
+		t.Fatalf("staged file still exists after verified cleanup: %v", err)
+	}
+}
+
+func TestWorkstationAndOCIArtifactFixtures(t *testing.T) {
+	// Tests fixtures for Claude, Codex, OpenCode, VS Code Insiders, CurseForge, and OCI artifacts.
+	categories := []struct {
+		name         string
+		relativePath string
+		restoreSetID string
+		component    string
+		keyRef       string
+		payload      []byte
+	}{
+		{
+			name:         "Claude config and session state",
+			relativePath: "claude/config.json",
+			restoreSetID: "claude-set-1",
+			component:    "config",
+			keyRef:       "claude-key",
+			payload:      []byte(`{"user":"n24q02m","auth":{"token":"redacted"}}`),
+		},
+		{
+			name:         "Codex persistent session state",
+			relativePath: "codex/sessions/2026-08-29.jsonl",
+			restoreSetID: "codex-set-1",
+			component:    "session",
+			keyRef:       "codex-key",
+			payload:      []byte(`{"event":"step","tool":"execute"}`),
+		},
+		{
+			name:         "OpenCode worker state",
+			relativePath: "opencode/db.sqlite",
+			restoreSetID: "opencode-set-1",
+			component:    "db",
+			keyRef:       "opencode-key",
+			payload:      []byte(`SQLite format 3...binary payload`),
+		},
+		{
+			name:         "VS Code Insiders state",
+			relativePath: "vscode-insiders/settings.json",
+			restoreSetID: "vscode-set-1",
+			component:    "settings",
+			keyRef:       "vscode-key",
+			payload:      []byte(`{"editor.tabSize": 4}`),
+		},
+		{
+			name:         "CurseForge Minecraft modpack data",
+			relativePath: "minecraft/saves/world1/level.dat",
+			restoreSetID: "minecraft-set-1",
+			component:    "save",
+			keyRef:       "minecraft-key",
+			payload:      []byte(`NBT-level-data-payload`),
+		},
+		{
+			name:         "OCI combined stack database dump",
+			relativePath: "oci/dumps/postgres.sql",
+			restoreSetID: "oci-stack-set-1",
+			component:    "database",
+			keyRef:       "oci-db-key",
+			payload:      []byte(`-- PostgreSQL database dump...`),
+		},
+	}
+
+	root := t.TempDir()
+	resolver := make(testArtifactResolver)
+	provider := &testSourceProvider{artifacts: make(map[string][]byte)}
+	entries := make([]Entry, 0, len(categories))
+
+	for i, c := range categories {
+		meta := artifactcrypto.Metadata{
+			RestoreSetID: c.restoreSetID,
+			Component:    c.component,
+			KeyRef:       c.keyRef,
+			KeyVersion:   uint64(i + 1),
+		}
+		key := []byte(fmt.Sprintf("%-32.32s", "key-"+c.component))
+		resolver[meta.Reference()] = key
+		ref := SourceReference{
+			Provider:  "r2",
+			AccountID: "oci-account",
+			ObjectID:  fmt.Sprintf("obj-%s", c.component),
+			Version:   "v1",
+		}
+		entry := sealedProviderEntry(t, c.relativePath, c.payload, meta, resolver, provider, ref)
+		entries = append(entries, entry)
+	}
+
+	plan, err := BuildPlan(root, entries)
+	if err != nil {
+		t.Fatalf("BuildPlan fixtures: %v", err)
+	}
+	if plan.TotalObjects != len(categories) {
+		t.Fatalf("TotalObjects = %d, want %d", plan.TotalObjects, len(categories))
+	}
+
+	for _, entry := range entries {
+		if err := StageFileWithProvider(context.Background(), plan, entry, resolver, &testStagingVerifier{}, provider); err != nil {
+			t.Fatalf("StageFileWithProvider fixture %q: %v", entry.RelativePath, err)
+		}
+	}
+
+	// Verify all staged contents.
+	for _, c := range categories {
+		dest := filepath.Join(root, filepath.FromSlash(c.relativePath))
+		got, err := os.ReadFile(dest)
+		if err != nil || !bytes.Equal(got, c.payload) {
+			t.Fatalf("fixture %q data mismatch: got %q, want %q, err=%v", c.name, got, c.payload, err)
+		}
+	}
+}
+
+func TestSwapRaceRefusalBeforeRename(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	outsideFile := filepath.Join(outside, "secret.txt")
+	if err := os.WriteFile(outsideFile, []byte("outside-secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	metadata := artifactcrypto.Metadata{RestoreSetID: "set-race", Component: "state", KeyRef: "drive-state", KeyVersion: 7}
+	resolver := testArtifactResolver{metadata.Reference(): []byte("0123456789abcdef0123456789abcdef")}
+	entry := sealedEntry(t, "sub/state.txt", []byte("staged-data"), metadata, resolver)
+	plan, err := BuildPlan(root, []Entry{entry})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// If sub is replaced by a symlink before StageFile rename:
+	subDir := filepath.Join(root, "sub")
+	if err := os.Symlink(outside, subDir); err != nil {
+		t.Skipf("symlink unavailable: %v", err)
+	}
+
+	if err := StageFile(plan, entry, resolver, &testStagingVerifier{}); err == nil || !strings.Contains(err.Error(), "symlink") {
+		t.Fatalf("StageFile accepted symlink swap race: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "state.txt")); !os.IsNotExist(err) {
+		t.Fatal("StageFile escaped root and wrote outside via symlink race")
 	}
 }
 
@@ -461,6 +787,7 @@ func TestStageFileRejectsRootIdentityDrift(t *testing.T) {
 		t.Fatalf("root-drift destination exists: %v", err)
 	}
 }
+
 func TestTrustedSystemSymlinkPolicyIsNarrowAndDarwinOnly(t *testing.T) {
 	tests := []struct {
 		name string

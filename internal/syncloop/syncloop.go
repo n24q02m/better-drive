@@ -52,6 +52,8 @@ type Loop struct {
 	replicas     []engine.ReplicaSpec
 	baselines    map[string]bool
 	ignore       IgnoreFunc
+	history      engine.HistoryStore
+	concurrency  engine.ConcurrencyConfig
 	mu           sync.Mutex
 	state        State
 	paused       bool
@@ -188,6 +190,22 @@ func (l *Loop) LastReplicaSummary() engine.ReplicaSummary {
 	return summary
 }
 
+// SetHistoryStore injects a per-cycle history persistence sink. If not set,
+// history is discarded through NopHistoryStore. The engine never mints its own
+// store.
+func (l *Loop) SetHistoryStore(h engine.HistoryStore) {
+	l.mu.Lock()
+	l.history = h
+	l.mu.Unlock()
+}
+
+// SetConcurrency configures bounded parallelism across replicas for this loop.
+func (l *Loop) SetConcurrency(c engine.ConcurrencyConfig) {
+	l.mu.Lock()
+	l.concurrency = c
+	l.mu.Unlock()
+}
+
 // SetExecution opts subsequent cycles into context-aware execution with live
 // rclone stderr. The one-shot CLI uses it for cancellation and progress; the
 // continuous daemon leaves both values unset and retains captured execution.
@@ -239,6 +257,8 @@ func (l *Loop) runOnce() (err error) {
 	dryRun := l.dryRun
 	execContext := l.execContext
 	stderr := l.stderr
+	history := l.history
+	concurrency := l.concurrency
 	l.mu.Unlock()
 
 	var resultOnce sync.Once
@@ -271,6 +291,7 @@ func (l *Loop) runOnce() (err error) {
 		}
 	}()
 
+	startedAt := time.Now().UTC()
 	l.setState(StateSyncing)
 	var filters []string
 	filters, err = l.ignore()
@@ -281,14 +302,54 @@ func (l *Loop) runOnce() (err error) {
 	}
 	var summary engine.ReplicaSummary
 	if err == nil {
-		summary, err = engine.ExecuteReplicas(l.s, engine.TransferSpec{
+		transferSpec := engine.TransferSpec{
 			Local: l.path1, Mode: l.mode, Direction: l.direction, DryRun: dryRun,
 			Filters: filters, Context: execContext, Stderr: stderr,
 			SourceWasNonEmpty: sourceWasNonEmpty, SourceObjectCount: sourceObjectCount,
 			Replicas: replicas,
+		}
+		if concurrency.MaxConcurrent > 0 {
+			summary, err = engine.ExecuteReplicasConcurrent(l.s, transferSpec, concurrency)
+		} else {
+			summary, err = engine.ExecuteReplicas(l.s, transferSpec)
+		}
+	}
+	endedAt := time.Now().UTC()
+	if history != nil {
+		status := engine.CycleOK
+		if err != nil {
+			if execContext != nil && execContext.Err() != nil {
+				status = engine.CycleCancelled
+			} else {
+				status = engine.CycleFailed
+			}
+		} else if summary.Status == engine.CycleDegraded {
+			status = engine.CycleDegraded
+		}
+		records := make([]engine.ReplicaRecord, 0, len(summary.Outcomes))
+		for _, outcome := range summary.Outcomes {
+			rec := engine.ReplicaRecord{ID: outcome.ID, Target: outcome.Target, Required: outcome.Required, Status: outcome.Status}
+			if outcome.Err != nil {
+				rec.Error = outcome.Err.Error()
+			}
+			records = append(records, rec)
+		}
+		var acks []engine.RestoreSetAck
+		for _, replica := range replicas {
+			acks = append(acks, replica.RestoreAcks...)
+		}
+		_ = history.Append(engine.CycleRecord{
+			RunID:         fmt.Sprintf("run-%s-%s", l.path1, startedAt.Format("20060102T150405.000000000Z")),
+			JobID:         l.path1,
+			Mode:          l.mode,
+			Direction:     l.direction,
+			StartedAt:     startedAt,
+			EndedAt:       endedAt,
+			Status:        status,
+			Replicas:      records,
+			RestoreAcks:   acks,
 		})
 	}
-
 	l.mu.Lock()
 	l.running = false
 	l.lastSummary = summary

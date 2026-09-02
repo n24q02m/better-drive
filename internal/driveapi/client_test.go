@@ -2,25 +2,21 @@ package driveapi
 
 import (
 	"context"
-	"github.com/n24q02m/better-drive/internal/cleanup"
 	"strings"
 	"testing"
-	"time"
 )
 
 type fakeProvider struct {
-	listCalls     int
-	mutationCalls int
+	listCalls int
+	page      Page
 }
 
-func (f *fakeProvider) List(_ context.Context, _, _, _ string) (Page, error) {
+func (f *fakeProvider) List(_ context.Context, _, parentID, _ string) (Page, error) {
 	f.listCalls++
-	return Page{Cursor: "cursor-1", Complete: true, Objects: []cleanup.Object{{ID: "object-1"}}}, nil
-}
-
-func (f *fakeProvider) Mutate(_ context.Context, request MutationRequest) (MutationResult, error) {
-	f.mutationCalls++
-	return MutationResult{ProviderID: request.ObjectID, ObjectID: request.ObjectID, AccountID: request.AccountID, RootID: request.RootID, Namespace: request.Namespace, ParentID: request.ParentID, ETag: request.ExpectedETag, Version: request.Version, Generation: request.Generation, Size: request.Size, Hash: request.Hash, RequestID: request.RequestID, State: "quarantined"}, nil
+	if f.page.Cursor == "" {
+		f.page = Page{Cursor: "cursor-1", Complete: true, ParentID: parentID}
+	}
+	return f.page, nil
 }
 
 func TestClientListsReadOnlyPages(t *testing.T) {
@@ -30,31 +26,23 @@ func TestClientListsReadOnlyPages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("List() error = %v", err)
 	}
-	if !page.Complete || provider.listCalls != 1 {
-		t.Fatalf("unexpected page: %+v", page)
-	}
-	if provider.mutationCalls != 0 {
-		t.Fatal("List unexpectedly mutated provider")
+	if !page.Complete || page.ParentID != "root-1" || provider.listCalls != 1 {
+		t.Fatalf("unexpected page: %+v calls=%d", page, provider.listCalls)
 	}
 }
 
-func TestClientMutationRequiresCapabilityAndPerformsOneCall(t *testing.T) {
-	provider := &fakeProvider{}
+func TestClientRejectsUnboundProviderParentReadback(t *testing.T) {
+	provider := &fakeProvider{page: Page{Cursor: "cursor-1", Complete: true}}
 	client := NewClient(provider)
-	client.Now = func() time.Time { return time.Unix(100, 0).UTC() }
-	request, capability := driveMutationFixture()
-	request.Capability = MutationCapability{}
-	if _, err := client.Mutate(context.Background(), request); err == nil || !strings.Contains(err.Error(), "capability") {
-		t.Fatalf("expected typed-capability rejection, got %v", err)
+	if _, err := client.List(context.Background(), "account-1", "root-1", ""); err == nil || !strings.Contains(err.Error(), "parent ID") {
+		t.Fatalf("missing parent readback error = %v", err)
 	}
-	request.Capability = capability
-	if _, err := client.Mutate(context.Background(), request); err != nil {
-		t.Fatalf("Mutate() error = %v", err)
-	}
-	if provider.mutationCalls != 1 {
-		t.Fatalf("mutation calls = %d, want 1", provider.mutationCalls)
-	}
-	if _, err := client.Mutate(context.Background(), request); err == nil || !strings.Contains(err.Error(), "replay") {
-		t.Fatalf("expected request replay rejection, got %v", err)
+}
+
+func TestClientRejectsMismatchedProviderParentReadback(t *testing.T) {
+	provider := &fakeProvider{page: Page{Cursor: "cursor-1", Complete: true, ParentID: "other-root"}}
+	client := NewClient(provider)
+	if _, err := client.List(context.Background(), "account-1", "root-1", ""); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched parent readback error = %v", err)
 	}
 }

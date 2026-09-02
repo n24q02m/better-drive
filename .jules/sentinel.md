@@ -31,3 +31,8 @@
 **Vulnerability:** Path traversal (CWE-22) in `os.ReadFile` usage in `ReadState`.
 **Learning:** When using Go 1.24+ `os.OpenRoot` to fix path traversal, the root directory must be a known, trusted, and strictly bounded path (e.g., `store.Root` or a fixed application directory). Deriving the root directory directly from an untrusted, user-provided path (e.g., via `filepath.Dir(path)`) provides zero protection against traversal, as the attacker still controls the evaluation of the root directory itself.
 **Prevention:** Always identify the logical "root" boundary that untrusted paths should not escape, pass *that* trusted boundary to `os.OpenRoot`, and then pass the untrusted remainder to `root.Open()`.
+
+## 2026-08-25 - Prevent Path Traversal in Cleanup Journals
+**Vulnerability:** `internal/cleanup/journal.go` used `os.Open` and `os.OpenFile` which could be vulnerable to path traversal via symlinks or crafted path strings.
+**Learning:** `os.OpenRoot` scopes the path correctly to its expected base directory.
+**Prevention:** Use Go 1.24+ `os.OpenRoot` when dealing with potentially user-controlled file paths, even for journals or local configuration paths.

@@ -915,3 +915,39 @@ func TestNewWithReplicasPreservesOptionalFailureAsDegraded(t *testing.T) {
 		t.Fatalf("copy calls = %#v, want both replicas attempted", f.copies)
 	}
 }
+
+func TestSyncloopRecordsHistoryForCompletedCycle(t *testing.T) {
+	store := &engine.MemoryHistoryStore{}
+	f := &fakeSyncer{}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{
+		{ID: "r1", Target: "gdrive:required", Required: true, Workdir: "wd/1"},
+		{ID: "r2", Target: "r2:optional", Required: false, Workdir: "wd/2"},
+	}, "copy", "push", func() ([]string, error) { return nil, nil })
+	l.SetHistoryStore(store)
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	records := store.Records()
+	if len(records) != 1 {
+		t.Fatalf("records = %d, want 1", len(records))
+	}
+	rec := records[0]
+	if rec.Status != engine.CycleOK || len(rec.Replicas) != 2 || rec.Replicas[0].ID != "r1" || rec.Replicas[1].ID != "r2" {
+		t.Fatalf("recorded cycle = %#v", rec)
+	}
+}
+
+func TestSyncloopExecutesWithConfiguredConcurrency(t *testing.T) {
+	f := &fakeSyncer{}
+	l := NewWithReplicas(f, "C:/source", []engine.ReplicaSpec{
+		{ID: "r1", Target: "gdrive:required", Required: true, Workdir: "wd/1"},
+		{ID: "r2", Target: "r2:optional", Required: false, Workdir: "wd/2"},
+	}, "copy", "push", func() ([]string, error) { return nil, nil })
+	l.SetConcurrency(engine.ConcurrencyConfig{MaxConcurrent: 2})
+	if err := l.RunOnce(); err != nil {
+		t.Fatalf("RunOnce: %v", err)
+	}
+	if len(f.copyCalls) != 2 {
+		t.Fatalf("copyCalls = %d, want 2", len(f.copyCalls))
+	}
+}

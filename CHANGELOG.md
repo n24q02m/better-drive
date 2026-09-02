@@ -2,6 +2,51 @@
 
 <!-- version list -->
 
+## v1.8.0 (2026-08-29)
+
+### Bug Fixes
+
+- Harden artifact crypto streaming error and spool boundaries
+  ([`7e76813`](https://github.com/n24q02m/better-drive/commit/7e7681385d72f37ca202599115d2311b7e35a08c))
+
+- Harden Drive inventory authority boundary
+  ([`b9d626e`](https://github.com/n24q02m/better-drive/commit/b9d626e11dcd135f23134a7dba55818a83e4fb66))
+
+- Prove artifact spool ownership on Unix
+  ([`b6630d4`](https://github.com/n24q02m/better-drive/commit/b6630d4d98370b90a26d2657e24c43d4fffac1a6))
+
+- Secure artifact spools on Windows
+  ([`51a269c`](https://github.com/n24q02m/better-drive/commit/51a269c4e1556e5c5b21f1950037562569c18f84))
+
+- Validate artifact spool security by handle
+  ([`88db173`](https://github.com/n24q02m/better-drive/commit/88db1736edf45ede6c66b2b5143bac4597670c73))
+
+- **integration**: Wire artifact CLI and harden restore and history boundaries
+  ([`bc5895d`](https://github.com/n24q02m/better-drive/commit/bc5895d30707451352c7976526194893df46e2b4))
+
+### Chores
+
+- Format safety changes
+  ([`6101688`](https://github.com/n24q02m/better-drive/commit/6101688623ca65330a56d6107de3857bba1c8882))
+
+### Features
+
+- Add versioned run and cycle history stores with fail-closed scheduler evidence
+  ([`c944673`](https://github.com/n24q02m/better-drive/commit/c944673711194b4562bd036dd98a2f1e3c33647c))
+
+- Implement Git-backed approval store and quarantine mutations
+  ([`dd03e02`](https://github.com/n24q02m/better-drive/commit/dd03e021479cb20ea3d0b84c3f601caab75abea0))
+
+- Stream artifact crypto through secure spools
+  ([`e41caa4`](https://github.com/n24q02m/better-drive/commit/e41caa4e49276963b4b5e5176817050d502f41f5))
+
+- **restore**: Implement typed provider and checkpointed restore
+  ([`4200dbc`](https://github.com/n24q02m/better-drive/commit/4200dbc4c6a7d8e36b1f586fd8e9f6ab5141a360))
+
+- **sync**: Add cycle history and bounded replica concurrency
+  ([`6c86d26`](https://github.com/n24q02m/better-drive/commit/6c86d2659bfca5e83cb66bee58527bea8e8f4352))
+
+
 ## v1.7.0 (2026-08-25)
 
 ### Bug Fixes

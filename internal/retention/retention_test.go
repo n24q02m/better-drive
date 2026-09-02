@@ -7,7 +7,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/n24q02m/better-drive/internal/driveapi"
 	"github.com/n24q02m/better-drive/internal/r2api"
 )
 
@@ -303,7 +302,7 @@ func TestDriveDeletePolicyDefaultsToNoOp(t *testing.T) {
 	}
 }
 
-func TestDriveQuarantinePlanningFailsClosedWithoutInjectedCapability(t *testing.T) {
+func TestDriveQuarantinePlanningEmitsNonAuthoritativeIntent(t *testing.T) {
 	now := time.Unix(100, 0).UTC()
 	inventory := retentionInventory(now)
 	for index := range inventory.Objects {
@@ -311,8 +310,16 @@ func TestDriveQuarantinePlanningFailsClosedWithoutInjectedCapability(t *testing.
 	}
 	setRestoreProvider(&inventory, ProviderDrive)
 	policy := Policy{ID: "drive-quarantine", Provider: ProviderDrive, DeletePolicy: DeletePolicyQuarantine, MinCompleteRestoreSets: 2, MaxObjects: 10, MaxBytes: 100, MinimumObjectAge: time.Hour, QuarantineBucket: "quarantine", ActivatedAt: time.Unix(99, 0).UTC()}
-	if _, err := PlanRetention(policy, inventory, ownerMarker(), now); err == nil || !strings.Contains(strings.ToLower(err.Error()), "capability") {
-		t.Fatalf("Drive quarantine plan error = %v, want fail-closed capability rejection", err)
+	plan, err := PlanRetention(policy, inventory, ownerMarker(), now)
+	if err != nil {
+		t.Fatalf("Drive quarantine PlanRetention() error = %v", err)
+	}
+	if len(plan.Actions) != len(inventory.Objects) || plan.Actions[0].Kind != ActionDriveQuarantineIntent || plan.Actions[0].DriveIntent == nil {
+		t.Fatalf("Drive quarantine plan = %+v, want intent-only actions", plan)
+	}
+	engine := NewEngine(nil, NewJournal())
+	if _, err := engine.Apply(context.Background(), plan, policy); err == nil || !strings.Contains(err.Error(), "protected provider broker") {
+		t.Fatalf("Drive quarantine Apply() error = %v, want fail-closed broker rejection", err)
 	}
 }
 
@@ -327,7 +334,7 @@ func TestEngineRetainsLeaseOnUnknownSettlementAndNeverRetriesAmbiguous(t *testin
 	plan.Actions = plan.Actions[:1]
 	plan.Actions[0].R2CopyCapability = r2api.NewCopyCapability(plan.Actions[0].R2Copy.Source, plan.Actions[0].R2Copy.Destination, plan.Actions[0].RequestID, now.Add(time.Hour), "signed")
 	provider := &fakeRetentionProvider{unknownCopy: true}
-	engine := NewEngine(provider, provider, NewJournal())
+	engine := NewEngine(provider, NewJournal())
 	engine.Now = func() time.Time { return now }
 	if _, err := engine.Apply(context.Background(), plan, policy); !errors.Is(err, ErrUnknownSettlement) {
 		t.Fatalf("unknown settlement error = %v", err)
@@ -356,7 +363,7 @@ func TestEngineClassifiesOptionalFailureAndRejectsPolicyActivationDrift(t *testi
 	plan.Actions = plan.Actions[:1]
 	plan.Actions[0].R2CopyCapability = r2api.NewCopyCapability(plan.Actions[0].R2Copy.Source, plan.Actions[0].R2Copy.Destination, plan.Actions[0].RequestID, now.Add(time.Hour), "signed")
 	provider := &fakeRetentionProvider{copyErr: errors.New("optional unavailable")}
-	engine := NewEngine(provider, provider, NewJournal())
+	engine := NewEngine(provider, NewJournal())
 	engine.Now = func() time.Time { return now }
 	report, err := engine.Apply(context.Background(), plan, policy)
 	if err != nil || len(report.OptionalFailures) != 1 {
@@ -384,7 +391,7 @@ func TestEngineDoesNotSwallowUnknownOrOptionalJournalAppendErrors(t *testing.T) 
 	provider := &fakeRetentionProvider{unknownCopy: true}
 	journal := NewJournal()
 	journal.appendHook = func(JournalRecord) error { return journalErr }
-	engine := NewEngine(provider, provider, journal)
+	engine := NewEngine(provider, journal)
 	engine.Now = func() time.Time { return now }
 	if _, err := engine.Apply(context.Background(), plan, policy); err == nil || !errors.Is(err, ErrUnknownSettlement) || !errors.Is(err, journalErr) {
 		t.Fatalf("unknown journal append error = %v, want combined provider and append failure", err)
@@ -400,7 +407,7 @@ func TestEngineDoesNotSwallowUnknownOrOptionalJournalAppendErrors(t *testing.T) 
 	provider = &fakeRetentionProvider{copyErr: optionalErr}
 	journal = NewJournal()
 	journal.appendHook = func(JournalRecord) error { return journalErr }
-	engine = NewEngine(provider, provider, journal)
+	engine = NewEngine(provider, journal)
 	engine.Now = func() time.Time { return now }
 	plan.Actions[0].Optional = true
 	if _, err := engine.Apply(context.Background(), plan, policy); err == nil || !errors.Is(err, optionalErr) || !errors.Is(err, journalErr) {
@@ -423,7 +430,7 @@ func TestEngineJournalLookupBindsPlanPolicyAndQuarantineTarget(t *testing.T) {
 	planOne.Actions[0].R2CopyCapability = r2api.NewCopyCapability(planOne.Actions[0].R2Copy.Source, planOne.Actions[0].R2Copy.Destination, planOne.Actions[0].RequestID, now.Add(time.Hour), "signed")
 	provider := &fakeRetentionProvider{}
 	journal := NewJournal()
-	engine := NewEngine(provider, provider, journal)
+	engine := NewEngine(provider, journal)
 	engine.Now = func() time.Time { return now }
 	if _, err := engine.Apply(context.Background(), planOne, policyOne); err != nil {
 		t.Fatalf("first plan Apply() error = %v", err)
@@ -441,7 +448,7 @@ func TestEngineJournalLookupBindsPlanPolicyAndQuarantineTarget(t *testing.T) {
 	if planOne.ID == planTwo.ID || planOne.Actions[0].ID == planTwo.Actions[0].ID || planOne.Actions[0].RequestID == planTwo.Actions[0].RequestID {
 		t.Fatalf("cross-plan action identity collision: plan1=%+v plan2=%+v", planOne.Actions[0], planTwo.Actions[0])
 	}
-	secondEngine := NewEngine(provider, provider, journal)
+	secondEngine := NewEngine(provider, journal)
 	secondEngine.Now = func() time.Time { return now }
 	if _, err := secondEngine.Apply(context.Background(), planTwo, policyTwo); err != nil {
 		t.Fatalf("second plan Apply() error = %v", err)
@@ -491,8 +498,4 @@ func (provider *fakeRetentionProvider) Delete(context.Context, r2api.DeleteReque
 
 func (provider *fakeRetentionProvider) Purge(context.Context, r2api.PurgeRequest, r2api.PurgeCapability) (r2api.MutationReceipt, error) {
 	return r2api.MutationReceipt{}, nil
-}
-
-func (provider *fakeRetentionProvider) Mutate(_ context.Context, request driveapi.MutationRequest) (driveapi.MutationResult, error) {
-	return driveapi.MutationResult{ProviderID: request.ObjectID, ObjectID: request.ObjectID, AccountID: request.AccountID, RootID: request.RootID, Namespace: request.Namespace, ParentID: request.ParentID, ETag: request.ExpectedETag, Version: request.Version, Generation: request.Generation, Size: request.Size, Hash: request.Hash, RequestID: request.RequestID, State: "quarantined"}, nil
 }
