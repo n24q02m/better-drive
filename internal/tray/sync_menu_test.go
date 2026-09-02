@@ -10,35 +10,35 @@ import (
 )
 
 func TestSyncMenuStatePausedDisablesWithReason(t *testing.T) {
-	enabled, title, tooltip := syncMenuState(AggregateState{State: syncloop.StatePaused})
+	enabled, tooltip := syncMenuState(AggregateState{State: syncloop.StatePaused})
 	if enabled {
 		t.Fatal("paused sync action is enabled")
 	}
-	if !strings.Contains(title, "Cannot sync while paused") || tooltip != "Cannot sync while paused" {
-		t.Fatalf("paused sync title=%q tooltip=%q", title, tooltip)
+	if tooltip != "Cannot sync while paused" {
+		t.Fatalf("paused sync tooltip = %q, want %q", tooltip, "Cannot sync while paused")
 	}
 }
 
 func TestSyncMenuMixedErrorAndNeedsResyncDisables(t *testing.T) {
-	enabled, title, tooltip := syncMenuState(AggregateState{
+	enabled, tooltip := syncMenuState(AggregateState{
 		State:       syncloop.StateError,
 		NeedsResync: true,
 	})
 	if enabled {
 		t.Fatal("sync action is enabled while one pair needs resync")
 	}
-	if !strings.Contains(title, "--resync") || tooltip != "Run better-drive sync --resync to rebuild the bisync baseline" {
-		t.Fatalf("needs-resync title=%q tooltip=%q", title, tooltip)
+	if tooltip != "Run better-drive sync --resync to rebuild the bisync baseline" {
+		t.Fatalf("needs-resync tooltip = %q", tooltip)
 	}
 }
 
 func TestSyncMenuRegularErrorRemainsEnabledForRetry(t *testing.T) {
-	enabled, title, tooltip := syncMenuState(AggregateState{State: syncloop.StateError})
+	enabled, tooltip := syncMenuState(AggregateState{State: syncloop.StateError})
 	if !enabled {
 		t.Fatal("ordinary error disabled Sync now and changed retry semantics")
 	}
-	if title != "Sync now" || tooltip != "Trigger a sync immediately for all pairs" {
-		t.Fatalf("ordinary error title=%q tooltip=%q", title, tooltip)
+	if tooltip != "Trigger a sync immediately for all pairs" {
+		t.Fatalf("ordinary error tooltip = %q", tooltip)
 	}
 }
 
@@ -50,7 +50,7 @@ func TestPauseMenuNeedsResyncCannotMaskRecoveryState(t *testing.T) {
 	if enabled {
 		t.Fatal("Pause is enabled while a pair needs resync")
 	}
-	if !strings.Contains(title, "--resync") || !strings.Contains(tooltip, "better-drive sync --resync") {
+	if title != "Pause" || !strings.Contains(tooltip, "better-drive sync --resync") {
 		t.Fatalf("pause menu = enabled:%v title:%q tooltip:%q", enabled, title, tooltip)
 	}
 }
