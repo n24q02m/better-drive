@@ -339,15 +339,15 @@ func (l *Loop) runOnce() (err error) {
 			acks = append(acks, replica.RestoreAcks...)
 		}
 		_ = history.Append(engine.CycleRecord{
-			RunID:       fmt.Sprintf("run-%s-%s", l.path1, startedAt.Format("20060102T150405.000000000Z")),
-			JobID:       l.path1,
-			Mode:        l.mode,
-			Direction:   l.direction,
-			StartedAt:   startedAt,
-			EndedAt:     endedAt,
-			Status:      status,
-			Replicas:    records,
-			RestoreAcks: acks,
+			RunID:         fmt.Sprintf("run-%s-%s", l.path1, startedAt.Format("20060102T150405.000000000Z")),
+			JobID:         l.path1,
+			Mode:          l.mode,
+			Direction:     l.direction,
+			StartedAt:     startedAt,
+			EndedAt:       endedAt,
+			Status:        status,
+			Replicas:      records,
+			RestoreAcks:   acks,
 		})
 	}
 	l.mu.Lock()

@@ -18,3 +18,7 @@
 ## 2024-08-31 - Disabled menu item titles
 **Learning:** Menu item tooltips do not reliably render on macOS/Windows. To explain disabled states, the explanation should be appended to the menu item's title instead of relying solely on tooltips.
 **Action:** When disabling a contextual menu item due to a broken or error state, append the disabled reason (e.g., "(run sync --resync)") to the menu item's title.
+
+## 2024-08-31 - Rejection: Disabled menu item titles
+**Learning:** Adding disabled reasons directly into menu item text strings was rejected.
+**Action:** When a PR is rejected for a UX change, revert the changes, document the learning here, and push the journal update to complete the task.

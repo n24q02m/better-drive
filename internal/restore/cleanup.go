@@ -11,11 +11,11 @@ import (
 
 // CleanupIntent describes the exact rollback/staging data that a cleanup claim must authorize.
 type CleanupIntent struct {
-	Root           string       `json:"root"`
-	RootIdentity   RootIdentity `json:"root_identity"`
-	TransactionIDs []string     `json:"transaction_ids"`
+	Root         string       `json:"root"`
+	RootIdentity RootIdentity `json:"root_identity"`
+	TransactionIDs []string   `json:"transaction_ids"`
 	// PlaintextPaths are the exact relative paths whose plaintext remains until cleanup.
-	PlaintextPaths []string  `json:"plaintext_paths"`
+	PlaintextPaths []string `json:"plaintext_paths"`
 	CreatedAt      time.Time `json:"created_at"`
 	ExpiresAt      time.Time `json:"expires_at"`
 }
