@@ -18,3 +18,7 @@
 ## 2024-08-27 - Explicitly disable unsupported platform actions
 **Learning:** Having actionable menu items (like "Open folder") that are visible but silently fail on unsupported platforms (like non-Windows systems) causes user confusion. It is better UX to explicitly disable the action and explain why via the tooltip rather than letting it silently ignore the click.
 **Action:** Always explicitly disable UI elements that are not supported on the current platform and update their tooltip to explain the platform constraint to prevent silent failures and user confusion.
+
+## 2024-08-27 - PR Rejected: Noise
+**Learning:** PRs that are purely bot-generated and don't provide actionable improvements may be closed as noise.
+**Action:** When a PR is closed as noise, acknowledge it, revert the working tree changes, log the learning, and resubmit to push the updated journal on the same branch.
