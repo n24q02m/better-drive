@@ -8,22 +8,22 @@ import (
 	"github.com/n24q02m/better-drive/internal/syncloop"
 )
 
-func syncMenuState(aggregate AggregateState) (enabled bool, tooltip string) {
+func syncMenuState(aggregate AggregateState) (enabled bool, title, tooltip string) {
 	switch {
 	case aggregate.State == syncloop.StateSyncing:
-		return false, "Sync is currently in progress"
+		return false, "Sync now (sync in progress)", "Sync is currently in progress"
 	case aggregate.NeedsResync:
-		return false, "Run better-drive sync --resync to rebuild the bisync baseline"
+		return false, "Sync now (run better-drive sync --resync)", "Run better-drive sync --resync to rebuild the bisync baseline"
 	case aggregate.State == syncloop.StatePaused:
-		return false, "Cannot sync while paused"
+		return false, "Sync now (cannot sync while paused)", "Cannot sync while paused"
 	default:
-		return true, "Trigger a sync immediately for all pairs"
+		return true, "Sync now", "Trigger a sync immediately for all pairs"
 	}
 }
 
 func pauseMenuState(aggregate AggregateState) (enabled bool, title, tooltip string) {
 	if aggregate.NeedsResync {
-		return false, "Pause", "Run better-drive sync --resync before pausing"
+		return false, "Pause (run better-drive sync --resync)", "Run better-drive sync --resync before pausing"
 	}
 	if aggregate.State == syncloop.StatePaused {
 		return true, "Resume", "Resume scheduled syncs for all pairs"
