@@ -240,11 +240,20 @@ func validateSafeRef(ref string) error {
 		strings.ContainsAny(ref, " ~^:?*[]\\\x00\r\n\t") || strings.HasSuffix(ref, ".") {
 		return fmt.Errorf("ref %q contains characters Git cannot safely transact", ref)
 	}
-	parts := strings.Split(ref, "/")
-	for _, part := range parts {
+	// ⚡ Bolt: Use strings.Cut to avoid allocating a slice for ref parts
+	value := ref
+	for {
+		part, remainder, found := strings.Cut(value, "/")
+		if !found {
+			part = value
+		}
 		if part == "" || part == "." || part == ".." || strings.HasPrefix(part, ".") || strings.HasSuffix(part, ".lock") {
 			return fmt.Errorf("ref %q contains invalid component", ref)
 		}
+		if !found {
+			break
+		}
+		value = remainder
 	}
 	return nil
 }
