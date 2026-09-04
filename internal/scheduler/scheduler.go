@@ -2,12 +2,18 @@ package scheduler
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/n24q02m/better-drive/internal/state"
 )
@@ -48,6 +54,7 @@ type Readback struct {
 	OverlapHealth  string      `json:"overlap_health"`
 	LastTrigger    time.Time   `json:"last_trigger,omitempty"`
 	NextTrigger    time.Time   `json:"next_trigger,omitempty"`
+	RunCount       uint64      `json:"run_count,omitempty"`
 	ObservedAt     time.Time   `json:"observed_at"`
 	Health         string      `json:"health"`
 	Definition     *Definition `json:"definition,omitempty"`
@@ -62,10 +69,14 @@ var (
 	ErrReconciliationGate = errors.New("scheduler requires reconciliation before mutation")
 )
 
+const definitionMetadataPrefix = "better-drive-definition-v1:"
+
 type Adapter interface {
 	Platform() Platform
 	Install(ctx context.Context, def Definition, replace bool) error
 	Readback(ctx context.Context, jobID string) (Readback, error)
+	SetEnabled(ctx context.Context, jobID string, enabled bool) error
+	Run(ctx context.Context, jobID string) error
 	Remove(ctx context.Context, jobID string, force bool) error
 }
 
@@ -142,12 +153,11 @@ func (m *MemoryAdapter) Install(ctx context.Context, def Definition, replace boo
 	def.Generation = nextGen
 	m.definitions[jobKey] = def
 	m.generations[jobKey] = nextGen
-	m.enabled[jobKey] = true
+	m.enabled[jobKey] = false
 	m.overlapState[jobKey] = state.OverlapNone
 	m.reconcile[jobKey] = false
-	now := m.now().UTC()
-	m.lastTrigger[jobKey] = now
-	m.nextTrigger[jobKey] = now.Add(time.Duration(def.IntervalSeconds) * time.Second)
+	m.lastTrigger[jobKey] = time.Time{}
+	m.nextTrigger[jobKey] = time.Time{}
 	return nil
 }
 
@@ -219,6 +229,49 @@ func (m *MemoryAdapter) Readback(ctx context.Context, jobID string) (Readback, e
 	}, nil
 }
 
+func (m *MemoryAdapter) SetEnabled(ctx context.Context, jobID string, enabled bool) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	definition, exists := m.definitions[jobID]
+	if !exists {
+		return fmt.Errorf("scheduler job %q is not installed", jobID)
+	}
+	m.enabled[jobID] = enabled
+	if enabled {
+		m.nextTrigger[jobID] = m.now().UTC().Add(time.Duration(definition.IntervalSeconds) * time.Second)
+	} else {
+		m.nextTrigger[jobID] = time.Time{}
+		m.activeJobs[jobID] = ""
+		m.overlapState[jobID] = state.OverlapNone
+	}
+	return nil
+}
+
+func (m *MemoryAdapter) Run(ctx context.Context, jobID string) error {
+	if ctx != nil && ctx.Err() != nil {
+		return ctx.Err()
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	definition, exists := m.definitions[jobID]
+	if !exists {
+		return fmt.Errorf("scheduler job %q is not installed", jobID)
+	}
+	if !m.enabled[jobID] {
+		return fmt.Errorf("scheduler job %q is disabled", jobID)
+	}
+	if m.activeJobs[jobID] != "" {
+		return fmt.Errorf("%w: job %q currently has active instance %q", ErrOverlapConflict, jobID, m.activeJobs[jobID])
+	}
+	now := m.now().UTC()
+	m.lastTrigger[jobID] = now
+	m.nextTrigger[jobID] = now.Add(time.Duration(definition.IntervalSeconds) * time.Second)
+	return nil
+}
+
 func (m *MemoryAdapter) Remove(ctx context.Context, jobID string, force bool) error {
 	if ctx != nil && ctx.Err() != nil {
 		return ctx.Err()
@@ -278,6 +331,24 @@ func (d Definition) Validate() error {
 	if strings.TrimSpace(d.Owner) == "" {
 		return fmt.Errorf("scheduler owner is required")
 	}
+	for _, field := range []struct {
+		name  string
+		value string
+	}{
+		{name: "job_id", value: d.JobID},
+		{name: "executable", value: d.Executable},
+		{name: "config", value: d.Config},
+		{name: "owner", value: d.Owner},
+	} {
+		if strings.IndexFunc(field.value, unicode.IsControl) >= 0 {
+			return fmt.Errorf("scheduler %s contains control characters", field.name)
+		}
+	}
+	for _, argument := range d.Arguments {
+		if strings.IndexFunc(argument, unicode.IsControl) >= 0 {
+			return fmt.Errorf("scheduler argument contains control characters")
+		}
+	}
 	return nil
 }
 
@@ -323,59 +394,156 @@ func isAbsolutePath(value string) bool {
 }
 
 func commandLine(d Definition) string {
-	parts := []string{quote(d.Executable)}
+	parts := []string{quoteSystemd(d.Executable)}
 	for _, arg := range schedulerArguments(d) {
-		parts = append(parts, quote(arg))
+		parts = append(parts, quoteSystemd(arg))
 	}
 	return strings.Join(parts, " ")
 }
 
 func schedulerArguments(d Definition) []string {
-	args := append([]string(nil), d.Arguments...)
-	if len(args) == 0 {
-		return []string{"sync", "--format", "json", "--config", d.Config}
+	extras := make([]string, 0, len(d.Arguments))
+	for index := 0; index < len(d.Arguments); index++ {
+		arg := d.Arguments[index]
+		if arg == "sync" {
+			continue
+		}
+		managed := arg == "--job" || arg == "--format" || arg == "--config"
+		if managed {
+			if index+1 < len(d.Arguments) && !strings.HasPrefix(d.Arguments[index+1], "-") {
+				index++
+			}
+			continue
+		}
+		if strings.HasPrefix(arg, "--job=") ||
+			strings.HasPrefix(arg, "--format=") ||
+			strings.HasPrefix(arg, "--config=") {
+			continue
+		}
+		extras = append(extras, arg)
 	}
-	if !containsArgument(args, "sync") {
-		args = append([]string{"sync"}, args...)
-	}
-	if !containsFlagValue(args, "--format") {
-		args = append(args, "--format", "json")
-	}
-	if !containsFlagValue(args, "--config") {
-		args = append(args, "--config", d.Config)
-	}
-	return args
+
+	args := make([]string, 0, 7+len(extras))
+	args = append(args, "sync", "--job", d.JobID, "--format", "json", "--config", d.Config)
+	return append(args, extras...)
 }
 
-func containsArgument(args []string, want string) bool {
-	for _, arg := range args {
-		if arg == want {
-			return true
-		}
-	}
-	return false
+// ManagedName maps an arbitrary job ID to the fixed native scheduler identity
+// used on every supported platform. Job IDs never enter native selectors.
+func ManagedName(jobID string) string {
+	sum := sha256.Sum256([]byte(jobID))
+	return "better-drive-" + hex.EncodeToString(sum[:12])
 }
 
-func containsFlagValue(args []string, flag string) bool {
-	for i, arg := range args {
-		if arg == flag && i+1 < len(args) && strings.TrimSpace(args[i+1]) != "" && !strings.HasPrefix(args[i+1], "-") {
-			return true
-		}
-		if strings.HasPrefix(arg, flag+"=") && strings.TrimSpace(strings.TrimPrefix(arg, flag+"=")) != "" {
-			return true
-		}
+func darwinLabel(jobID string) string {
+	return "com.better-drive.LaunchAgent." + ManagedName(jobID)
+}
+func definitionMetadata(d Definition) string {
+	payload, err := json.Marshal(d)
+	if err != nil {
+		panic(fmt.Sprintf("marshal scheduler definition: %v", err))
 	}
-	return false
+	return definitionMetadataPrefix + base64.RawURLEncoding.EncodeToString(payload)
 }
 
-func quote(value string) string {
-	return `"` + strings.ReplaceAll(value, `"`, `\"`) + `"`
+func definitionFromMetadata(value string) (Definition, error) {
+	encoded, ok := strings.CutPrefix(strings.TrimSpace(value), definitionMetadataPrefix)
+	if !ok {
+		return Definition{}, errors.New("native scheduler definition is not owned by better-drive")
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return Definition{}, fmt.Errorf("decode scheduler definition metadata: %w", err)
+	}
+	var definition Definition
+	if err := json.Unmarshal(payload, &definition); err != nil {
+		return Definition{}, fmt.Errorf("parse scheduler definition metadata: %w", err)
+	}
+	if err := definition.Validate(); err != nil {
+		return Definition{}, fmt.Errorf("validate scheduler definition metadata: %w", err)
+	}
+	return definition, nil
+}
+
+func nextDefinition(current Readback, desired Definition, replace bool) (Definition, error) {
+	if err := desired.Validate(); err != nil {
+		return Definition{}, err
+	}
+	currentGeneration := uint64(0)
+	if current.Installed {
+		if strings.TrimSpace(current.Owner.Owner) == "" || strings.TrimSpace(current.Owner.JobID) == "" {
+			return Definition{}, fmt.Errorf("%w: native scheduler identity has no recoverable better-drive owner metadata", ErrOwnerMismatch)
+		} else if err := ValidateOwner(current.Owner, desired, replace); err != nil {
+			return Definition{}, err
+		}
+		currentGeneration = current.Owner.Generation
+	}
+	if desired.Generation == 0 {
+		desired.Generation = currentGeneration + 1
+	} else if desired.Generation <= currentGeneration {
+		return Definition{}, fmt.Errorf("scheduler generation %d must be > current %d", desired.Generation, currentGeneration)
+	}
+	return desired, nil
+}
+
+// MatchesDefinition verifies the semantic native readback after a mutation.
+// Generation is assigned by the adapter and therefore checked for presence,
+// not equality with a zero-valued desired generation.
+func MatchesDefinition(readback Readback, desired Definition) bool {
+	if !readback.Installed || readback.Definition == nil {
+		return false
+	}
+	actual := *readback.Definition
+	if actual.Generation == 0 || readback.Owner.Generation != actual.Generation {
+		return false
+	}
+	desired.Generation = actual.Generation
+	return actual.JobID == desired.JobID &&
+		actual.Executable == desired.Executable &&
+		actual.Config == desired.Config &&
+		slices.Equal(actual.Arguments, desired.Arguments) &&
+		actual.IntervalSeconds == desired.IntervalSeconds &&
+		actual.CatchUp == desired.CatchUp &&
+		actual.ExecutionLimitSeconds == desired.ExecutionLimitSeconds &&
+		actual.Owner == desired.Owner &&
+		readback.Owner.Owner == desired.Owner &&
+		readback.Owner.JobID == desired.JobID
+}
+
+func quoteSystemd(value string) string {
+	replacer := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `%`, `%%`)
+	return `"` + replacer.Replace(value) + `"`
+}
+
+func quoteWindows(value string) string {
+	var quoted strings.Builder
+	quoted.Grow(len(value) + 2)
+	quoted.WriteByte('"')
+	backslashes := 0
+	for _, character := range value {
+		if character == '\\' {
+			backslashes++
+			continue
+		}
+		if character == '"' {
+			quoted.WriteString(strings.Repeat(`\`, backslashes*2+1))
+			quoted.WriteRune(character)
+			backslashes = 0
+			continue
+		}
+		quoted.WriteString(strings.Repeat(`\`, backslashes))
+		backslashes = 0
+		quoted.WriteRune(character)
+	}
+	quoted.WriteString(strings.Repeat(`\`, backslashes*2))
+	quoted.WriteByte('"')
+	return quoted.String()
 }
 
 func quoteArgs(values []string) []string {
 	quoted := make([]string, 0, len(values))
 	for _, value := range values {
-		quoted = append(quoted, quote(value))
+		quoted = append(quoted, quoteWindows(value))
 	}
 	return quoted
 }

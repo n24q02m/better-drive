@@ -87,7 +87,7 @@ func newRootCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 		SilenceErrors: true,
 		SilenceUsage:  true,
 	}
-	root.AddCommand(accountCmd(), artifactCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmd(), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
+	root.AddCommand(accountCmd(), artifactCmd(), cleanupCmd(), configCmd(), restoreCmdWithDependencies(deps), scheduleCmdWithDependencies(deps), setupCmd(), runCmdWithDependencies(deps), statusCmd(), syncCmdWithDependencies(deps), mountCmd(), installCmd(), uninstallCmd())
 	root.InitDefaultCompletionCmd()
 	return root
 }
@@ -724,22 +724,23 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 	var dryRun bool
 	var resync bool
 	var configPath string
+	var jobID string
 	c := &cobra.Command{
 		Use:   "sync",
-		Short: "Run exactly one sync cycle for every configured pair, then exit (for a scheduled task)",
-		Long: "Run a single sync cycle for every pair in config.toml, then exit - no tray,\n" +
-			"no ticker. A pair whose local path does not exist is SKIPPED (not a\n" +
-			"failure). Successful pairs are reported on stdout; SKIPPED and FAILED\n" +
-			"pairs go to stderr. Use --config to select the enrolled config path,\n" +
-			"--format json for machine-readable output, and --dry-run to preview\n" +
-			"changes without applying them.\n\n" +
-			"--resync rebuilds the bisync baseline of every bisync-mode pair. It is\n" +
-			"the recovery path for a pair reporting that its baseline is missing or\n" +
-			"unusable. Use it only when that happens: a resync does NOT propagate\n" +
-			"deletions, so files deleted on one side since the baseline broke come\n" +
-			"back from the other. Combine it with --dry-run to preview first.",
+		Short: "Run exactly one sync cycle for all jobs or one exact --job, then exit",
+		Long: "Run a single sync cycle for every pair in config.toml, or only the exact\n" +
+			"job selected by --job, then exit - no tray, no ticker. A pair whose\n" +
+			"local path does not exist is SKIPPED (not a failure). Successful pairs\n" +
+			"are reported on stdout; SKIPPED and FAILED pairs go to stderr. Use\n" +
+			"--config to select the enrolled config path, --format json for\n" +
+			"machine-readable output, and --dry-run to preview changes without\n" +
+			"applying them.\n\n" +
+			"--resync rebuilds the bisync baseline of the selected bisync-mode\n" +
+			"job(s). Use it only when a baseline is missing or unusable: resync\n" +
+			"does not propagate deletions, so files deleted on one side since the\n" +
+			"baseline broke come back from the other.",
 		Example: "  better-drive sync\n" +
-			"  better-drive sync --config /etc/better-drive/config.toml\n" +
+			"  better-drive sync --job home-documents --config /etc/better-drive/config.toml\n" +
 			"  better-drive sync --dry-run\n" +
 			"  better-drive sync --resync\n" +
 			"  better-drive sync --format json",
@@ -757,6 +758,10 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 			cfg, err := loadExecutionConfigAt(activeConfigPath)
 			if err != nil {
 				return err
+			}
+			cfg, err = selectSyncJob(cfg, jobID)
+			if err != nil {
+				return exitcode.WithRemediation(exitcode.ConfigError(err), "list exact configured IDs with `better-drive status --format json`")
 			}
 			if err := deps.validateForConfig(cfg); err != nil {
 				return exitcode.WithRemediation(exitcode.ConfigError(err),
@@ -796,9 +801,25 @@ func syncCmdWithDependencies(deps RuntimeDependencies) *cobra.Command {
 	}
 	output.AddFormatFlag(c, &format)
 	c.Flags().StringVar(&configPath, "config", "", "read configuration from path (default: platform config directory)")
+	c.Flags().StringVar(&jobID, "job", "", "run only the configured job with this exact stable ID")
 	c.Flags().BoolVar(&dryRun, "dry-run", false, "show what would change without modifying anything")
-	c.Flags().BoolVar(&resync, "resync", false, "rebuild the bisync baseline of every bisync pair (recovery; does not propagate deletions)")
+	c.Flags().BoolVar(&resync, "resync", false, "rebuild the bisync baseline of each selected bisync pair (recovery; does not propagate deletions)")
 	return c
+}
+
+func selectSyncJob(cfg *config.Config, jobID string) (*config.Config, error) {
+	if cfg == nil || strings.TrimSpace(jobID) == "" {
+		return cfg, nil
+	}
+	for _, job := range cfg.Jobs {
+		if job.ID != jobID {
+			continue
+		}
+		selected := *cfg
+		selected.Jobs = []config.Job{job}
+		return &selected, nil
+	}
+	return nil, fmt.Errorf("configured job %q was not found", jobID)
 }
 
 // runSyncOnce builds one syncloop.Loop per configured pair (same workdir

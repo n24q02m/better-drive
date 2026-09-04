@@ -275,9 +275,9 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive account list\|add\|remove` | Inspect, create, or remove Drive accounts/remotes. |
 | `better-drive run` | Run every configured job continuously with tray status. |
 | `better-drive status [--format table\|json]` | Print configured jobs without touching the network. |
-| `better-drive sync [--config <path>] [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job and exit; managed schedulers pass their enrolled absolute config path explicitly. |
+| `better-drive sync [--job <exact-id>] [--config <path>] [--dry-run] [--resync] [--format table\|json]` | Run one cycle for every job, or only the exact selected job, and exit; managed schedulers always pass both the job ID and enrolled absolute config path. |
 | `better-drive restore plan|fetch|apply` | Plan and stage no-overwrite restores; live apply remains owner-gated. |
-| `better-drive schedule install|status|remove` | Render/read back managed scheduler definitions without replacing an unknown owner. |
+| `better-drive schedule install|status|enable|disable|exercise|remove` | Manage one native definition per job. Install stages every definition disabled; enable and exercise require one exact `--job`; every mutation has owner/generation readback and rollback. |
 | `better-drive cleanup inventory` | Recursively capture and join every declared Drive root/page/object into read-only aggregate evidence, using a refresh-capable OAuth credential from an inherited descriptor. |
 | `better-drive cleanup validate --manifest <path> [--inventory <path>]` | Validate exact IDs, safe classes, ownership/restore evidence, expiry, budgets, and optional exact inventory metadata binding. |
 | `better-drive cleanup apply --manifest <path> [--journal <path>]` | Preview an exact manifest and append a hash-chain journal; `--execute` fails closed until the owner-risk broker capability is bound. |
@@ -287,6 +287,14 @@ compatibility path; it does not participate in scheduled job/runtime guarantees.
 | `better-drive mount <remote:path> <mountpoint> [--read-only]` | Mount one remote in the foreground using VFS full-cache mode; Ctrl+C unmounts it. |
 | `better-drive install` | Register the sync daemon to start at login. |
 | `better-drive uninstall` | Remove the login-autostart registration. |
+
+Managed scheduler definitions use Windows Task Scheduler, systemd user timers,
+or macOS LaunchAgents. Native names are stable hashes of job IDs, while
+protected native metadata retains the exact owner, job ID, generation, binary,
+config, cadence, and runtime bound. Installation is transactional and always
+disabled: inspect `schedule status`, then enable and exercise one exact job at
+a time. Windows uses `IgnoreNew`, so a later trigger never replaces an
+in-flight transfer, and bounds each execution to one cadence.
 
 Candidate-control root files are evidence inputs, not authority by themselves.
 Both must exactly match the fixed protected bundle enrolled through the

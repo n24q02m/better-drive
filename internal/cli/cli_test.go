@@ -1269,6 +1269,30 @@ func TestSyncCmd_HasDryRunFlag(t *testing.T) {
 	}
 }
 
+func TestSyncCmdHasExactJobFlag(t *testing.T) {
+	flag := syncCmd().Flags().Lookup("job")
+	if flag == nil || flag.DefValue != "" || flag.Usage == "" {
+		t.Fatalf("sync --job flag = %#v, want documented opt-in exact selector", flag)
+	}
+}
+
+func TestSelectSyncJobReturnsOnlyExactStableID(t *testing.T) {
+	cfg := &config.Config{Jobs: []config.Job{{ID: "job-1"}, {ID: "job-2"}}}
+	selected, err := selectSyncJob(cfg, "job-2")
+	if err != nil {
+		t.Fatalf("selectSyncJob: %v", err)
+	}
+	if len(selected.Jobs) != 1 || selected.Jobs[0].ID != "job-2" {
+		t.Fatalf("selected jobs = %#v, want only job-2", selected.Jobs)
+	}
+	if len(cfg.Jobs) != 2 {
+		t.Fatalf("selection mutated source config: %#v", cfg.Jobs)
+	}
+	if _, err := selectSyncJob(cfg, "missing"); err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("missing selector error = %v", err)
+	}
+}
+
 // TestSyncCmdFailsOnInvalidConfigWithoutNetworkCall verifies `better-drive
 // sync` is wired into the real cobra command tree and returns an error for an
 // invalid config (0 pairs) BEFORE ever constructing a real engine.Engine - so

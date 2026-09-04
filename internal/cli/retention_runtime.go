@@ -11,6 +11,7 @@ import (
 	"github.com/n24q02m/better-drive/internal/credentials"
 	"github.com/n24q02m/better-drive/internal/engine"
 	"github.com/n24q02m/better-drive/internal/restore"
+	"github.com/n24q02m/better-drive/internal/scheduler"
 )
 
 // DestinationCredentialResolver resolves metadata for one exact configured
@@ -35,6 +36,7 @@ type RuntimeDependencies struct {
 	RetentionCoordinator RetentionCoordinator
 	ArtifactResolver     artifactcrypto.Resolver
 	StagingVerifier      restore.StagingVerifier
+	SchedulerAdapter     scheduler.Adapter
 }
 
 func (deps RuntimeDependencies) validateForConfig(cfg *config.Config) error {
