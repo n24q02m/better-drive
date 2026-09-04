@@ -18,19 +18,22 @@ import (
 )
 
 const (
-	CurrentInventoryPlanSchemaVersion = 1
+	CurrentInventoryPlanSchemaVersion = 2
 	driveFolderMIMEType               = "application/vnd.google-apps.folder"
 	maxDriveInventoryProviderPages    = 10_000
 	maxDriveInventoryEvidencePages    = 1_000_000
 	maxDriveInventoryObjects          = 1_000_000
+	maxDriveInventorySourceJobs       = 4_096
 )
 
 type InventoryRoot struct {
-	Provider  string `json:"provider"`
-	AccountID string `json:"account_id"`
-	RootID    string `json:"root_id"`
-	DriveID   string `json:"drive_id,omitempty"`
-	Namespace string `json:"namespace"`
+	Provider      string   `json:"provider"`
+	AccountID     string   `json:"account_id"`
+	RootID        string   `json:"root_id"`
+	DriveID       string   `json:"drive_id,omitempty"`
+	Namespace     string   `json:"namespace"`
+	ExpectedPages int      `json:"expected_pages"`
+	SourceJobs    []string `json:"source_jobs"`
 }
 
 type InventoryBinding struct {
@@ -119,7 +122,7 @@ func FreezeInventoryPlan(plan InventoryPlan) (InventoryPlan, error) {
 	if err := validateInventoryPlan(plan, false); err != nil {
 		return InventoryPlan{}, err
 	}
-	plan.Roots = append([]InventoryRoot(nil), plan.Roots...)
+	plan.Roots = cloneInventoryRoots(plan.Roots)
 	plan.Bindings = append([]InventoryBinding(nil), plan.Bindings...)
 	sortInventoryPlan(&plan)
 	plan.ExpectedHash = inventoryPlanDigest(plan)
@@ -278,7 +281,15 @@ func (client *InventoryClient) captureRoot(
 			}
 		}
 	}
-	root.ExpectedPages = len(root.Pages)
+	if len(root.Pages) != declaration.ExpectedPages {
+		return cleanup.Root{}, fmt.Errorf(
+			"Drive inventory root %q page count changed: got %d, want frozen %d",
+			declaration.RootID,
+			len(root.Pages),
+			declaration.ExpectedPages,
+		)
+	}
+	root.ExpectedPages = declaration.ExpectedPages
 	if err := completeFolderInventory(&root); err != nil {
 		return cleanup.Root{}, err
 	}
@@ -490,6 +501,23 @@ func validateInventoryPlan(plan InventoryPlan, requireHash bool) error {
 				return err
 			}
 		}
+		if root.ExpectedPages < 1 || root.ExpectedPages > maxDriveInventoryEvidencePages {
+			return errors.New("Drive inventory root expected_pages is invalid")
+		}
+		if len(root.SourceJobs) == 0 || len(root.SourceJobs) > maxDriveInventorySourceJobs {
+			return errors.New("Drive inventory root source_jobs is invalid")
+		}
+		sourceJobs := make(map[string]struct{}, len(root.SourceJobs))
+		for _, sourceJob := range root.SourceJobs {
+			if sourceJob == "" || len(sourceJob) > 128 || strings.TrimSpace(sourceJob) != sourceJob ||
+				strings.ContainsAny(sourceJob, "*?[]/\\\x00\r\n\t ") {
+				return errors.New("Drive inventory root source job is invalid")
+			}
+			if _, duplicate := sourceJobs[sourceJob]; duplicate {
+				return fmt.Errorf("duplicate Drive inventory source job %q", sourceJob)
+			}
+			sourceJobs[sourceJob] = struct{}{}
+		}
 		key := inventoryRootKey(root.Provider, root.AccountID, root.RootID, root.Namespace)
 		if _, duplicate := rootKeys[key]; duplicate {
 			return fmt.Errorf("duplicate Drive inventory root %q", key)
@@ -536,11 +564,19 @@ func validInventoryClass(class cleanup.ObjectClass) bool {
 func inventoryPlanDigest(plan InventoryPlan) string {
 	copyPlan := plan
 	copyPlan.ExpectedHash = ""
-	copyPlan.Roots = append([]InventoryRoot(nil), plan.Roots...)
+	copyPlan.Roots = cloneInventoryRoots(plan.Roots)
 	copyPlan.Bindings = append([]InventoryBinding(nil), plan.Bindings...)
 	sortInventoryPlan(&copyPlan)
 	data, _ := json.Marshal(copyPlan)
 	return cleanup.Digest(data)
+}
+
+func cloneInventoryRoots(roots []InventoryRoot) []InventoryRoot {
+	cloned := append([]InventoryRoot(nil), roots...)
+	for index := range cloned {
+		cloned[index].SourceJobs = append([]string(nil), cloned[index].SourceJobs...)
+	}
+	return cloned
 }
 
 func sortInventoryPlan(plan *InventoryPlan) {
@@ -548,6 +584,9 @@ func sortInventoryPlan(plan *InventoryPlan) {
 		return inventoryRootKey(plan.Roots[i].Provider, plan.Roots[i].AccountID, plan.Roots[i].RootID, plan.Roots[i].Namespace) <
 			inventoryRootKey(plan.Roots[j].Provider, plan.Roots[j].AccountID, plan.Roots[j].RootID, plan.Roots[j].Namespace)
 	})
+	for index := range plan.Roots {
+		sort.Strings(plan.Roots[index].SourceJobs)
+	}
 	sort.Slice(plan.Bindings, func(i, j int) bool {
 		left := plan.Bindings[i]
 		right := plan.Bindings[j]
