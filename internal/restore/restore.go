@@ -142,27 +142,33 @@ func BuildPlan(root string, entries []Entry) (Plan, error) {
 
 func cleanRelativePath(value string) (string, error) {
 	value = strings.ReplaceAll(strings.TrimSpace(value), "\\", "/")
-	if value == "" || strings.HasPrefix(value, "/") || strings.Contains(value, ":") {
+	if value == "" || value[0] == '/' || strings.Contains(value, ":") {
 		return "", fmt.Errorf("path must be relative and cannot contain drive or alternate-stream syntax")
 	}
 	if strings.Contains(value, "#") {
 		return "", fmt.Errorf("path cannot contain archive traversal or fragment syntax (#)")
 	}
-	parts := strings.Split(value, "/")
-	clean := make([]string, 0, len(parts))
-	for _, part := range parts {
-		if part == "" || part == "." {
-			continue
+	// Optimize: Use strings.Count for exact slice capacity and iterative strings.Cut
+	// to completely eliminate O(N) intermediate slice allocations in this hot path.
+	clean := make([]string, 0, strings.Count(value, "/")+1)
+	remaining := value
+	for {
+		part, rest, found := strings.Cut(remaining, "/")
+		if part != "" && part != "." {
+			if part == ".." {
+				return "", fmt.Errorf("path traversal is forbidden")
+			}
+			upper := strings.ToUpper(strings.TrimSuffix(part, "."))
+			switch upper {
+			case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
+				return "", fmt.Errorf("device name %q is forbidden", part)
+			}
+			clean = append(clean, part)
 		}
-		if part == ".." {
-			return "", fmt.Errorf("path traversal is forbidden")
+		if !found {
+			break
 		}
-		upper := strings.ToUpper(strings.TrimSuffix(part, "."))
-		switch upper {
-		case "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9":
-			return "", fmt.Errorf("device name %q is forbidden", part)
-		}
-		clean = append(clean, part)
+		remaining = rest
 	}
 	if len(clean) == 0 {
 		return "", fmt.Errorf("path resolves to restore root")
@@ -645,15 +651,23 @@ func isSafeDirectoryPath(path string) bool {
 }
 
 func safeParent(root, relative string) (string, error) {
-	parts := strings.Split(relative, "/")
 	parent := root
-	for _, part := range parts[:len(parts)-1] {
+	remaining := relative
+	// Optimize: Iterate with strings.Cut instead of strings.Split to eliminate
+	// slice allocations when parsing directories.
+	for {
+		part, rest, found := strings.Cut(remaining, "/")
+		if !found {
+			// This is the last component (the file itself), we only care about parents
+			break
+		}
 		parent = filepath.Join(parent, part)
 		info, err := os.Lstat(parent)
 		if os.IsNotExist(err) {
 			if err := os.Mkdir(parent, 0o700); err != nil {
 				return "", fmt.Errorf("create restore directory: %w", err)
 			}
+			remaining = rest
 			continue
 		}
 		if err != nil {
@@ -665,6 +679,7 @@ func safeParent(root, relative string) (string, error) {
 		if !info.IsDir() || !isSafeDirectoryPath(parent) {
 			return "", fmt.Errorf("restore ancestor is not a safe directory")
 		}
+		remaining = rest
 	}
 	return parent, nil
 }
@@ -914,9 +929,15 @@ func validateTransactionID(id string) error {
 }
 
 func safeExistingParent(root, relative string) (string, bool, error) {
-	parts := strings.Split(relative, "/")
 	parent := root
-	for _, part := range parts[:len(parts)-1] {
+	remaining := relative
+	// Optimize: Iterate with strings.Cut instead of strings.Split to eliminate
+	// slice allocations when parsing directories.
+	for {
+		part, rest, found := strings.Cut(remaining, "/")
+		if !found {
+			break
+		}
 		parent = filepath.Join(parent, part)
 		info, err := os.Lstat(parent)
 		if os.IsNotExist(err) {
@@ -931,6 +952,7 @@ func safeExistingParent(root, relative string) (string, bool, error) {
 		if !info.IsDir() || !isSafeDirectoryPath(parent) {
 			return "", false, fmt.Errorf("restore ancestor is not a safe directory")
 		}
+		remaining = rest
 	}
 	return parent, true, nil
 }
