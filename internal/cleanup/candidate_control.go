@@ -3,7 +3,7 @@ package cleanup
 import (
 	"bytes"
 	"crypto/ed25519"
-	"crypto/sha1"
+	"crypto/sha1" /* #nosec G505 - Git SHA-1 object identity */
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
