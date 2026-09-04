@@ -53,7 +53,7 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}))
 	defer server.Close()
 
-	plan := inventoryTestPlan(t, []string{"folder-1", "file-1", "file-2", "file-3"})
+	plan := inventoryTestPlan(t, 3, []string{"folder-1", "file-1", "file-2", "file-3"})
 	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
 	if err != nil {
 		t.Fatal(err)
@@ -92,6 +92,64 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}
 	if trashed.ID != "trashed" || !trashed.Trashed || trashed.Class != cleanup.ClassUnknown {
 		t.Fatalf("native-trash inventory object = %+v", trashed)
+	}
+}
+
+func TestInventoryClientRejectsFrozenPageCountDrift(t *testing.T) {
+	modified := time.Unix(100, 0).UTC().Format(time.RFC3339Nano)
+	file := driveInventoryTestFile(
+		"file-1", "root-1", "file.bin", "application/octet-stream",
+		strings.Repeat("a", 32), "1", modified, "1", "generation-1",
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"files": []any{file}})
+	}))
+	defer server.Close()
+
+	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := client.Capture(t.Context(), inventoryTestPlan(t, 2, nil)); err == nil ||
+		!strings.Contains(err.Error(), "page count changed") {
+		t.Fatalf("frozen page-count drift error = %v", err)
+	}
+}
+
+func TestFreezeInventoryPlanRequiresRootProvenance(t *testing.T) {
+	valid := InventoryPlan{
+		SchemaVersion: CurrentInventoryPlanSchemaVersion,
+		AccountID:     "account-1",
+		Roots: []InventoryRoot{{
+			Provider:      "drive",
+			AccountID:     "account-1",
+			RootID:        "root-1",
+			Namespace:     "backup",
+			ExpectedPages: 1,
+			SourceJobs:    []string{"job-b", "job-a"},
+		}},
+	}
+	frozen, err := FreezeInventoryPlan(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(frozen.Roots[0].SourceJobs, ",") != "job-a,job-b" {
+		t.Fatalf("canonical source jobs = %v", frozen.Roots[0].SourceJobs)
+	}
+
+	missingPages := valid
+	missingPages.Roots = cloneInventoryRoots(valid.Roots)
+	missingPages.Roots[0].ExpectedPages = 0
+	if _, err := FreezeInventoryPlan(missingPages); err == nil || !strings.Contains(err.Error(), "expected_pages") {
+		t.Fatalf("missing expected_pages error = %v", err)
+	}
+
+	missingJobs := valid
+	missingJobs.Roots = cloneInventoryRoots(valid.Roots)
+	missingJobs.Roots[0].SourceJobs = nil
+	if _, err := FreezeInventoryPlan(missingJobs); err == nil || !strings.Contains(err.Error(), "source_jobs") {
+		t.Fatalf("missing source_jobs error = %v", err)
 	}
 }
 
@@ -137,7 +195,7 @@ func TestInventoryClientUsesPagedListMetadataWithoutPerObjectReads(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	rootSet, _, err := client.Capture(t.Context(), inventoryTestPlan(t, nil))
+	rootSet, _, err := client.Capture(t.Context(), inventoryTestPlan(t, 2, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -168,7 +226,7 @@ func TestInventoryClientCapturesUnboundProviderObjectAsUnknown(t *testing.T) {
 	}))
 	defer server.Close()
 
-	plan := inventoryTestPlan(t, nil)
+	plan := inventoryTestPlan(t, 1, nil)
 	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
 	if err != nil {
 		t.Fatal(err)
@@ -197,7 +255,7 @@ func TestInventoryClientRejectsIncompleteCorpusSearch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, _, err := client.Capture(t.Context(), inventoryTestPlan(t, nil)); err == nil || !strings.Contains(err.Error(), "incomplete search") {
+	if _, _, err := client.Capture(t.Context(), inventoryTestPlan(t, 1, nil)); err == nil || !strings.Contains(err.Error(), "incomplete search") {
 		t.Fatalf("incomplete corpus search error = %v", err)
 	}
 }
@@ -218,7 +276,7 @@ func TestInventoryClientCapturesProviderNativeObjectAsUnknown(t *testing.T) {
 	}))
 	defer server.Close()
 
-	plan := inventoryTestPlan(t, nil)
+	plan := inventoryTestPlan(t, 1, nil)
 	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
 	if err != nil {
 		t.Fatal(err)
@@ -249,11 +307,13 @@ func TestInventoryClientUsesDeclaredSharedDriveCorpora(t *testing.T) {
 		SchemaVersion: CurrentInventoryPlanSchemaVersion,
 		AccountID:     "account-1",
 		Roots: []InventoryRoot{{
-			Provider:  "drive",
-			AccountID: "account-1",
-			RootID:    "root-1",
-			DriveID:   "shared-drive-1",
-			Namespace: "backup",
+			Provider:      "drive",
+			AccountID:     "account-1",
+			RootID:        "root-1",
+			DriveID:       "shared-drive-1",
+			Namespace:     "backup",
+			ExpectedPages: 1,
+			SourceJobs:    []string{"job-1"},
 		}},
 	})
 	if err != nil {
@@ -274,7 +334,7 @@ func TestInventoryClientRejectsBindingForMissingProviderObject(t *testing.T) {
 		_ = json.NewEncoder(writer).Encode(map[string]any{"files": []any{}})
 	}))
 	defer server.Close()
-	plan := inventoryTestPlan(t, []string{"missing-file"})
+	plan := inventoryTestPlan(t, 1, []string{"missing-file"})
 	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
 	if err != nil {
 		t.Fatal(err)
@@ -284,7 +344,7 @@ func TestInventoryClientRejectsBindingForMissingProviderObject(t *testing.T) {
 	}
 }
 
-func inventoryTestPlan(t *testing.T, objectIDs []string) InventoryPlan {
+func inventoryTestPlan(t *testing.T, expectedPages int, objectIDs []string) InventoryPlan {
 	t.Helper()
 	bindings := make([]InventoryBinding, 0, len(objectIDs))
 	for _, id := range objectIDs {
@@ -303,10 +363,12 @@ func inventoryTestPlan(t *testing.T, objectIDs []string) InventoryPlan {
 		SchemaVersion: CurrentInventoryPlanSchemaVersion,
 		AccountID:     "account-1",
 		Roots: []InventoryRoot{{
-			Provider:  "drive",
-			AccountID: "account-1",
-			RootID:    "root-1",
-			Namespace: "backup",
+			Provider:      "drive",
+			AccountID:     "account-1",
+			RootID:        "root-1",
+			Namespace:     "backup",
+			ExpectedPages: expectedPages,
+			SourceJobs:    []string{"job-1"},
 		}},
 		Bindings: bindings,
 	})

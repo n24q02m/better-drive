@@ -236,7 +236,12 @@ func TestCleanupInventoryCapturesProviderAggregateAndState(t *testing.T) {
 		SchemaVersion: driveapi.CurrentInventoryPlanSchemaVersion,
 		AccountID:     "account-1",
 		Roots: []driveapi.InventoryRoot{{
-			Provider: "drive", AccountID: "account-1", RootID: "root-1", Namespace: "backup",
+			Provider:      "drive",
+			AccountID:     "account-1",
+			RootID:        "root-1",
+			Namespace:     "backup",
+			ExpectedPages: 1,
+			SourceJobs:    []string{"job-1"},
 		}},
 	})
 	if err != nil {
