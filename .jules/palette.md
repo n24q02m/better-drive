@@ -14,3 +14,7 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+
+## 2026-09-03 - Tray Menu Tooltip Visibility
+**Learning:** Standard OS system tray menus (macOS/Windows) often do not display tooltips on individual menu items, rendering them invisible.
+**Action:** Append critical state reasons (like why an item is disabled or what command to run) directly to the menu item's title string instead of relying solely on tooltips.
