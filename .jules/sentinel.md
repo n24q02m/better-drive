@@ -36,3 +36,7 @@
 **Vulnerability:** `internal/cleanup/journal.go` used `os.Open` and `os.OpenFile` which could be vulnerable to path traversal via symlinks or crafted path strings.
 **Learning:** `os.OpenRoot` scopes the path correctly to its expected base directory.
 **Prevention:** Use Go 1.24+ `os.OpenRoot` when dealing with potentially user-controlled file paths, even for journals or local configuration paths.
+## 2026-09-04 - Suppress False Positive G505 in Git SHA-1 Calculations
+**Vulnerability:** gosec flagged `crypto/sha1` as a weak cryptographic primitive (G505) in `internal/cleanup/candidate_control.go`.
+**Learning:** The `crypto/sha1` package was used intentionally for calculating Git object identities, which strictly require SHA-1. This is not a security signature and replacing it breaks Git functionality.
+**Prevention:** When using `crypto/sha1` for Git object identity (or similar non-security requirements), suppress the gosec warning explicitly with `/* #nosec G505 */` to avoid false positives.
