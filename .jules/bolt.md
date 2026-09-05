@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2025-02-27 - Zero-allocation case-insensitive prefix checking
+**Learning:** Using `strings.HasPrefix(strings.ToUpper(str), "PREFIX")` causes a hidden heap allocation for every string checked because `strings.ToUpper` allocates a new string.
+**Action:** For short, known ASCII prefixes, use zero-allocation byte indexing with length checks (e.g., `len(str) >= 4 && (str[0] == 'G' || str[0] == 'g') ...`) to eliminate allocations and significantly improve performance.

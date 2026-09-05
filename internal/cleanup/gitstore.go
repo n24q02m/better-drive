@@ -115,7 +115,9 @@ func gitProcessEnvironment() []string {
 	environment := make([]string, 0, len(os.Environ())+3)
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
-		if found && strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+		// ⚡ Bolt: Use zero-allocation byte indexing instead of strings.HasPrefix(strings.ToUpper(name), "GIT_")
+		// to avoid allocating a new string for every environment variable.
+		if found && len(name) >= 4 && (name[0] == 'G' || name[0] == 'g') && (name[1] == 'I' || name[1] == 'i') && (name[2] == 'T' || name[2] == 't') && name[3] == '_' {
 			continue
 		}
 		environment = append(environment, entry)
