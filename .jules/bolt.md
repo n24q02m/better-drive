@@ -9,3 +9,7 @@
 ## 2024-08-11 - Pre-allocating filter arrays
 **Learning:** `TranslateIgnoreLines` was appending to a dynamic array without pre-allocation, leading to allocations that could be prevented, and using `strings.HasPrefix` for single-byte checks when standard array indexing is zero-allocation.
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
+
+## 2024-05-25 - Avoid micro-optimizing cold paths
+**Learning:** Optimizing a string allocation on a "cold path" (like parsing configuration variables immediately before an expensive I/O operation like starting a Git process) provides no measurable system performance impact. The I/O latency completely dwarfs any nanosecond memory allocation savings. A rejected change taught that micro-optimizations on cold paths sacrifice readability without providing a real-world benefit.
+**Action:** Focus performance optimization efforts strictly on "hot paths" (e.g., tight loops, frequent event handlers, continuous streaming parsers). Before optimizing, explicitly evaluate if the code is on a hot or cold path. If the code immediately precedes or follows a blocking I/O operation, prefer readability and standard library functions over manual byte manipulation.
