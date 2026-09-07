@@ -115,7 +115,8 @@ func gitProcessEnvironment() []string {
 	environment := make([]string, 0, len(os.Environ())+3)
 	for _, entry := range os.Environ() {
 		name, _, found := strings.Cut(entry, "=")
-		if found && strings.HasPrefix(strings.ToUpper(name), "GIT_") {
+		// ⚡ Bolt: using string slicing and strings.EqualFold avoids strings.ToUpper heap allocations while maintaining readability
+		if found && len(name) >= 4 && strings.EqualFold(name[:4], "GIT_") {
 			continue
 		}
 		environment = append(environment, entry)
