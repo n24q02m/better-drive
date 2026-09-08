@@ -54,6 +54,11 @@ func StateFile() string {
 // completed sync cycle per job.
 func LogFile() string { return filepath.Join(base(), "better-drive.log") }
 
+// HeadlessOutputFile returns the raw stdout/stderr sink for GUI-subsystem
+// launches without a console. It is deliberately separate from LogFile,
+// whose contents are the daemon's structured JSONL audit records.
+func HeadlessOutputFile() string { return filepath.Join(base(), "headless-output.log") }
+
 func CleanupSecurityDir() string {
 	return filepath.Join(base(), "cleanup")
 }

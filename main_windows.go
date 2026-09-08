@@ -51,7 +51,7 @@ func attachParentConsole() {
 // valid standard handle untouched; if opening the sink fails, the command still
 // receives the original write error and exits non-zero rather than faking success.
 func bindHeadlessOutput() {
-	logPath := paths.LogFile()
+	logPath := paths.HeadlessOutputFile()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return
 	}
