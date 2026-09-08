@@ -48,7 +48,20 @@ func loadConfigBestEffort() *config.Config {
 	return cfg
 }
 
-func newVerifiedAccountEngine(cfg *config.Config) (*engine.Engine, error) {
+// newVerifiedAccountReadEngine isolates rclone's token refreshes in a
+// disposable private config copy. Read operations such as account list --quota
+// must not mutate the enrolled config evidence.
+func newVerifiedAccountReadEngine(cfg *config.Config) (*engine.Engine, error) {
+	if cfg == nil {
+		return nil, fmt.Errorf("no valid config with an enrolled rclone_runtime")
+	}
+	return engine.NewTransferVerified(cfg.RcloneRuntime)
+}
+
+// newVerifiedAccountMutationEngine is reserved for explicit account
+// add/setup/remove operations whose contract is to mutate the enrolled
+// rclone configuration.
+func newVerifiedAccountMutationEngine(cfg *config.Config) (*engine.Engine, error) {
 	if cfg == nil {
 		return nil, fmt.Errorf("no valid config with an enrolled rclone_runtime")
 	}
@@ -128,7 +141,7 @@ func accountRemoveCmd() *cobra.Command {
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			cfg := loadConfigBestEffort()
-			e, err := newVerifiedAccountEngine(cfg)
+			e, err := newVerifiedAccountMutationEngine(cfg)
 			if err != nil {
 				return err
 			}
@@ -277,7 +290,7 @@ func newAccountAddCmd(use, short, long, example string) *cobra.Command {
 		Example: example,
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := loadConfigBestEffort()
-			e, err := newVerifiedAccountEngine(cfg)
+			e, err := newVerifiedAccountMutationEngine(cfg)
 			if err != nil {
 				return err
 			}
@@ -337,7 +350,7 @@ func accountListCmd() *cobra.Command {
 			"  better-drive account list --format json",
 		RunE: func(cmd *cobra.Command, _ []string) error {
 			cfg := loadConfigBestEffort()
-			e, err := newVerifiedAccountEngine(cfg)
+			e, err := newVerifiedAccountReadEngine(cfg)
 			if err != nil {
 				return err
 			}
