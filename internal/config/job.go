@@ -104,15 +104,8 @@ func (r RcloneRuntime) Validate() error {
 		return fmt.Errorf("rclone_runtime.allowed_backends is required")
 	}
 	for name := range r.Environment {
-		clean := strings.TrimSpace(name)
-		// ⚡ Bolt: using strings.EqualFold avoids strings.ToUpper hidden heap allocations while maintaining readability
-		if strings.EqualFold(clean, "PATH") {
-			return fmt.Errorf("rclone_runtime.environment.%s is forbidden", name)
-		}
-		if len(clean) >= 7 && strings.EqualFold(clean[:7], "RCLONE_") {
-			if strings.EqualFold(clean, "RCLONE_LOCAL_NO_CHECK_UPDATED") {
-				continue
-			}
+		upper := strings.ToUpper(strings.TrimSpace(name))
+		if upper == "PATH" || (strings.HasPrefix(upper, "RCLONE_") && upper != "RCLONE_LOCAL_NO_CHECK_UPDATED") {
 			return fmt.Errorf("rclone_runtime.environment.%s is forbidden", name)
 		}
 	}

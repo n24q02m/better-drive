@@ -11,5 +11,5 @@
 **Action:** Always check `len(input) == 0` for an early return, use `make([]T, 0, len(input))` to pre-allocate exact slice capacities, and use single byte index checks like `str[0] == '#'` over `strings.HasPrefix` for single character lookups.
 
 ## 2024-05-25 - Avoid heap allocations with strings.ToUpper in parsing loops
-**Learning:** `strings.ToUpper` creates a hidden heap allocation by returning a new string, slowing down repeated parsing operations in loops (like checking environment variables or forbidden names).
-**Action:** Replace `strings.ToUpper` coupled with `strings.HasPrefix` or exact matching in hot paths with zero-allocation byte indexing (for fixed prefixes) or `strings.EqualFold` (for exact match).
+**Learning:** `strings.ToUpper` creates a hidden heap allocation by returning a new string, slowing down repeated parsing operations in loops (like checking environment variables or forbidden names). However, do not optimize this by manually unrolling case-insensitive byte indexing (e.g., `str[0] == 'P' || str[0] == 'p'`), as it severely degrades readability and is considered a security-sensitive parser micro-optimization that is not worth the risk.
+**Action:** Replace `strings.ToUpper` coupled with `strings.HasPrefix` or exact matching in hot paths with `strings.EqualFold` (for exact match) or combining it with string slicing (e.g., `len(str) >= 4 && strings.EqualFold(str[:4], "GIT_")`). If a PR is rejected for a micro-optimization in a security-sensitive parser, acknowledge the feedback and revert the changes.
