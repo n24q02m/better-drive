@@ -113,6 +113,9 @@ func TestNewTransferVerifiedStagesMutableConfigWithoutChangingEnrolledSource(t *
 	if got, err := os.ReadFile(enrolled.Config); err != nil || string(got) != string(sourceBefore) {
 		t.Fatalf("enrolled config changed = %q, %v", got, err)
 	}
+	if err := verifyRuntimeFiles(enrolled); err != nil {
+		t.Fatalf("enrolled runtime after staged OAuth rewrite: %v", err)
+	}
 	if err := e.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
