@@ -4,6 +4,7 @@ package scheduler
 
 import (
 	"context"
+	"debug/pe"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
@@ -37,6 +38,9 @@ func (a *nativeAdapter) Install(ctx context.Context, desired Definition, replace
 	}
 	definition, err := nextDefinition(current, desired, replace)
 	if err != nil {
+		return err
+	}
+	if err := requireWindowsGUIExecutable(definition.Executable); err != nil {
 		return err
 	}
 
@@ -208,6 +212,29 @@ func (a *nativeAdapter) Remove(ctx context.Context, jobID string, _ bool) error 
 	output, err := a.command(ctx, "schtasks.exe", "/Delete", "/TN", ManagedName(jobID), "/F")
 	if err != nil {
 		return nativeCommandError("remove scheduled task", output, err)
+	}
+	return nil
+}
+
+func requireWindowsGUIExecutable(path string) error {
+	file, err := pe.Open(path)
+	if err != nil {
+		return fmt.Errorf("scheduler executable PE read %q: %w", path, err)
+	}
+	defer file.Close()
+
+	const windowsGUISubsystem = 2
+	var subsystem uint16
+	switch header := file.OptionalHeader.(type) {
+	case *pe.OptionalHeader32:
+		subsystem = header.Subsystem
+	case *pe.OptionalHeader64:
+		subsystem = header.Subsystem
+	default:
+		return fmt.Errorf("scheduler executable %q has unsupported PE optional header", path)
+	}
+	if subsystem != windowsGUISubsystem {
+		return fmt.Errorf("scheduler executable %q must use Windows GUI subsystem (got %d)", path, subsystem)
 	}
 	return nil
 }
