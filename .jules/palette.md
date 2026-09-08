@@ -14,3 +14,6 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+## 2024-05-15 - Implement Cross-Platform "Open Folder" Action
+**Learning:** Basic file operations like "open folder" should be cross-platform rather than artificially restricted. The OS provides standard commands (`explorer`, `open`, `xdg-open`) for these actions.
+**Action:** When adding standard OS interactions to cross-platform applications, ensure they are implemented for all major platforms (Windows, macOS, Linux) to provide a consistent and expected UX.
