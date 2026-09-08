@@ -4,7 +4,10 @@ package main
 
 import (
 	"os"
+	"path/filepath"
 	"syscall"
+
+	"github.com/n24q02m/better-drive/internal/paths"
 )
 
 const (
@@ -17,27 +20,57 @@ const (
 // the terminal for CLI subcommands. A windowsgui binary starts with no console,
 // so its output would vanish; attaching to the parent process's console and
 // rebinding os.Stdout/os.Stderr makes interactive CLI output appear. Launched
-// with no parent console (at login via the Run key, or the tray daemon),
-// AttachConsole fails and this is a harmless no-op - the tray stays
-// console-less, exactly as wanted.
+// with no parent console (at login via the Run key, or the tray daemon), the
+// process instead binds missing standard handles to the persistent application
+// log. This keeps scheduled JSON output and diagnostics observable without
+// inventing a success result or suppressing write errors.
 //
 // Crucially, if stdout is ALREADY a real file or pipe (the caller redirected
 // it, e.g. `better-drive sync > log` or a CI pipe), we must NOT rebind: doing
-// so would send our output to the console and silently bypass the redirect. So
-// we only attach when stdout is not a usable stream.
+// so would send our output to the application log and silently bypass the
+// redirect. So we only attach when stdout is not a usable stream.
 func attachParentConsole() {
 	if isRedirected(syscall.STD_OUTPUT_HANDLE) {
 		return // caller redirected stdout; leave os.Stdout/os.Stderr alone
 	}
 	k32 := syscall.NewLazyDLL("kernel32.dll")
 	if r, _, _ := k32.NewProc("AttachConsole").Call(attachParentProcess); r == 0 {
-		return // no parent console (login autostart / tray daemon) - stay silent
+		bindHeadlessOutput()
+		return
 	}
 	if h, err := syscall.GetStdHandle(syscall.STD_OUTPUT_HANDLE); err == nil && h != 0 {
 		os.Stdout = os.NewFile(uintptr(h), "stdout")
 	}
 	if h, err := syscall.GetStdHandle(syscall.STD_ERROR_HANDLE); err == nil && h != 0 {
 		os.Stderr = os.NewFile(uintptr(h), "stderr")
+	}
+}
+
+// bindHeadlessOutput provides a real sink for GUI-subsystem launches that have
+// no console and no caller-provided redirection. It deliberately leaves any
+// valid standard handle untouched; an open failure also remains visible through
+// the original invalid handle and the command's non-zero exit status.
+func bindHeadlessOutput() {
+	logPath := paths.LogFile()
+	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
+		return
+	}
+	bind := func(stdHandle int) *os.File {
+		h, err := syscall.GetStdHandle(stdHandle)
+		if err == nil && h != 0 && h != syscall.InvalidHandle {
+			return nil
+		}
+		file, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o600)
+		if err != nil {
+			return nil
+		}
+		return file
+	}
+	if file := bind(syscall.STD_OUTPUT_HANDLE); file != nil {
+		os.Stdout = file
+	}
+	if file := bind(syscall.STD_ERROR_HANDLE); file != nil {
+		os.Stderr = file
 	}
 }
 
