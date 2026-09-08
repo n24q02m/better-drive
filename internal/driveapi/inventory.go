@@ -27,11 +27,14 @@ const (
 )
 
 type InventoryRoot struct {
-	Provider      string   `json:"provider"`
-	AccountID     string   `json:"account_id"`
-	RootID        string   `json:"root_id"`
-	DriveID       string   `json:"drive_id,omitempty"`
-	Namespace     string   `json:"namespace"`
+	Provider  string `json:"provider"`
+	AccountID string `json:"account_id"`
+	RootID    string `json:"root_id"`
+	DriveID   string `json:"drive_id,omitempty"`
+	Namespace string `json:"namespace"`
+	// ExpectedPages is an optional frozen page count. Zero means the caller
+	// requests a fresh live count; Capture records that count in the returned
+	// cleanup.Root without rejecting provider pagination drift.
 	ExpectedPages int      `json:"expected_pages"`
 	SourceJobs    []string `json:"source_jobs"`
 }
@@ -281,7 +284,7 @@ func (client *InventoryClient) captureRoot(
 			}
 		}
 	}
-	if len(root.Pages) != declaration.ExpectedPages {
+	if declaration.ExpectedPages > 0 && len(root.Pages) != declaration.ExpectedPages {
 		return cleanup.Root{}, fmt.Errorf(
 			"Drive inventory root %q page count changed: got %d, want frozen %d",
 			declaration.RootID,
@@ -289,7 +292,7 @@ func (client *InventoryClient) captureRoot(
 			declaration.ExpectedPages,
 		)
 	}
-	root.ExpectedPages = declaration.ExpectedPages
+	root.ExpectedPages = len(root.Pages)
 	if err := completeFolderInventory(&root); err != nil {
 		return cleanup.Root{}, err
 	}
@@ -501,7 +504,7 @@ func validateInventoryPlan(plan InventoryPlan, requireHash bool) error {
 				return err
 			}
 		}
-		if root.ExpectedPages < 1 || root.ExpectedPages > maxDriveInventoryEvidencePages {
+		if root.ExpectedPages < 0 || root.ExpectedPages > maxDriveInventoryEvidencePages {
 			return errors.New("Drive inventory root expected_pages is invalid")
 		}
 		if len(root.SourceJobs) == 0 || len(root.SourceJobs) > maxDriveInventorySourceJobs {

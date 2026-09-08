@@ -120,6 +120,8 @@ Mount requirements are OS-specific because better-drive deliberately does not em
 
 The first argument must be `<remote>:<path>`; the second is passed through to rclone, so values such as `G:`, `*`, and a Unix directory retain their native meaning. Mount failures keep rclone's stderr; missing-driver failures also include an OS-specific remediation.
 
+Empty arguments and arguments beginning with `-` are rejected before rclone starts.
+
 ## Accounts
 
 Each Google Drive account is an enrolled rclone remote referenced by a v2
@@ -318,6 +320,11 @@ request per object. Every mutation still performs an exact target read and
 verifies the inventory-bound metadata digest immediately before the one-attempt
 operation.
 Any provider `incompleteSearch` response fails the inventory closed.
+
+Set a root's `expected_pages` to `0` when capturing a fresh live inventory whose
+page count is not yet known. The capture records the actual positive page count.
+A positive planned count remains a strict assertion; repeated cursors, incomplete
+searches, and page limits still fail closed in either mode.
 
 ## Requirements
 

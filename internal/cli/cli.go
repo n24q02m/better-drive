@@ -598,7 +598,7 @@ func statusCmd() *cobra.Command {
 				return exitcode.WithRemediation(exitcode.ConfigError(err), fmt.Sprintf("create or fix %s (TOML syntax) - see README for the [[job]] schema", paths.ConfigFile()))
 			}
 			configWarning := ""
-			if validationErr := cfg.ValidateForExecution(); validationErr != nil {
+			if validationErr := cfg.ValidateExecutionConfig(); validationErr != nil {
 				configWarning = validationErr.Error()
 			}
 			persisted, stateErr := state.Load(paths.StateFile())

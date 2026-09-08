@@ -95,6 +95,34 @@ func TestInventoryClientCapturesEveryDeclaredRootPageAndNestedFolder(t *testing.
 	}
 }
 
+func TestInventoryClientUsesLivePageCountWhenPlanIsUnfrozen(t *testing.T) {
+	modified := time.Unix(100, 0).UTC().Format(time.RFC3339Nano)
+	file := driveInventoryTestFile(
+		"file-1", "root-1", "file.bin", "application/octet-stream",
+		strings.Repeat("a", 32), "1", modified, "1", "generation-1",
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(writer).Encode(map[string]any{"files": []any{file}})
+	}))
+	defer server.Close()
+
+	client, err := newInventoryClient(server.Client(), server.URL+"/", "inventory-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootSet, aggregate, err := client.Capture(t.Context(), inventoryTestPlan(t, 0, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rootSet.Roots) != 1 || rootSet.Roots[0].ExpectedPages != 1 || len(rootSet.Roots[0].Pages) != 1 {
+		t.Fatalf("live page-count capture = %+v", rootSet.Roots)
+	}
+	if aggregate.PageCount != 1 || aggregate.ObjectCount != 1 {
+		t.Fatalf("live page-count aggregate = %+v", aggregate)
+	}
+}
+
 func TestInventoryClientRejectsFrozenPageCountDrift(t *testing.T) {
 	modified := time.Unix(100, 0).UTC().Format(time.RFC3339Nano)
 	file := driveInventoryTestFile(
@@ -117,6 +145,24 @@ func TestInventoryClientRejectsFrozenPageCountDrift(t *testing.T) {
 	}
 }
 
+func TestFreezeInventoryPlanAllowsUnfrozenPageCount(t *testing.T) {
+	valid := InventoryPlan{
+		SchemaVersion: CurrentInventoryPlanSchemaVersion,
+		AccountID:     "account-1",
+		Roots: []InventoryRoot{{
+			Provider:      "drive",
+			AccountID:     "account-1",
+			RootID:        "root-1",
+			Namespace:     "backup",
+			ExpectedPages: 0,
+			SourceJobs:    []string{"job-a"},
+		}},
+	}
+	if _, err := FreezeInventoryPlan(valid); err != nil {
+		t.Fatalf("unfrozen page-count plan = %v", err)
+	}
+}
+
 func TestFreezeInventoryPlanRequiresRootProvenance(t *testing.T) {
 	valid := InventoryPlan{
 		SchemaVersion: CurrentInventoryPlanSchemaVersion,
@@ -136,13 +182,6 @@ func TestFreezeInventoryPlanRequiresRootProvenance(t *testing.T) {
 	}
 	if strings.Join(frozen.Roots[0].SourceJobs, ",") != "job-a,job-b" {
 		t.Fatalf("canonical source jobs = %v", frozen.Roots[0].SourceJobs)
-	}
-
-	missingPages := valid
-	missingPages.Roots = cloneInventoryRoots(valid.Roots)
-	missingPages.Roots[0].ExpectedPages = 0
-	if _, err := FreezeInventoryPlan(missingPages); err == nil || !strings.Contains(err.Error(), "expected_pages") {
-		t.Fatalf("missing expected_pages error = %v", err)
 	}
 
 	missingJobs := valid
