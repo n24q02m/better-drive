@@ -48,10 +48,10 @@ func attachParentConsole() {
 
 // bindHeadlessOutput provides a real sink for GUI-subsystem launches that have
 // no console and no caller-provided redirection. It deliberately leaves any
-// valid standard handle untouched; an open failure also remains visible through
-// the original invalid handle and the command's non-zero exit status.
+// valid standard handle untouched; if opening the sink fails, the command still
+// receives the original write error and exits non-zero rather than faking success.
 func bindHeadlessOutput() {
-	logPath := paths.LogFile()
+	logPath := paths.HeadlessOutputFile()
 	if err := os.MkdirAll(filepath.Dir(logPath), 0o700); err != nil {
 		return
 	}
