@@ -97,6 +97,9 @@ func TestValidateForExecutionRejectsCategorySizeGuardBreach(t *testing.T) {
 	if err := os.WriteFile(path, []byte("too large"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	if err := cfg.ValidateExecutionConfig(); err != nil {
+		t.Fatalf("configuration inspection must not enforce live source size: %v", err)
+	}
 	if err := cfg.ValidateForExecution(); err == nil || !strings.Contains(err.Error(), "size guard") {
 		t.Fatalf("ValidateForExecution error = %v, want size-guard rejection", err)
 	}

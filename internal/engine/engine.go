@@ -360,6 +360,18 @@ func (e *Engine) About(name string) (Quota, error) {
 // the caller live and its last 64 KiB are retained in the returned error for
 // remediation.
 func (e *Engine) Mount(ctx context.Context, p MountParams) error {
+	if e == nil || e.stream == nil {
+		return errors.New("mount engine is not configured")
+	}
+	if ctx == nil {
+		return errors.New("mount context is nil")
+	}
+	if strings.TrimSpace(p.Remote) == "" || strings.HasPrefix(p.Remote, "-") {
+		return errors.New("mount remote is required and must not start with '-'")
+	}
+	if strings.TrimSpace(p.Mountpoint) == "" || strings.HasPrefix(p.Mountpoint, "-") {
+		return errors.New("mountpoint is required and must not start with '-'")
+	}
 	stdout := p.Stdout
 	if stdout == nil {
 		stdout = io.Discard

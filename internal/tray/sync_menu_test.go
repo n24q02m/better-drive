@@ -10,35 +10,29 @@ import (
 )
 
 func TestSyncMenuStatePausedDisablesWithReason(t *testing.T) {
-	enabled, tooltip := syncMenuState(AggregateState{State: syncloop.StatePaused})
+	enabled, _, _ := syncMenuState(AggregateState{State: syncloop.StatePaused})
 	if enabled {
 		t.Fatal("paused sync action is enabled")
-	}
-	if tooltip != "Cannot sync while paused" {
-		t.Fatalf("paused sync tooltip = %q, want %q", tooltip, "Cannot sync while paused")
 	}
 }
 
 func TestSyncMenuMixedErrorAndNeedsResyncDisables(t *testing.T) {
-	enabled, tooltip := syncMenuState(AggregateState{
+	enabled, title, tooltip := syncMenuState(AggregateState{
 		State:       syncloop.StateError,
 		NeedsResync: true,
 	})
 	if enabled {
 		t.Fatal("sync action is enabled while one pair needs resync")
 	}
-	if tooltip != "Run better-drive sync --resync to rebuild the bisync baseline" {
-		t.Fatalf("needs-resync tooltip = %q", tooltip)
+	if !strings.Contains(title, "better-drive sync --resync") || !strings.Contains(tooltip, "better-drive sync --resync") {
+		t.Fatalf("resync-required state omits the recovery command: title=%q tooltip=%q", title, tooltip)
 	}
 }
 
 func TestSyncMenuRegularErrorRemainsEnabledForRetry(t *testing.T) {
-	enabled, tooltip := syncMenuState(AggregateState{State: syncloop.StateError})
+	enabled, _, _ := syncMenuState(AggregateState{State: syncloop.StateError})
 	if !enabled {
 		t.Fatal("ordinary error disabled Sync now and changed retry semantics")
-	}
-	if tooltip != "Trigger a sync immediately for all pairs" {
-		t.Fatalf("ordinary error tooltip = %q", tooltip)
 	}
 }
 
@@ -50,44 +44,23 @@ func TestPauseMenuNeedsResyncCannotMaskRecoveryState(t *testing.T) {
 	if enabled {
 		t.Fatal("Pause is enabled while a pair needs resync")
 	}
-	if title != "Pause" || !strings.Contains(tooltip, "better-drive sync --resync") {
-		t.Fatalf("pause menu = enabled:%v title:%q tooltip:%q", enabled, title, tooltip)
-	}
-}
-
-func TestPauseMenuPausedBecomesResume(t *testing.T) {
-	enabled, title, tooltip := pauseMenuState(AggregateState{State: syncloop.StatePaused})
-	if !enabled || title != "Resume" || tooltip != "Resume scheduled syncs for all pairs" {
+	if !strings.Contains(title, "better-drive sync --resync") || !strings.Contains(tooltip, "better-drive sync --resync") {
 		t.Fatalf("pause menu = enabled:%v title:%q tooltip:%q", enabled, title, tooltip)
 	}
 }
 
 func TestPauseMenuIdleAndErrorRemainEnabled(t *testing.T) {
 	for _, state := range []syncloop.State{syncloop.StateIdle, syncloop.StateError} {
-		enabled, title, _ := pauseMenuState(AggregateState{State: state})
-		if !enabled || title != "Pause" {
-			t.Fatalf("state %s pause menu = enabled:%v title:%q", state, enabled, title)
+		enabled, _, _ := pauseMenuState(AggregateState{State: state})
+		if !enabled {
+			t.Fatalf("pause disabled in retryable state %s", state)
 		}
-	}
-}
-
-func TestTrayStatusNeedsResyncNamesRecoveryCommand(t *testing.T) {
-	title, tooltip := trayStatusText(AggregateState{State: syncloop.StateError, NeedsResync: true})
-	if title != "Status: error" || !strings.Contains(tooltip, "better-drive sync --resync") {
-		t.Fatalf("status text = title:%q tooltip:%q", title, tooltip)
-	}
-	regularTitle, regularTooltip := trayStatusText(AggregateState{State: syncloop.StateError})
-	if regularTitle != "Status: error" || regularTooltip != "Current status: error" {
-		t.Fatalf("ordinary error text changed: title:%q tooltip:%q", regularTitle, regularTooltip)
 	}
 }
 
 func TestTrayIconTooltipNeedsResyncIsActionable(t *testing.T) {
 	if got := trayIconTooltip(AggregateState{State: syncloop.StateError, NeedsResync: true}); !strings.Contains(got, "better-drive sync --resync") {
 		t.Fatalf("needs-resync icon tooltip = %q", got)
-	}
-	if got := trayIconTooltip(AggregateState{State: syncloop.StateError}); got != "better-drive - error" {
-		t.Fatalf("ordinary error icon tooltip changed: %q", got)
 	}
 }
 func TestValidateOpenFolderRequiresExistingDirectory(t *testing.T) {

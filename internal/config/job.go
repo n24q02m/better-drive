@@ -576,7 +576,10 @@ func splitLegacyRemote(remote string) (string, string) {
 	return name, path
 }
 
-func (c *Config) ValidateForExecution() error {
+// ValidateExecutionConfig checks execution configuration without walking source
+// trees. Read-only status callers must not turn configuration inspection into a
+// backup-sized filesystem scan.
+func (c *Config) ValidateExecutionConfig() error {
 	if err := c.Validate(); err != nil {
 		return err
 	}
@@ -584,9 +587,6 @@ func (c *Config) ValidateForExecution() error {
 		return err
 	}
 	if err := c.RcloneRuntime.Validate(); err != nil {
-		return err
-	}
-	if err := c.validateCategorySourceSizes(); err != nil {
 		return err
 	}
 	for _, job := range c.Jobs {
@@ -597,6 +597,13 @@ func (c *Config) ValidateForExecution() error {
 		}
 	}
 	return nil
+}
+
+func (c *Config) ValidateForExecution() error {
+	if err := c.ValidateExecutionConfig(); err != nil {
+		return err
+	}
+	return c.validateCategorySourceSizes()
 }
 
 // ValidateForExecutionWithBindings performs the normal execution checks and

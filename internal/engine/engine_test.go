@@ -233,6 +233,36 @@ func TestMountBuildsStreamingArgs(t *testing.T) {
 	})
 }
 
+func TestMountRejectsInvalidInvocationBeforeRunner(t *testing.T) {
+	var called bool
+	e := newFakeStreamingRunnerEngine("", nil, func(context.Context, io.Writer, io.Writer, ...string) error {
+		called = true
+		return nil
+	})
+	for _, test := range []struct {
+		name   string
+		ctx    context.Context
+		remote string
+		target string
+	}{
+		{name: "nil context", remote: "gdrive:", target: "G:", ctx: nil},
+		{name: "missing remote", ctx: context.Background(), target: "G:"},
+		{name: "flag remote", ctx: context.Background(), remote: "-bad:", target: "G:"},
+		{name: "missing mountpoint", ctx: context.Background(), remote: "gdrive:"},
+		{name: "flag mountpoint", ctx: context.Background(), remote: "gdrive:", target: "-G:"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := e.Mount(test.ctx, MountParams{Remote: test.remote, Mountpoint: test.target})
+			if err == nil {
+				t.Fatal("Mount() unexpectedly accepted invalid invocation")
+			}
+			if called {
+				t.Fatal("Mount() invoked the runner before rejecting invalid invocation")
+			}
+		})
+	}
+}
+
 func TestMountStreamsOutputAndRetainsStderrInError(t *testing.T) {
 	var stdoutBuf, stderrBuf strings.Builder
 	stdoutSeen := make(chan struct{})
