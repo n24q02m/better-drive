@@ -54,15 +54,15 @@ func writeFileAtomic(path string, content []byte, mode os.FileMode) error {
 	temporary := file.Name()
 	defer os.Remove(temporary)
 	if err := file.Chmod(mode); err != nil {
-		file.Close()
+		_ = file.Close() // #nosec G104 -- best-effort close during error handling
 		return fmt.Errorf("protect scheduler temporary file: %w", err)
 	}
 	if _, err := file.Write(content); err != nil {
-		file.Close()
+		_ = file.Close() // #nosec G104 -- best-effort close during error handling
 		return fmt.Errorf("write scheduler temporary file: %w", err)
 	}
 	if err := file.Sync(); err != nil {
-		file.Close()
+		_ = file.Close() // #nosec G104 -- best-effort close during error handling
 		return fmt.Errorf("sync scheduler temporary file: %w", err)
 	}
 	if err := file.Close(); err != nil {
