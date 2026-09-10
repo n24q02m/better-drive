@@ -112,13 +112,10 @@ func runGitProcess(gitPath string, input []byte, args ...string) ([]byte, error)
 }
 
 func gitProcessEnvironment() []string {
-	// Cache os.Environ() to avoid duplicate system calls and slice allocations
 	env := os.Environ()
 	environment := make([]string, 0, len(env)+3)
 	for _, entry := range env {
 		name, _, found := strings.Cut(entry, "=")
-		// Use zero-allocation EqualFold instead of strings.ToUpper to avoid
-		// heap allocations for every environment variable.
 		if found && len(name) >= 4 && strings.EqualFold(name[:4], "GIT_") {
 			continue
 		}
