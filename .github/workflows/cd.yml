@@ -99,8 +99,14 @@ jobs:
           git fetch --tags --force origin
           t=$(git tag --points-at HEAD | grep -E '^v[0-9]' | sort -V | tail -1 || true)
           if [ -z "$t" ]; then
-            echo "No release due and no version tag on HEAD; nothing to publish" >&2
-            exit 1
+            echo "No release due and no version tag on HEAD; ladder no-op" >&2
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if gh release view "$t" --repo "${GITHUB_REPOSITORY}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qi false; then
+            echo "Tag $t already has a published release; ladder no-op" >&2
+            echo "tag=" >> "$GITHUB_OUTPUT"
+            exit 0
           fi
           echo "Publishing existing tag $t already on HEAD" >&2
           echo "tag=$t" >> "$GITHUB_OUTPUT"
