@@ -14,3 +14,6 @@
 **Learning:** Exposing actionable UI elements (like a "Sync now" button) that silently fail because of another system state (like being Paused) causes user confusion. It's an accessibility and interaction issue where the system doesn't communicate its constraints.
 
 **Action:** Always disable contextual actions when they are made invalid by another system state, and update their tooltip to explain *why* they are disabled (e.g., "Cannot sync while paused").
+## 2024-05-15 - Implement Cross-Platform "Open Folder" Action (Rejected)
+**Learning:** This specific UX enhancement (enabling cross-platform open folder) was superseded by a same-cluster duplicate PR (#189).
+**Action:** When a PR is superseded by a duplicate, discard the changes and acknowledge the superceding PR to prevent duplicate work.
