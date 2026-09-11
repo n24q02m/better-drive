@@ -11,6 +11,10 @@ name: CD
 # publishes the GitHub release plus the homebrew/scoop stable channels.
 
 on:
+  push:
+    branches:
+      - staging
+      - main
   workflow_dispatch:
     inputs:
       release_type:
@@ -22,6 +26,11 @@ on:
           - stable
           - beta
 
+env:
+  # Unified release ladder: push to staging = beta, push to main = stable.
+  # workflow_dispatch keeps release_type as an explicit override.
+  RELEASE_TYPE: ${{ github.event_name == 'push' && (github.ref_name == 'staging' && 'beta' || 'stable') || inputs.release_type }}
+
 permissions:
   contents: read
 
@@ -30,79 +39,11 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  # ==================== Prepare Candidate (workflow_dispatch) ====================
-  prepare-candidate:
-    name: Prepare Candidate Artifacts
-    if: github.event.inputs.release_type != 'stable'
-    runs-on: macos-latest
-    permissions:
-      contents: read
-    steps:
-      - uses: step-security/harden-runner@e14015d583714f6e62063499dc959a02595150a1 # v2.21.1
-        with:
-          egress-policy: audit
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-
-      - name: Verify release preparation, release policy, and installers
-        run: |
-          python scripts/verify_prepare_config.py .
-          python scripts/verify_release_policy.py .
-          python scripts/verify_installers.py .
-
-      - uses: anchore/sbom-action/download-syft@3ad7283483fc7af8ff2b4ea19663c2d5ca935e26 # v0.24.2
-
-      - name: Build candidate binaries credential-free
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: '~> v2'
-          args: release --snapshot --config=.goreleaser.prepare.yaml --skip=publish --clean
-
-      - name: Record candidate provenance manifest
-        shell: bash
-        run: |
-          mkdir -p dist/provenance
-          {
-            echo "Candidate release manifest"
-            echo "Timestamp: $(date -u +'%Y-%m-%dT%H:%M:%SZ')"
-            echo "Ref: ${{ github.ref }}"
-            echo "Commit: ${{ github.sha }}"
-            echo "Release type: ${{ github.event.inputs.release_type }}"
-            echo "Status: PREPARED_CREDENTIAL_FREE_CANDIDATE"
-            echo ""
-            echo "Checksums:"
-            if [ -f dist/checksums.txt ]; then
-              cat dist/checksums.txt
-            else
-              echo "No checksums.txt generated"
-            fi
-          } > dist/provenance/manifest.txt
-
-      - name: Upload prepared candidate artifacts and provenance
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: candidate-release-artifacts
-          path: dist/
-          if-no-files-found: error
-
-      - name: Fail closed on unverified live publication
-        shell: bash
-        run: |
-          echo "==> Candidate release preparation successful."
-          echo "==> Live publication remains disabled pending the terminal BDrive stable gate."
-
-  # ==================== Publish Stable (workflow_dispatch, protected) ====================
-  publish-stable:
-    name: Publish Stable Release
-    if: github.event.inputs.release_type == 'stable'
-    environment: stable-publish
+  # ==================== Publish (staging push = beta, main push = stable) ====================
+  publish:
+    name: Publish Release
+    environment:
+      name: ${{ github.event_name == 'push' && (github.ref_name == 'staging' && 'beta-publish' || 'stable-publish') || (inputs.release_type == 'beta' && 'beta-publish' || 'stable-publish') }}
     # macOS runner: the darwin CGO (librclone) targets cannot cross-compile
     # from Linux; the candidate prepare job uses the same runner for the same
     # reason.
@@ -142,6 +83,8 @@ jobs:
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           config_file: semantic-release.toml
+          prerelease: ${{ env.RELEASE_TYPE == 'beta' }}
+          prerelease_token: beta
           git_committer_name: n24q02m-ci
           git_committer_email: 3200052+n24q02m-ci@users.noreply.github.com
 
