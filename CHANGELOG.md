@@ -2,6 +2,76 @@
 
 <!-- version list -->
 
+## v1.9.0 (2026-09-11)
+
+### Bug Fixes
+
+- Clarify headless sink failure behavior
+  ([`2f32056`](https://github.com/n24q02m/better-drive/commit/2f320563fee895959bcf3aa79792112a61132362))
+
+- Harden Drive candidate provider flow ([#152](https://github.com/n24q02m/better-drive/pull/152),
+  [`3bfa968`](https://github.com/n24q02m/better-drive/commit/3bfa968cd6597935a32b83c9c3b69e2d9f6185e7))
+
+- Inventory the complete Drive corpus ([#152](https://github.com/n24q02m/better-drive/pull/152),
+  [`3bfa968`](https://github.com/n24q02m/better-drive/commit/3bfa968cd6597935a32b83c9c3b69e2d9f6185e7))
+
+- Isolate headless output from daemon log
+  ([`fe96faa`](https://github.com/n24q02m/better-drive/commit/fe96faad56b89f4afa79d2c0737aec8caf678782))
+
+- Keep status bounded and preserve live inventory safety
+  ([#175](https://github.com/n24q02m/better-drive/pull/175),
+  [`317e085`](https://github.com/n24q02m/better-drive/commit/317e085690c5e33f671b0b63e99f533d918c04f2))
+
+- Make Drive inventory scale-safe ([#152](https://github.com/n24q02m/better-drive/pull/152),
+  [`3bfa968`](https://github.com/n24q02m/better-drive/commit/3bfa968cd6597935a32b83c9c3b69e2d9f6185e7))
+
+- Make native schedulers job-specific ([#164](https://github.com/n24q02m/better-drive/pull/164),
+  [`fae8246`](https://github.com/n24q02m/better-drive/commit/fae8246bf8d28236b21c85b2e2821e03ad319592))
+
+- Persist headless JSON output to run log
+  ([`212e6c8`](https://github.com/n24q02m/better-drive/commit/212e6c8b459a26f75b5c51f3bff82815fd6301ef))
+
+- Pin better-semantic-release v1.6.0
+  ([`638106f`](https://github.com/n24q02m/better-drive/commit/638106fb838d11e5ae44f25018ad8e10a9caad50))
+
+- Preserve legacy Drive token descriptor ([#152](https://github.com/n24q02m/better-drive/pull/152),
+  [`3bfa968`](https://github.com/n24q02m/better-drive/commit/3bfa968cd6597935a32b83c9c3b69e2d9f6185e7))
+
+- Reject console binaries in Windows scheduler
+  ([#176](https://github.com/n24q02m/better-drive/pull/176),
+  [`45c6bd3`](https://github.com/n24q02m/better-drive/commit/45c6bd3f690e3a382b41c3c9099c8c088ca8bdf6))
+
+- Stage account list OAuth refresh
+  ([`31be4b4`](https://github.com/n24q02m/better-drive/commit/31be4b4b7a1e451493b95bf52bd3dc2d7bc0a41d))
+
+- **cleanup**: Avoid Git object size overflow
+  ([#155](https://github.com/n24q02m/better-drive/pull/155),
+  [`a130d4d`](https://github.com/n24q02m/better-drive/commit/a130d4d28d47433cfd8e2504a7ed316f19a8ab5b))
+
+- **cleanup**: Bind inventory root provenance
+  ([#163](https://github.com/n24q02m/better-drive/pull/163),
+  [`b8062ff`](https://github.com/n24q02m/better-drive/commit/b8062ff8e240b9e188d3ae98d327fef2f75e499e))
+
+- **cli**: Honor scheduler config path ([#156](https://github.com/n24q02m/better-drive/pull/156),
+  [`d921077`](https://github.com/n24q02m/better-drive/commit/d921077670ad0698d0711fea8a620f13861707b2))
+
+### Features
+
+- **cleanup**: Add protected Drive quarantine controls
+  ([#151](https://github.com/n24q02m/better-drive/pull/151),
+  [`fc5a9c2`](https://github.com/n24q02m/better-drive/commit/fc5a9c266d1cd472665927da51af31e3ca605172))
+
+- **cleanup**: Verify protected candidate controls
+  ([#155](https://github.com/n24q02m/better-drive/pull/155),
+  [`a130d4d`](https://github.com/n24q02m/better-drive/commit/a130d4d28d47433cfd8e2504a7ed316f19a8ab5b))
+
+### Testing
+
+- **cli**: Isolate cleanup config on macOS
+  ([#151](https://github.com/n24q02m/better-drive/pull/151),
+  [`fc5a9c2`](https://github.com/n24q02m/better-drive/commit/fc5a9c266d1cd472665927da51af31e3ca605172))
+
+
 ## v1.8.0 (2026-08-29)
 
 ### Bug Fixes
