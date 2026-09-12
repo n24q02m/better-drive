@@ -35,7 +35,7 @@ func pauseMenuState(aggregate AggregateState) (enabled bool, title, tooltip stri
 func trayStatusText(aggregate AggregateState) (title, tooltip string) {
 	title = "Status: " + aggregate.State.String()
 	if aggregate.NeedsResync {
-		return title + " (Run better-drive sync --resync)", "Run better-drive sync --resync to rebuild the bisync baseline"
+		return title, "Run better-drive sync --resync to rebuild the bisync baseline"
 	}
 	return title, "Current status: " + aggregate.State.String()
 }
