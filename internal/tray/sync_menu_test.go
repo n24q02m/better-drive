@@ -63,6 +63,14 @@ func TestTrayIconTooltipNeedsResyncIsActionable(t *testing.T) {
 		t.Fatalf("needs-resync icon tooltip = %q", got)
 	}
 }
+
+func TestTrayStatusTextNeedsResyncIsActionable(t *testing.T) {
+	title, _ := trayStatusText(AggregateState{State: syncloop.StateError, NeedsResync: true})
+	if !strings.Contains(title, "better-drive sync --resync") {
+		t.Fatalf("needs-resync status title = %q", title)
+	}
+}
+
 func TestValidateOpenFolderRequiresExistingDirectory(t *testing.T) {
 	dir := t.TempDir()
 	got, err := validateOpenFolder(dir)
