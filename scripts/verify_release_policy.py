@@ -76,8 +76,8 @@ def check(root: Path) -> list[str]:
     publish_block = workflow.split(publish_marker, 1)[-1]
     if "beta-publish" not in publish_block or "stable-publish" not in publish_block:
         findings.append("CD publish job must select beta-publish/stable-publish from the resolved channel")
-    if "n24q02m/better-semantic-release@69319fae1169b6ee7b89565c7b54b55d1531d42e" not in publish_block:
-        findings.append("CD publish must use the pinned better-semantic-release action (v1.6.0)")
+    if "n24q02m/better-semantic-release@6e6884898bfe1ac34a0bc64ed62f54a21562df23" not in publish_block:
+        findings.append("CD publish must use the pinned better-semantic-release action (v1.6.1)")
     if "prerelease: ${{ env.RELEASE_TYPE == 'beta' }}" not in publish_block:
         findings.append("CD publish must wire the beta channel into the pinned action (prerelease + prerelease_token)")
     if "actions/create-github-app-token" not in publish_block:

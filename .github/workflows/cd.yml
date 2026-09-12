@@ -1,4 +1,4 @@
-name: CD
+name: Release
 
 # CD is dispatch-only and fail-closed. Beta dispatches prepare exact
 # credential-free candidate artifacts via .goreleaser.prepare.yaml; stable
@@ -79,7 +79,7 @@ jobs:
 
       - name: Compute and push semantic release
         id: release
-        uses: n24q02m/better-semantic-release@69319fae1169b6ee7b89565c7b54b55d1531d42e # v1.6.0
+        uses: n24q02m/better-semantic-release@6e6884898bfe1ac34a0bc64ed62f54a21562df23 # v1.6.1
         with:
           github_token: ${{ steps.app-token.outputs.token }}
           config_file: semantic-release.toml
