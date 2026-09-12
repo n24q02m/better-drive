@@ -19,6 +19,7 @@ func EnsurePrivateDir(path string) error {
 	if err := verifyPrivateUnixInfo(info, true); err != nil {
 		return err
 	}
+	/* #nosec G302 -- explicitly applying 0700 to directory (which is > 0600) to ensure directory traversal permissions */
 	if err := os.Chmod(path, 0o700); err != nil {
 		return err
 	}

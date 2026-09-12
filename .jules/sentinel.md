@@ -36,3 +36,8 @@
 **Vulnerability:** `internal/cleanup/journal.go` used `os.Open` and `os.OpenFile` which could be vulnerable to path traversal via symlinks or crafted path strings.
 **Learning:** `os.OpenRoot` scopes the path correctly to its expected base directory.
 **Prevention:** Use Go 1.24+ `os.OpenRoot` when dealing with potentially user-controlled file paths, even for journals or local configuration paths.
+
+## 2024-09-12 - G302 False Positive on Directory Permissions
+**Vulnerability:** gosec G302 (Expect file permissions to be 0600 or less) was triggered on directory `os.Chmod` calls in `internal/protectedfs/protected_unix.go` and `internal/engine/runtime.go`.
+**Learning:** `gosec` does not reliably distinguish between files and directories for permission checks. Directories require executable bits (0700) for traversal and listing, which exceeds the 0600 file threshold.
+**Prevention:** Use `/* #nosec G302 -- [reason] */` to explicitly document and suppress directory permission checks when 0700 is required for traversal.
