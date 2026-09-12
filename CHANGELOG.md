@@ -2,6 +2,34 @@
 
 <!-- version list -->
 
+## v1.9.1 (2026-09-12)
+
+### Bug Fixes
+
+- Align release-policy pin assertion with BSR action v1.6.1
+  ([#190](https://github.com/n24q02m/better-drive/pull/190),
+  [`77f0196`](https://github.com/n24q02m/better-drive/commit/77f019642f0e32dfcce1800bdd6aab06e6633c6d))
+
+- Release ladder label alignment + BSR action v1.6.1
+  ([#190](https://github.com/n24q02m/better-drive/pull/190),
+  [`77f0196`](https://github.com/n24q02m/better-drive/commit/77f019642f0e32dfcce1800bdd6aab06e6633c6d))
+
+### Continuous Integration
+
+- Assert unified merge=release ladder in release policy guard
+  ([`8504eee`](https://github.com/n24q02m/better-drive/commit/8504eee4b0504efc0a5957c3d020c088ffce13b0))
+
+- Ladder no-op when no release due and tag already published
+  ([`8b3cf6c`](https://github.com/n24q02m/better-drive/commit/8b3cf6cccda8e09757e1fbbbb206ed00f0e1bc00))
+
+- Release ladder label alignment + BSR action v1.6.1
+  ([#190](https://github.com/n24q02m/better-drive/pull/190),
+  [`77f0196`](https://github.com/n24q02m/better-drive/commit/77f019642f0e32dfcce1800bdd6aab06e6633c6d))
+
+- Wire unified merge=release ladder (push staging=beta, main=stable)
+  ([`29144ec`](https://github.com/n24q02m/better-drive/commit/29144ec5f4b55e6ea031ce5601e1ff030cf8bae9))
+
+
 ## v1.9.0 (2026-09-11)
 
 ### Bug Fixes
