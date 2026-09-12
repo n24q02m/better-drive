@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Verify the unified merge=release ladder: push staging = beta prerelease, push main = stable.
+"""Verify the single-main merge=release ladder: push main = stable; beta via manual dispatch.
 
-Unification contract (2026-09-11): merge = release. The staging branch auto-publishes
-beta prereleases with no reviewer gate; a squash-merge into main is the only stable
-user gate and auto-publishes through the protected stable-publish environment.
+Single-main contract (2026-09-12): the staging branch is retired. A push into main is the
+only release lane and auto-publishes stable through the protected stable-publish
+environment; beta remains available via workflow_dispatch with the release_type input.
 Candidate-bundle ceremony (prepare lane + candidate artifacts) is retired."""
 from __future__ import annotations
 
@@ -46,18 +46,18 @@ def check(root: Path) -> list[str]:
     if "github.ref == 'refs/heads/main'" not in scorecard_block:
         findings.append("Scorecard must run only on the default main ref")
 
-    # 1. Ladder triggers: push staging = beta, push main = stable; tags never publish.
+    # 1. Ladder triggers: push main = stable, beta via dispatch; tags never publish.
     on_block = workflow.split("permissions:", 1)[0]
     if "  push:" not in on_block:
         findings.append("CD must trigger on push (merge = release)")
-    if "    - staging" not in on_block or "    - main" not in on_block:
-        findings.append("CD push trigger must cover both staging and main")
+    if "    - main" not in on_block or "    - staging" in on_block:
+        findings.append("CD push trigger must cover main only (single-main lane)")
     if "  tags:" in on_block:
         findings.append("CD must not publish from a tag push")
     if "  workflow_dispatch:" not in on_block:
         findings.append("CD must keep workflow_dispatch as the escape hatch")
     if "RELEASE_TYPE:" not in workflow:
-        findings.append("CD must resolve RELEASE_TYPE from the push ref (staging=beta, main=stable)")
+        findings.append("CD must resolve RELEASE_TYPE (push = stable, dispatch = release_type input)")
 
     # 2. Concurrency constraints
     if "group: cd-better-drive" not in workflow:
@@ -103,7 +103,7 @@ def main() -> int:
         for finding in findings:
             print(f"FAIL: {finding}")
         return 1
-    print("PASS: unified merge=release ladder (staging push = beta, main push = stable, no candidate ceremony)")
+    print("PASS: single-main merge=release ladder (main push = stable, beta via dispatch, no candidate ceremony)")
     return 0
 
 
