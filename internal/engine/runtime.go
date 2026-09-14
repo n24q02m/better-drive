@@ -155,6 +155,7 @@ func stageTransferConfig(runtime config.RcloneRuntime) (string, string, error) {
 		}
 		return "", "", stageErr
 	}
+	/* #nosec G302 -- explicitly applying 0700 to temporary config directory (which is > 0600) to ensure directory traversal permissions */
 	if err := os.Chmod(workingDir, 0o700); err != nil {
 		return cleanup(fmt.Errorf("protect private rclone config directory: %w", err))
 	}
